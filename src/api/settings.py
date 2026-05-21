@@ -955,19 +955,47 @@ def list_networks():
 @api.route('/settings/retention', methods=['GET'])
 @log_request
 def get_retention_settings():
-    """Get retention configuration."""
+    """Get retention configuration.
+
+    `originalRetentionDays` defaults to whatever `retentionDays` is when the
+    operator has never set it explicitly; that keeps the two values matched
+    by default and lets `retention_days` changes propagate without forcing
+    the operator to touch both fields.
+    """
     db = get_database()
     retention_days = int(db.get_setting('retention_days') or '30')
+    original_raw = db.get_setting('original_retention_days')
+    original_retention_days = (
+        int(original_raw) if original_raw else retention_days
+    )
     return json_response({
         'retentionDays': retention_days,
+        'originalRetentionDays': original_retention_days,
         'enabled': retention_days > 0,
     })
+
+
+def _clamp_original_retention(retention_days: int, original: int) -> int:
+    """Clamp `original` so an original cannot outlive its processed peer.
+
+    When retention is disabled (`retention_days == 0`), there is nothing
+    to clamp to; the operator's stored original value is kept as-is.
+    Otherwise the original is capped at `retention_days`.
+    """
+    if retention_days <= 0:
+        return original
+    return min(original, retention_days)
 
 
 @api.route('/settings/retention', methods=['PUT'])
 @log_request
 def update_retention_settings():
-    """Update retention configuration."""
+    """Update retention configuration.
+
+    Server-side clamp: `originalRetentionDays` is capped to `retentionDays`
+    because an original outliving its processed file would be orphaned the
+    moment the next cleanup pass resets the episode.
+    """
     data = request.get_json()
     if not data or 'retentionDays' not in data:
         return error_response('retentionDays is required', 400)
@@ -980,8 +1008,24 @@ def update_retention_settings():
     db.set_setting('retention_days', str(days), is_default=False)
     logger.info(f"Updated retention_days to {days}")
 
+    # original_retention_days is optional; absent => match retention_days.
+    original_days = days  # response default
+    if 'originalRetentionDays' in data:
+        original = data['originalRetentionDays']
+        if not isinstance(original, int) or original < 1 or original > 3650:
+            return error_response(
+                'originalRetentionDays must be an integer between 1 and 3650', 400
+            )
+        # Clamp; never let original outlive processed.
+        original_days = _clamp_original_retention(days, original)
+        db.set_setting(
+            'original_retention_days', str(original_days), is_default=False
+        )
+        logger.info(f"Updated original_retention_days to {original_days}")
+
     return json_response({
         'retentionDays': days,
+        'originalRetentionDays': original_days,
         'enabled': days > 0,
     })
 
