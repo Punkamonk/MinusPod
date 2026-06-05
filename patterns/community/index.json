@@ -1,6 +1,6 @@
 {
   "manifest_version": 1,
-  "published_at": "2026-05-31T23:26:30Z",
+  "published_at": "2026-06-05T21:58:22Z",
   "vocabulary_version": 1,
   "patterns": [
     {
@@ -742,7 +742,7 @@
     },
     {
       "community_id": "54864633-2b13-4a78-9a5d-34a1619bd88b",
-      "version": 1,
+      "version": 2,
       "data": {
         "scope": "global",
         "text_template": "Support for today, Explained comes from BetterHelp. May is Mental Health Awareness Month. That's what May stands for. A reminder that whatever you're going through, you don't have to go through it alone. There's a therapist out there who's equipped to help you through it. You can give therapy a try. BetterHelp makes it simple to connect with a licensed therapist online by doing the initial matching work for you so you can focus on your therapy goals. You don't have to be on this journey alone. Find support and have someone with you in therapy. Listeners can get 10% off their first month at BetterHelp.com. slash explained. That's better, H-E-L-P dot com slash explained.",
@@ -757,6 +757,7 @@
         "outro_variants": [
           "You don't have to be on this journey alone. Find support and have someone with you in therapy.",
           "Listeners can get 10% off their first month at BetterHelp.com. slash explained. That's better, H-E-L-P dot com slash explained.",
+          "You can sign up and get 10% off at BetterHelp.com slash America Actually. That's BetterHelp.com slash America Actually.",
           "sign up and get 10% off at betterhelp.com slash behind that's better help.com slash behind.",
           "Sign up now and get 10% off at BetterHelp.com. That's BetterHelp.com."
         ],
@@ -774,7 +775,7 @@
         ],
         "source_language": null,
         "community_id": "54864633-2b13-4a78-9a5d-34a1619bd88b",
-        "version": 1,
+        "version": 2,
         "submitted_at": "2026-05-27T02:31:11.364726+00:00",
         "submitted_app_version": "unknown",
         "sponsor_match": "exact"
@@ -1839,6 +1840,421 @@
         "version": 1,
         "submitted_at": "2026-05-31T17:50:40Z",
         "submitted_app_version": "unknown",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "ca820a82-46fd-4735-8cdf-695941b8a9a6",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "Hey, everybody. Here's a fact for you. In the United States, there is a break-in every 26 seconds, and that means that somewhere right Now, an intruder is getting closer. And the problem with most security systems is that they only alert you after the break-in has started. And that's too late. Well, that's what makes SimpliSafe different. They use alerts. SimpliSafe's U.S.-based live agents, they identify threats on your property and help deter them before they actually break in. So the intruder never gets into your house. The crime has stopped before it even starts. That's right. And another great thing about SimpliSafe is they have no long-term contracts. They give you peace of mind and great value with their monitoring, Deterrence Plans because they just start at about a dollar a day Yeah SimpliSafe sent us a setup years back and I still use mine every day Yeah And apparently setup you can do it by yourself in under 30 minutes So it a really good value and it doesn take long So if you want to experience the SimpliSafe peace of mind you can take advantage of the SimpliSafe discount offered to Stuff You Should Know listeners Right now, you can get 50% off your new system by visiting simplisafe.com slash stuff. That's half off at simplisafe.com slash stuff. There's no safe like SimpliSafe.",
+        "intro_variants": [
+          "Hey, everybody. Here's a fact for you. In the United States, there is a break-in every 26 seconds, and that means that somewhere right Now, an intruder is getting closer."
+        ],
+        "outro_variants": [
+          "Right now, you can get 50% off your new system by visiting simplisafe.com slash stuff. That's half off at simplisafe.com slash stuff. There's no safe like SimpliSafe."
+        ],
+        "avg_duration": 77.0,
+        "sponsor": "SimpliSafe",
+        "sponsor_aliases": [
+          "Simpli Safe"
+        ],
+        "sponsor_tags": [
+          "home_security",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "ca820a82-46fd-4735-8cdf-695941b8a9a6",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.708522+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "1c1d3288-3bd2-46d8-817b-083f53fd08e8",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "This summer, don't squeeze in, spread out. Find homes big enough for your whole guest list on Vrbo. From family reunions to trips with friends Vrbo has spacious summer stays for every group size and budget That vacation rentals done right Start exploring on Vrbo and book your next day now",
+        "intro_variants": [
+          "This summer, don't squeeze in, spread out. Find homes big enough for your whole guest list on Vrbo."
+        ],
+        "outro_variants": [
+          "Start exploring on Vrbo and book your next day now"
+        ],
+        "avg_duration": 21.0,
+        "sponsor": "Vrbo",
+        "sponsor_aliases": [],
+        "sponsor_tags": [
+          "travel",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "1c1d3288-3bd2-46d8-817b-083f53fd08e8",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.714790+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "92d7c018-b9ce-4ac8-9dd0-34c9c7e9e1fd",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "Service opens doors, and at American Military University, it can open doors for the whole family. If you have a loved one who served in the military, you may qualify for reduced tuition. AMU offers flexible online programs designed to fit your schedule, so you can keep moving forward wherever life takes you. Learn more at amu.apus.edu slash military. Open doors to the future for you and your family, with the help of American Military University.",
+        "intro_variants": [
+          "Service opens doors, and at American Military University, it can open doors for the whole family."
+        ],
+        "outro_variants": [
+          "Open doors to the future for you and your family, with the help of American Military University."
+        ],
+        "avg_duration": 31.0,
+        "sponsor": "American Military University",
+        "sponsor_aliases": [],
+        "sponsor_tags": [
+          "education",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "92d7c018-b9ce-4ac8-9dd0-34c9c7e9e1fd",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.720892+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "4790f455-054e-4e42-a2d2-fda8264446dc",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "You know, it's hard to believe that the first phone call ever happened over 150 years ago. Just think about that, Chuck. Yeah, it was a long time ago. And, you know, I'm Gen X, so I grew up talking on the phone with my friends in high school and stuff. and it was a really fond memory. And you know, over all these years and all these phone calls, AT&T has been there, connecting people in meaningful ways. And this is more than a story of technological innovation, it's a story of human connection. That's right. Over that 150 years, there's been a lot of connection with people, whether it was me in high school or family connecting with one another long distance or those long distance relationships. And AT&T has been there for it all. Connecting changes everything. AT&T.",
+        "intro_variants": [
+          "You know, it's hard to believe that the first phone call ever happened over 150 years ago."
+        ],
+        "outro_variants": [
+          "Connecting changes everything. AT&T."
+        ],
+        "avg_duration": 39.0,
+        "sponsor": "AT&T",
+        "sponsor_aliases": [],
+        "sponsor_tags": [
+          "telecom",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "4790f455-054e-4e42-a2d2-fda8264446dc",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.729657+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "7ca2fe09-0b2d-45fb-be85-dc53c2ef4bc4",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "Geico presents a 30-second podcast between your podcast. Today's story is shared by one of our listeners. It's called Betrayed by Bill. It was in that moment I caught who was staring back at me in betrayal, or more like what? My insurance bill? With trembling hands I grabbed my phone and switched to Geico, saving about $900 in the process and never to be betrayed again. Now that was bloody riveting. It feels good when the story ends with savings. It feels good to Geico.",
+        "intro_variants": [
+          "Geico presents a 30-second podcast between your podcast."
+        ],
+        "outro_variants": [
+          "It feels good when the story ends with savings. It feels good to Geico."
+        ],
+        "avg_duration": 32.0,
+        "sponsor": "Geico",
+        "sponsor_aliases": [],
+        "sponsor_tags": [
+          "insurance",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "7ca2fe09-0b2d-45fb-be85-dc53c2ef4bc4",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.749764+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "72616542-5fc8-40ad-b885-4401603693c7",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "With the all new Audi Q3. The answer is always yes. Yes to adventure. Yes to escape. Yes to right now. The all new Audi Q3 made for the yes life.",
+        "intro_variants": [
+          "With the all new Audi Q3. The answer is always yes.",
+          "With the all new Audi Q3, The answer is always yes."
+        ],
+        "outro_variants": [
+          "The all new Audi Q3 made for the yes life."
+        ],
+        "avg_duration": 25.0,
+        "sponsor": "Audi",
+        "sponsor_aliases": [],
+        "sponsor_tags": [
+          "automotive",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "72616542-5fc8-40ad-b885-4401603693c7",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.766995+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "6b37486a-04c9-436c-abb7-3b5a3005f603",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "In business, there's no room for guesswork. Every shipment matters. Every deadline counts. When you're trying to keep operations running smoothly, the last thing you need is uncertainty. That's why reliability is at the core of USPS Ground Advantage. Each package moves through a secure nationwide network tracked from dock to door with affordable upfront pricing and delivery you can depend on. Because knowing your logistics are handled lets you focus on everything else. Visit usps.com slash ground advantage to start shipping with confidence. USPS Ground Advantage.",
+        "intro_variants": [
+          "In business, there's no room for guesswork. Every shipment matters."
+        ],
+        "outro_variants": [
+          "Visit usps.com slash ground advantage to start shipping with confidence. USPS Ground Advantage."
+        ],
+        "avg_duration": 18.0,
+        "sponsor": "USPS",
+        "sponsor_aliases": [
+          "usps.com"
+        ],
+        "sponsor_tags": [
+          "business",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "6b37486a-04c9-436c-abb7-3b5a3005f603",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.775365+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "e68f6b2f-cfee-4f63-816f-b417d638bfdf",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "Support for the show comes from Quo. That kind of rhymes. If your team's communication is messy, missed messages, dropped threads, slow replies, customers can feel it too. Think about the customers. It's one of the easiest ways to lose momentum and that's why today's episode is brought to you by Quo. And in case you wondering it spelled Q Quo is the business communication system built so you never miss a call Quo isn just a phone system though guys it a smart one Their AI can automatically log calls generate summaries and flag next steps so nothing falls through the cracks And it can even qualify leads or respond after hours so your business stays on even when you are off Money is on the line my friends Always say hello with Quo Back to the rhymes You can try Quo for free Plus get 20% off your first six months when you go to Quo.com slash Explained. That's Quo.com slash Explained.",
+        "intro_variants": [
+          "Support for the show comes from Quo."
+        ],
+        "outro_variants": [
+          "You can try Quo for free Plus get 20% off your first six months when you go to Quo.com slash Explained. That's Quo.com slash Explained."
+        ],
+        "avg_duration": null,
+        "sponsor": "Quo.com",
+        "sponsor_aliases": [],
+        "sponsor_tags": [
+          "business",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "e68f6b2f-cfee-4f63-816f-b417d638bfdf",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.775365+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "59ff6bf7-7e2d-4f13-b870-cba9e2de92f8",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "Support for the show today comes from WhatNot. And they provided me a pronunciation key that says, Oh, WhatNot, that's how it's pronounced, WhatNot, but it's one word, and WhatNot. If you sell products Podcast. I'm going to show you how difficult it can be to get noticed, but imagine if you sell products online or in a store. You could spend hours sourcing inventory, setting up your storefront, and creating listings, and then you're left waiting, hoping the right customer eventually comes across what you're selling. WhatNot wants to change that model. WhatNot is the largest dedicated live shopping platform, whether it's beauty, collectibles, electronics, luxury, fashion, even cookies, you guys. And our colleague Claire White has tried Whatnot. I had a really great time going through the variety of auctions that they had on Whatnot. It's not just clothes. It's not just jewelry. It's not just tech even, but vintage China, antique pieces, places around the world where folks are selling knickknacks from their vintage stores, from their archive, whatever it is. There's a ton of variety on Whatnot, just beyond what you would think for an auction house. Search Whatnot, W-H-A-T-N-O-T, one word, in the App Store, download, and you can start selling right away.",
+        "intro_variants": [
+          "Support for the show today comes from WhatNot."
+        ],
+        "outro_variants": [
+          "Search Whatnot, W-H-A-T-N-O-T, one word, in the App Store, download, and you can start selling right away."
+        ],
+        "avg_duration": 90.0,
+        "sponsor": "WhatNot",
+        "sponsor_aliases": [
+          "What Not"
+        ],
+        "sponsor_tags": [
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "59ff6bf7-7e2d-4f13-b870-cba9e2de92f8",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.798019+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "526a2c10-0720-4c77-b278-21d157839ba8",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "Wouldn't it be great to never buy gas again? EVs are as easy to charge as your phone and they are a perfect addition to your everyday life. Most people are only driving about 40 miles a day and most EVs can handle 200 to 400 miles of range on a charge. And there are hundreds of EV models available today, so there's something perfect for every lifestyle and budget. I drive an EV. I've had it for a couple of years. It's my favorite car I've ever owned. It is so fun to drive. The pickup is incredible. It's super agile and it is easy to maintain. The way forward is electric. Learn more at electricforall.org.",
+        "intro_variants": [
+          "Wouldn't it be great to never buy gas again?"
+        ],
+        "outro_variants": [
+          "The way forward is electric. Learn more at electricforall.org."
+        ],
+        "avg_duration": 83.65,
+        "sponsor": "electricforall.org",
+        "sponsor_aliases": [],
+        "sponsor_tags": [
+          "automotive",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "526a2c10-0720-4c77-b278-21d157839ba8",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.812876+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "675aafc9-4c76-4a96-b1b8-883c7ee993ad",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "Cashflow Crunch? OnDeck's small business line of credit gives your business immediate access to funds up to $200,000 right when you need it. Cover seasonal dips, manage payroll, restock inventory, or tackle unexpected expenses without missing a beat. With flexible draws, transparent pricing, and control over repayment, get funded quickly and confidently. Apply today at Ondec.com. Funds could be available as soon as tomorrow. Depending on certain loan attributes, your business loan may be issued by Ondec or Celtic Bank. Ondeck does not lend in North Dakota. All loans and amounts subject to lender approval.",
+        "intro_variants": [
+          "Cashflow Crunch? OnDeck's small business line of credit gives your business immediate access to funds up to $200,000 right when you need it."
+        ],
+        "outro_variants": [
+          "Ondeck does not lend in North Dakota. All loans and amounts subject to lender approval."
+        ],
+        "avg_duration": 56.0,
+        "sponsor": "OnDeck",
+        "sponsor_aliases": [],
+        "sponsor_tags": [
+          "finance",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "675aafc9-4c76-4a96-b1b8-883c7ee993ad",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.821131+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "56bbe39c-a8c9-469a-976e-0ced39e402c6",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "Support for Today Explained comes from CNN. Cool. Cable News Network, what's up? Do you want to live forever? What? Yes. Maybe? I haven't thought about it that much. Influential journalist Kara Swisher, I know her, is taking a hard look at the longevity industry to separate the influencer hype from evidence-backed science in her new CNN original series. Cool, Kara. Kara's talking to Silicon Valley power players and trying out the latest in anti-aging technology to see what works and what's a waste. I bet she is. Kara Swisher wants to live forever. New episodes streaming Sundays with a CNN subscription. Go to CNN.com slash subscribe to start watching.",
+        "intro_variants": [
+          "Support for Today Explained comes from CNN."
+        ],
+        "outro_variants": [
+          "New episodes streaming Sundays with a CNN subscription. Go to CNN.com slash subscribe to start watching."
+        ],
+        "avg_duration": 66.1,
+        "sponsor": "CNN",
+        "sponsor_aliases": [
+          "Cable News Network"
+        ],
+        "sponsor_tags": [
+          "news",
+          "tv_film",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "56bbe39c-a8c9-469a-976e-0ced39e402c6",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.855400+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "6c6c9635-07c6-44c8-b7e3-a26770f531a7",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "On eBay, every find has a story. Like if you're looking for a vintage band tee. Not just a tee. THE band tee. You wore it everywhere, until your ex-boyfriend stole it. Now you're on eBay, and there it is. Same tee, from the same tour. The things you love have a way of finding their way back to you, especially on eBay. Where else can you find that mint trading card you search for everywhere that's out of print? Or your first car, the one you wish you'd never sold? It has to be eBay. Shop eBay for millions of finds, each with a story. eBay, Things People Love.",
+        "intro_variants": [
+          "On eBay, every find has a story."
+        ],
+        "outro_variants": [
+          "Shop eBay for millions of finds, each with a story. eBay, Things People Love."
+        ],
+        "avg_duration": null,
+        "sponsor": "eBay",
+        "sponsor_aliases": [
+          "universal"
+        ],
+        "sponsor_tags": [],
+        "source_language": null,
+        "community_id": "6c6c9635-07c6-44c8-b7e3-a26770f531a7",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.883229+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "ee5acf8b-8094-43ae-b4f8-44ac9d3e7439",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "Whether you're calling the wise women in your life, video calling your girlfriends across the country, or checking in on someone who always knows how to make you smile, staying connected matters. Those small conversations, shared laughs, and quick hellos are what keep relationships strong, even when life gets busy. Some of the most life-giving conversations start with just a phone call. That's why AT&T guarantees a network you can rely on so you can focus on the moments and people that matter most. That's the AT&T guarantee. AT&T connecting changes everything. Terms and conditions apply. Just visit att.com slash guarantee for details.",
+        "intro_variants": [
+          "Whether you're calling the wise women in your life, video calling your girlfriends across the country, or checking in on someone who always knows how to make you smile, staying connected matters."
+        ],
+        "outro_variants": [
+          "AT&T connecting changes everything. Terms and conditions apply. Just visit att.com slash guarantee for details"
+        ],
+        "avg_duration": null,
+        "sponsor": "AT&T",
+        "sponsor_aliases": [],
+        "sponsor_tags": [
+          "telecom",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "ee5acf8b-8094-43ae-b4f8-44ac9d3e7439",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.890967+00:00",
+        "submitted_app_version": "2.6.2",
+        "sponsor_match": "exact"
+      }
+    },
+    {
+      "community_id": "fdec9424-e3af-4a2c-85ce-014504d61f1a",
+      "version": 1,
+      "data": {
+        "scope": "global",
+        "text_template": "At Arizona State University, we're bringing world-class education from our globally acclaimed faculty to you. Earn your degree from the nation's most innovative university online. That's a degree better. Learn more at asuonline.asu.edu",
+        "intro_variants": [
+          "At Arizona State University, we're bringing world-class education from our globally acclaimed faculty to you."
+        ],
+        "outro_variants": [
+          "That's a degree better. Learn more at asuonline.asu.edu"
+        ],
+        "avg_duration": null,
+        "sponsor": "Arizona State University",
+        "sponsor_aliases": [
+          "asu.edu"
+        ],
+        "sponsor_tags": [
+          "education",
+          "universal"
+        ],
+        "source_language": null,
+        "community_id": "fdec9424-e3af-4a2c-85ce-014504d61f1a",
+        "version": 1,
+        "submitted_at": "2026-06-05T00:54:04.895915+00:00",
+        "submitted_app_version": "2.6.2",
         "sponsor_match": "exact"
       }
     }
