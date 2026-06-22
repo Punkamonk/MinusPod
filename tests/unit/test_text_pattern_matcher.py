@@ -465,3 +465,82 @@ class TestMergeSponsorGating:
                        sponsor='hims', match_type='intro')
         result = matcher._merge_matches([m1, m2])
         assert len(result) == 1
+
+
+class TestMergeDetectionResults:
+    """Cross-stage merge must keep a marker's sponsor and reason consistent --
+    both from the SAME member -- so it never shows one ad's sponsor with another
+    ad's description (the Flagrant mislabels: a Nordstrom pattern that matched a
+    host tour-promo, a David Protein read folded into a ZipRecruiter marker)."""
+
+    def _det(self):
+        return AdDetector.__new__(AdDetector)
+
+    def test_false_attribution_label_follows_content_reason(self):
+        # text_pattern wrongly tagged a host tour-promo as Nordstrom (short,
+        # sponsor-derived reason); Claude read the content (longer reason, no
+        # external sponsor). The marker must take sponsor AND reason from the
+        # content-aware member, not Nordstrom + tour-promo.
+        det = self._det()
+        ads = [
+            {'start': 2074.0, 'end': 2130.0, 'detection_stage': 'text_pattern',
+             'sponsor': 'Nordstrom', 'reason': 'Nordstrom (pattern #380)', 'confidence': 1.0},
+            {'start': 2075.0, 'end': 2192.0, 'detection_stage': 'claude',
+             'sponsor': None,
+             'reason': 'Hosts promote their upcoming stand-up shows in Pasadena, Brea, and Halifax.',
+             'confidence': 0.9},
+        ]
+        out = det._merge_detection_results(ads)
+        assert len(out) == 1
+        assert out[0]['sponsor'] is None
+        assert 'stand-up shows' in out[0]['reason']
+        assert 'Nordstrom' not in (out[0]['reason'] or '')
+
+    def test_distinct_sponsor_fold_keeps_one_consistent_label(self):
+        # Two different-sponsor reads merged into one span must not show one
+        # sponsor with the other's reason; the surviving label is internally
+        # consistent (sponsor matches its own reason).
+        det = self._det()
+        ads = [
+            {'start': 4850.0, 'end': 4908.0, 'detection_stage': 'claude',
+             'sponsor': 'David Protein', 'reason': 'David Protein', 'confidence': 0.9},
+            {'start': 4908.0, 'end': 5092.0, 'detection_stage': 'claude',
+             'sponsor': 'ZipRecruiter',
+             'reason': 'ZipRecruiter: according to CNBC nearly half of hiring managers value enthusiasm.',
+             'confidence': 0.9},
+        ]
+        out = det._merge_detection_results(ads)
+        assert len(out) == 1
+        # Longer reason (ZipRecruiter) wins both fields; no cross-member mix.
+        assert out[0]['sponsor'] == 'ZipRecruiter'
+        assert 'ZipRecruiter' in out[0]['reason']
+
+    def test_same_ad_two_stages_takes_richer_description(self):
+        det = self._det()
+        ads = [
+            {'start': 100.0, 'end': 160.0, 'detection_stage': 'text_pattern',
+             'sponsor': 'Hims', 'reason': 'Hims (pattern #1)', 'confidence': 0.8, 'pattern_id': 1},
+            {'start': 160.0, 'end': 220.0, 'detection_stage': 'claude',
+             'sponsor': 'Hims', 'reason': 'Hims hair-loss read with promo code and detail.', 'confidence': 0.95},
+        ]
+        out = det._merge_detection_results(ads)
+        assert len(out) == 1
+        assert out[0]['sponsor'] == 'Hims'
+        assert out[0]['end'] == 220.0
+
+    def test_trust_stage_decoupled_from_label(self):
+        # detection_stage/pattern_id follow stage priority (text_pattern over
+        # claude) for cutting trust, while the LABEL follows the richer reason.
+        det = self._det()
+        ads = [
+            {'start': 100.0, 'end': 160.0, 'detection_stage': 'text_pattern',
+             'sponsor': 'Hims', 'reason': 'Hims (pattern #1)', 'confidence': 0.8, 'pattern_id': 7},
+            {'start': 150.0, 'end': 210.0, 'detection_stage': 'claude',
+             'sponsor': 'Hims', 'reason': 'Hims: a longer content-derived description here.', 'confidence': 0.9},
+        ]
+        out = det._merge_detection_results(ads)
+        assert len(out) == 1
+        assert out[0]['detection_stage'] == 'text_pattern'
+        assert out[0]['pattern_id'] == 7
+        assert 'content-derived' in out[0]['reason']
+        assert out[0]['sponsor'] == 'Hims'

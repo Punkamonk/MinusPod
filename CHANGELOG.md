@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.2] - 2026-06-22
+
+### Fixed
+
+- Ad markers no longer show one sponsor's name with a different ad's description. When two detection stages overlapped, the cross-stage merge took the sponsor from one and the reason from the other, so a text-pattern match that fired on the wrong content (a Nordstrom pattern landing on a host tour-promo) or two back-to-back reads for different sponsors (a David Protein read next to a ZipRecruiter read) produced a self-contradictory marker. The merge now takes the sponsor and reason from the same member, preferring the content-aware (more descriptive) one, so the label always matches the description.
+- The play button on cue matches works again. When the original audio's metadata had not loaded yet, clicking did nothing: the handler waited for a load it never triggered, and even when it did fire it called play() outside the click's user gesture, which the browser blocks. It now starts playback synchronously on the click (keeping the gesture and triggering the load) and seeks to the match once metadata is ready. The same fix is applied to the cue-candidate preview button.
+
+### Dependencies
+
+- Bumped anthropic (0.109.2 -> 0.111.0), openai (2.41.0 -> 2.43.0), huggingface-hub (1.19.0 -> 1.20.1), pytest (9.1.0 -> 9.1.1); frontend react-router-dom (7.17.0 -> 7.18.0), lucide-react (1.18.0 -> 1.21.0), eslint (10.4.0 -> 10.5.0), typescript-eslint and @typescript-eslint/eslint-plugin (8.61.1); and actions/checkout (v6.0.3 -> v7.0.0).
+
 ## [2.18.1] - 2026-06-22
 
 ### Fixed
