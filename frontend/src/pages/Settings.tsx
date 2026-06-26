@@ -30,6 +30,7 @@ import StageTunablesSection from './settings/StageTunablesSection';
 import TranscriptionSection from './settings/TranscriptionSection';
 import AudioSection from './settings/AudioSection';
 import CoverArtSection from './settings/CoverArtSection';
+import { refreshAllArtwork } from '../api/feeds';
 import AdDetectionSection from './settings/AdDetectionSection';
 import GlobalDefaultsSection from './settings/GlobalDefaultsSection';
 import Podcasting20Section from './settings/Podcasting20Section';
@@ -578,6 +579,10 @@ function Settings() {
     },
   });
 
+  const refreshArtworkMutation = useMutation({
+    mutationFn: refreshAllArtwork,
+  });
+
   const resetMutation = useMutation({
     mutationFn: resetSettings,
     onSuccess: () => {
@@ -854,6 +859,8 @@ function Settings() {
       <CoverArtSection
         artworkWatermarkEnabled={artworkWatermarkEnabled}
         onArtworkWatermarkEnabledChange={setArtworkWatermarkEnabled}
+        onRefreshArtwork={() => refreshArtworkMutation.mutate()}
+        refreshArtworkPending={refreshArtworkMutation.isPending}
       />
 
       <SettingsGroupHeader title="Data & Security" />

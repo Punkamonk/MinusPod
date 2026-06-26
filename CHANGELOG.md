@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.1] - 2026-06-26
+
+### Added
+
+- A "Refresh all artwork" button under Settings -> Output -> Cover Art, plus a `POST /feeds/refresh-artwork` endpoint. It re-pulls each feed's cover and rebuilds the served feeds so a change to the cover-art badge setting shows up, without re-discovering or queuing episodes -- so it never starts processing. Your podcast app still re-fetches the feed on its own schedule.
+
+### Changed
+
+- Settings and episode pages now hide a card's description while the card is collapsed, so collapsed sections show just their title.
+
 ## [2.24.0] - 2026-06-26
 
 ### Added

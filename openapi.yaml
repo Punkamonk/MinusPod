@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.24.0
+  version: 2.24.1
   contact:
     name: MinusPod
   license:
@@ -595,6 +595,31 @@ paths:
       responses:
         '200':
           description: All feeds refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  feedCount:
+                    type: integer
+
+  /feeds/refresh-artwork:
+    post:
+      tags:
+        - Feeds
+      summary: Refresh cover art for all feeds
+      description: |
+        Re-pull each feed's cover art and rebuild its served RSS so the
+        cover-art badge setting (artworkWatermarkEnabled, issue #420) takes
+        effect. Unlike a feed refresh, this does not re-discover or queue
+        episodes, so it never triggers processing. Podcast apps still re-fetch
+        the feed on their own schedule before the change is visible.
+      operationId: refreshAllArtwork
+      responses:
+        '200':
+          description: Artwork refreshed
           content:
             application/json:
               schema:
