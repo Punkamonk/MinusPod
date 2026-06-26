@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.23.1] - 2026-06-26
+
+### Added
+
+- Settings search now highlights matching text in yellow as you type, the same as the global search page. Type "llm" and every match in the open sections is marked.
+
+### Changed
+
+- Audio editor: the play controls sit centered on their own row, and the cue duration moved up onto the selection readout line instead of trailing below the time fields.
+- The ad-editor waveform now follows the theme primary color at rest, matching the cue waveform. It was rendering muted grey while the cue capture was green; both come from one shared color now, so they cannot drift apart again.
+
 ## [2.23.0] - 2026-06-26
 
 ### Added

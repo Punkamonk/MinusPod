@@ -281,18 +281,15 @@ function CueMarkModal({
   // so wavesurfer never has to render past its ~16000px cap.
   useEffect(() => {
     if (!waveformRef.current || !windowPeaks) return;
-    // Color the bars with the theme accent (primary) so the capture waveform is
-    // vividly themed -- matching how the ad editor's waveform reads in each
-    // theme rather than the muted grey wavesurfer would otherwise show at rest.
-    const themeWave = getThemeWaveformColors();
     const ws = WaveSurfer.create({
       container: waveformRef.current,
       height: 110,
       normalize: true,
       peaks: [windowPeaks],
       duration: windowDuration,
-      waveColor: themeWave.progressColor,
-      progressColor: themeWave.progressColor,
+      // Solid theme-primary bars, shared with the ad editor (getThemeWaveformColors
+      // returns waveColor == progressColor); our own amber playhead shows position.
+      ...getThemeWaveformColors(),
       // Render our own amber playhead overlay instead of wavesurfer's built-in
       // cursor; the built-in one is easy to confuse with a pin.
       cursorColor: 'transparent',
@@ -750,6 +747,20 @@ function CueMarkModal({
           inSelection={inCue}
           selectionLabel="in cue"
           onPlaySelection={playSelection}
+          selectionInfo={
+            <span className={regionDurationValid ? 'text-foreground' : 'text-destructive font-medium'}>
+              {regionDuration.toFixed(2)}s
+              {!regionDurationValid && (
+                <span className="ml-1.5 text-[10px]">
+                  {regionDuration <= 0
+                    ? 'start before end'
+                    : regionDuration < MIN_REGION_SECONDS
+                      ? `min ${MIN_REGION_SECONDS}s`
+                      : `max ${MAX_REGION_SECONDS}s`}
+                </span>
+              )}
+            </span>
+          }
         />
 
         {/* Cue-specific controls: snap to onset + set edge at playhead. */}
@@ -768,7 +779,7 @@ function CueMarkModal({
           </button>
         </div>
 
-        {/* Time inputs + duration + label. */}
+        {/* Time inputs + cue type. (Duration rides on the transport row.) */}
         <div className="flex flex-wrap items-end gap-3 mt-3">
           <div>
             <label className="block text-xs text-muted-foreground" htmlFor="cue-start-in">Start</label>
@@ -804,21 +815,6 @@ function CueMarkModal({
               className={`w-24 px-3 py-1.5 ${fieldCls} text-sm font-mono text-rose-500`}
             />
           </div>
-          <p className="text-sm">
-            Duration:{' '}
-            <span className={regionDurationValid ? 'font-medium' : 'font-medium text-destructive'}>
-              {regionDuration.toFixed(2)}s
-            </span>
-            {!regionDurationValid && (
-              <span className="ml-2 text-xs text-destructive">
-                {regionDuration <= 0
-                  ? 'Start must be before end'
-                  : regionDuration < MIN_REGION_SECONDS
-                    ? `Min ${MIN_REGION_SECONDS}s`
-                    : `Max ${MAX_REGION_SECONDS}s`}
-              </span>
-            )}
-          </p>
           <div className="flex-1 min-w-[220px]">
             <label className="block text-xs text-muted-foreground" htmlFor="cue-type-in">Cue type</label>
             <select
