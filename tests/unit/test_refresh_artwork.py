@@ -80,7 +80,7 @@ def test_refresh_feed_artwork_rebuilds_served_rss_with_badge():
          patch.object(mf.storage, 'download_artwork', return_value=True):
         assert mf.refresh_feed_artwork(slug) is True
     served = mf.storage.get_rss(slug)
-    assert f'/api/v1/feeds/{slug}/artwork?minuspod=1' in served
+    assert f'/episodes/{slug}/cover-minuspod.jpg' in served
     assert 'https://example.com/art.png' not in served
 
 
@@ -93,7 +93,7 @@ def test_refresh_feed_artwork_uses_upstream_when_disabled():
         assert mf.refresh_feed_artwork(slug) is True
     served = mf.storage.get_rss(slug)
     assert 'https://example.com/art.png' in served
-    assert 'minuspod=1' not in served
+    assert 'cover-minuspod' not in served
 
 
 def test_refresh_feed_artwork_does_not_queue_episodes():

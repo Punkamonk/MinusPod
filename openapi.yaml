@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.24.1
+  version: 2.24.2
   contact:
     name: MinusPod
   license:
@@ -639,13 +639,6 @@ paths:
       operationId: getFeedArtwork
       parameters:
         - $ref: '#/components/parameters/slug'
-        - name: minuspod
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: ['1', 'true', 'yes']
-          description: When set, returns the cover art with the MinusPod badge overlaid in the bottom-right corner (issue #420). The served feed points its channel image here when the artworkWatermarkEnabled setting is on.
       responses:
         '200':
           description: Artwork image

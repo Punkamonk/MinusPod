@@ -800,14 +800,6 @@ def get_artwork(slug):
     if not artwork:
         return error_response('Artwork not found', 404)
 
-    # ?minuspod=1 serves the badge-overlaid variant (issue #420); the served
-    # feed points here for its channel cover when the watermark is enabled.
-    # Falls back to the plain cover if compositing is unavailable.
-    if request.args.get('minuspod') in ('1', 'true', 'yes'):
-        watermarked = storage.get_watermarked_artwork(slug)
-        if watermarked:
-            artwork = watermarked
-
     image_data, content_type = artwork
     # content_type was validated by magic-number check on write; tell the
     # browser not to sniff it and deny any script loading from this

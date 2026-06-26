@@ -142,7 +142,7 @@ def test_feed_points_at_badge_endpoint_when_enabled_and_cached():
     st.save_artwork(slug, _png(), 'image/png', 'https://example.com/art.png')
 
     served = _serve(slug, watermark=True)
-    assert f'https://mp.example.com/api/v1/feeds/{slug}/artwork?minuspod=1' in served
+    assert f'https://mp.example.com/episodes/{slug}/cover-minuspod.jpg' in served
     assert 'https://example.com/art.png' not in served
 
 
@@ -153,7 +153,7 @@ def test_feed_uses_upstream_art_when_disabled():
 
     served = _serve(slug, watermark=False)
     assert 'https://example.com/art.png' in served
-    assert 'minuspod=1' not in served
+    assert 'cover-minuspod' not in served
 
 
 def test_feed_falls_back_to_upstream_when_no_cached_art():
@@ -162,4 +162,4 @@ def test_feed_falls_back_to_upstream_when_no_cached_art():
 
     served = _serve(slug, watermark=True)
     assert 'https://example.com/art.png' in served
-    assert 'minuspod=1' not in served
+    assert 'cover-minuspod' not in served

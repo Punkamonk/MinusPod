@@ -697,7 +697,7 @@ class RSSParser:
         # filtered feed is distinct (issue #420). Falls back to upstream when the
         # cover isn't cached (the variant endpoint would 404).
         if watermark_artwork and storage is not None and storage.has_artwork(slug):
-            artwork_url = f"{self._resolved_base_url()}/api/v1/feeds/{slug}/artwork?minuspod=1"
+            artwork_url = f"{self._resolved_base_url()}/episodes/{slug}/cover-minuspod.jpg"
         if artwork_url:
             channel_title = effective_title or ''
             channel_link = channel.get('link', '') or ''

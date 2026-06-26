@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.2] - 2026-06-26
+
+### Fixed
+
+- The cover-art badge now reaches podcast apps. The served feed pointed its channel image at the `/api/v1` artwork endpoint, which the public feed host blocks (403), so apps never fetched the badged cover. The badge is now served from `/episodes/<slug>/cover-minuspod.jpg` -- the same public path the feed already uses for audio and transcripts. Re-run "Refresh all artwork" (or wait for the next feed refresh) after upgrading.
+
 ## [2.24.1] - 2026-06-26
 
 ### Added
