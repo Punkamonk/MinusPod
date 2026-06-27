@@ -114,6 +114,24 @@ def test_saving_new_artwork_invalidates_the_watermark_cache():
     assert not variant.exists()
 
 
+def test_clear_watermark_cache_forces_recomposite():
+    # Regression for issue #420: refreshing artwork must replace an existing
+    # badge even when the source cover is unchanged (download_artwork no-ops on a
+    # cache hit, so save_artwork never runs to drop the variant).
+    slug = 'wm-recomposite'
+    st.db.create_podcast(slug, f'https://example.com/{slug}.xml', slug)
+    st.save_artwork(slug, _png(), 'image/png', 'https://example.com/art.png')
+    st.get_watermarked_artwork(slug)
+    variant = st.get_podcast_dir(slug) / 'artwork-minuspod.jpg'
+    assert variant.exists()
+
+    st.clear_watermark_cache(slug)
+    assert not variant.exists()
+
+    assert st.get_watermarked_artwork(slug) is not None
+    assert variant.exists()
+
+
 def test_get_watermarked_artwork_none_without_source():
     slug = 'wm-noart'
     st.db.create_podcast(slug, f'https://example.com/{slug}.xml', slug)

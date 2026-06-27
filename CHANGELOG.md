@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.25.1] - 2026-06-26
+
+### Fixed
+
+- "Refresh all artwork" now actually replaces an existing cover-art badge. The refresh re-pulled each cover but skipped the badge regeneration when the cover was already cached, which is the common case, so a new badge could never reach feeds that already had one. The refresh now drops the cached badge so it recomposites with the current rendering and the current toggle (issue #420).
+
 ## [2.25.0] - 2026-06-26
 
 ### Added
