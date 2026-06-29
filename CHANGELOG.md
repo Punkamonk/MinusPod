@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.28.0] - 2026-06-29
+
+### Added
+
+- Per-pass prompt overrides (#429). Each ad-detection pass (first pass, verification, reviewer, resurrect) now has an optional override field in Settings, empty by default. Text you put there is added to that pass's prompt at run time, so you can tweak a pass without editing the built-in default prompt. The defaults are unchanged and an empty override changes nothing. Put `{override}` in a customized prompt to control where it is inserted; otherwise it is appended.
+
+### Changed
+
+- Gemini and other 429 rate-limit errors are handled cleanly (#435). A failed review no longer leaks the raw provider error payload into the ad editor; it shows a short "Review unavailable" note while the full error stays in the logs. A 429 that carries its retry delay in the response body (as Gemini does) is now honored for backoff, and free-tier daily-quota exhaustion fails fast instead of retrying a quota that cannot recover until the next day.
+- Updated dependencies: openai 2.44.0, anthropic 0.112.0, huggingface-hub 1.21.0, nh3 0.3.6; frontend recharts 3.9.0, lucide-react 1.22.0, swagger-ui-dist 5.32.8, @typescript-eslint/parser 8.62.0, globals 17.7.0; CI actions/cache 6.1.0 and actions/setup-python 6.3.0.
+
 ## [2.27.3] - 2026-06-28
 
 ### Fixed

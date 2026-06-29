@@ -353,6 +353,10 @@ def get_settings():
         'reviewMaxBoundaryShift': _sv('review_max_boundary_shift', review_max_boundary_shift),
         'reviewPrompt': _sv('review_prompt', review_prompt),
         'resurrectPrompt': _sv('resurrect_prompt', resurrect_prompt),
+        'systemPromptOverride': _sv('system_prompt_override', _setting_value(settings, 'system_prompt_override', '') or ''),
+        'verificationPromptOverride': _sv('verification_prompt_override', _setting_value(settings, 'verification_prompt_override', '') or ''),
+        'reviewPromptOverride': _sv('review_prompt_override', _setting_value(settings, 'review_prompt_override', '') or ''),
+        'resurrectPromptOverride': _sv('resurrect_prompt_override', _setting_value(settings, 'resurrect_prompt_override', '') or ''),
         'claudeModel': _sv('claude_model', current_model),
         'verificationModel': _sv('verification_model', verification_model),
         'whisperModel': _sv('whisper_model', whisper_model),
@@ -536,6 +540,17 @@ def _apply_prompt_fields(db, data):
             else:
                 db.set_setting(db_key, data[payload_key], is_default=False)
                 logger.info(f"Updated {log_label}")
+    # Per-pass overrides: empty is valid (means "no override for this pass"),
+    # so store the value as-is rather than resetting to a default.
+    for payload_key, db_key in (
+        ('systemPromptOverride', 'system_prompt_override'),
+        ('verificationPromptOverride', 'verification_prompt_override'),
+        ('reviewPromptOverride', 'review_prompt_override'),
+        ('resurrectPromptOverride', 'resurrect_prompt_override'),
+    ):
+        if payload_key in data:
+            db.set_setting(db_key, str(data[payload_key] or ''), is_default=False)
+            logger.info(f"Updated {db_key}")
     return None
 
 
@@ -1247,6 +1262,11 @@ def reset_prompts_only():
     db.reset_setting('verification_prompt')
     db.reset_setting('review_prompt')
     db.reset_setting('resurrect_prompt')
+
+    # Clear per-pass overrides too (empty is the no-override default state).
+    for key in ('system_prompt_override', 'verification_prompt_override',
+                'review_prompt_override', 'resurrect_prompt_override'):
+        db.set_setting(key, '', is_default=True)
 
     logger.info("Reset prompts to defaults")
     return json_response({'message': 'Prompts reset to defaults'})

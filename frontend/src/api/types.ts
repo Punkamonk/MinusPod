@@ -183,6 +183,10 @@ export interface Settings {
   verificationPrompt: SettingValue;
   reviewPrompt: SettingValue;
   resurrectPrompt: SettingValue;
+  systemPromptOverride: SettingValue;
+  verificationPromptOverride: SettingValue;
+  reviewPromptOverride: SettingValue;
+  resurrectPromptOverride: SettingValue;
   enableAdReview: SettingValueBoolean;
   reviewModel: SettingValue;
   reviewMaxBoundaryShift: SettingValueNumber;
@@ -297,6 +301,10 @@ export interface UpdateSettingsPayload {
   verificationPrompt?: string;
   reviewPrompt?: string;
   resurrectPrompt?: string;
+  systemPromptOverride?: string;
+  verificationPromptOverride?: string;
+  reviewPromptOverride?: string;
+  resurrectPromptOverride?: string;
   enableAdReview?: boolean;
   reviewModel?: string;
   reviewMaxBoundaryShift?: number;

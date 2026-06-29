@@ -9,6 +9,8 @@ export interface ReviewerState {
   maxShift: number;
   reviewPrompt: string;
   resurrectPrompt: string;
+  reviewPromptOverride: string;
+  resurrectPromptOverride: string;
   parallelAds: number;
   updatePatterns: boolean;
   minTrimThreshold: number;
@@ -192,6 +194,18 @@ function ExperimentsSection({
               </>
             }
           />
+          <PromptField
+            id="reviewPromptOverride"
+            label="Review override"
+            value={reviewer.reviewPromptOverride}
+            onChange={(v) => update('reviewPromptOverride', v)}
+            rows={3}
+            helpText={
+              <>
+                Optional. Added to the review prompt at run time; leave blank for the default. Put <code>{'{override}'}</code> in a customized prompt above to control placement.
+              </>
+            }
+          />
 
           <PromptField
             id="resurrectPrompt"
@@ -201,6 +215,18 @@ function ExperimentsSection({
             helpText={
               <>
                 Second-guesses validator rejections in the resurrection band. Placeholder: <code>{'{sponsor_database}'}</code>.
+              </>
+            }
+          />
+          <PromptField
+            id="resurrectPromptOverride"
+            label="Resurrect override"
+            value={reviewer.resurrectPromptOverride}
+            onChange={(v) => update('resurrectPromptOverride', v)}
+            rows={3}
+            helpText={
+              <>
+                Optional. Added to the resurrect prompt at run time; leave blank for the default. Put <code>{'{override}'}</code> in a customized prompt above to control placement.
               </>
             }
           />

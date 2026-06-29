@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.27.3
+  version: 2.28.0
   contact:
     name: MinusPod
   license:
@@ -5916,6 +5916,41 @@ components:
               type: string
             isDefault:
               type: boolean
+        systemPromptOverride:
+          type: object
+          description: |
+            Optional per-pass override appended to the first-pass prompt at run
+            time (empty by default, leaving the default prompt unchanged). If the
+            prompt contains an {override} placeholder it is substituted there.
+          properties:
+            value:
+              type: string
+            isDefault:
+              type: boolean
+        verificationPromptOverride:
+          type: object
+          description: Optional per-pass override appended to the verification prompt (empty by default).
+          properties:
+            value:
+              type: string
+            isDefault:
+              type: boolean
+        reviewPromptOverride:
+          type: object
+          description: Optional per-pass override appended to the reviewer prompt (empty by default).
+          properties:
+            value:
+              type: string
+            isDefault:
+              type: boolean
+        resurrectPromptOverride:
+          type: object
+          description: Optional per-pass override appended to the resurrect prompt (empty by default).
+          properties:
+            value:
+              type: string
+            isDefault:
+              type: boolean
         claudeModel:
           type: object
           properties:
@@ -6279,6 +6314,18 @@ components:
               type: string
             verificationPrompt:
               type: string
+            systemPromptOverride:
+              type: string
+              description: Per-pass override for the first pass; empty clears it.
+            verificationPromptOverride:
+              type: string
+              description: Per-pass override for the verification pass; empty clears it.
+            reviewPromptOverride:
+              type: string
+              description: Per-pass override for the reviewer pass; empty clears it.
+            resurrectPromptOverride:
+              type: string
+              description: Per-pass override for the resurrect pass; empty clears it.
             claudeModel:
               type: string
             verificationModel:

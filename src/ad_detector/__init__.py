@@ -20,7 +20,9 @@ from llm_client import (
 )
 from utils.language import get_pattern_language
 from utils.llm_call import call_llm_for_window
-from utils.prompt import format_sponsor_block, render_prompt
+from utils.prompt import (
+    format_sponsor_block, render_prompt, format_override_block, apply_override,
+)
 from utils.time import overlap_ratio
 
 from config import (
@@ -387,30 +389,41 @@ class AdDetector:
             pass
         return self.get_model()
 
+    def _apply_pass_override(self, rendered: str, setting_key: str) -> str:
+        """Append the user's per-pass override (empty by default -> no change)."""
+        try:
+            override = self.db.get_setting(setting_key) or ''
+        except Exception:
+            override = ''
+        return apply_override(rendered, format_override_block(override))
+
     def get_system_prompt(self) -> str:
         """Get system prompt from database or default, with dynamic sponsors substituted."""
         self._ensure_deps()
+        prompt = None
         try:
             prompt = self.db.get_setting('system_prompt')
-            if prompt:
-                return self._render_with_sponsors(prompt)
         except Exception as e:
             logger.warning(f"Could not load system prompt from DB: {e}")
-
-        from utils.constants import DEFAULT_SYSTEM_PROMPT
-        return self._render_with_sponsors(DEFAULT_SYSTEM_PROMPT)
+        if not prompt:
+            from utils.constants import DEFAULT_SYSTEM_PROMPT
+            prompt = DEFAULT_SYSTEM_PROMPT
+        return self._apply_pass_override(
+            self._render_with_sponsors(prompt), 'system_prompt_override')
 
     def get_verification_prompt(self) -> str:
         """Get verification prompt from database or default, with dynamic sponsors substituted."""
         self._ensure_deps()
+        prompt = None
         try:
             prompt = self.db.get_setting('verification_prompt')
-            if prompt:
-                return self._render_with_sponsors(prompt)
         except Exception:
             pass
-        from database import DEFAULT_VERIFICATION_PROMPT
-        return self._render_with_sponsors(DEFAULT_VERIFICATION_PROMPT)
+        if not prompt:
+            from database import DEFAULT_VERIFICATION_PROMPT
+            prompt = DEFAULT_VERIFICATION_PROMPT
+        return self._apply_pass_override(
+            self._render_with_sponsors(prompt), 'verification_prompt_override')
 
     def _get_sponsor_list_safely(self) -> str:
         """Pull the dynamic sponsor list, returning empty string on any error."""
