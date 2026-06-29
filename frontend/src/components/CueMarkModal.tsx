@@ -135,10 +135,11 @@ function CueMarkModal({
   // recur in its source episode. Keyed to the bracket so re-bracketing re-warns,
   // and a second Save of the same bracket goes through.
   const [weakWarning, setWeakWarning] = useState<string | null>(null);
-  // show_intro/show_outro are non-ad (never cut). A segment at an episode's
-  // start/end is often a recurring ad, so saving one of these requires an
-  // explicit acknowledgement that it really is the show's own intro/outro.
-  const [nonAdAck, setNonAdAck] = useState(false);
+  // Non-ad types (show intro/outro/transition) are never cut. A segment at an
+  // episode's start/end is often a recurring ad, so saving one requires an
+  // explicit acknowledgement -- keyed to the bracket+type it was given for, so it
+  // auto-invalidates on any re-bracket or type change (no setState-in-effect).
+  const [nonAdAckKey, setNonAdAckKey] = useState<string | null>(null);
   const weakWarnedForRef = useRef<string | null>(null);
   const [previewMatches, setPreviewMatches] = useState<CueTemplateMatch[] | null>(null);
   // Audio-cue candidates (on-demand scan: fingerprint recurrence + loud spots).
@@ -274,10 +275,6 @@ function CueMarkModal({
       candidatePollRef.current = null;
     }
   }, []);
-
-  // The non-ad acknowledgement is per cue: drop it on any type or region change
-  // so a confirmation made for one bracket can never carry to a re-bracketed ad.
-  useEffect(() => { setNonAdAck(false); }, [cueType, cueStart, cueEnd]);
 
   // Show suggestion markers when the capture tool opens IF a scan is already
   // cached -- a read-only peek, so opening the tool to view/tweak a template
@@ -492,6 +489,10 @@ function CueMarkModal({
   const regionDurationValid =
     regionDuration >= MIN_REGION_SECONDS && regionDuration <= MAX_REGION_SECONDS;
   const isNonAd = cueTypeIsNonAd(cueType);
+  // The ack counts only while the bracket and type match what it was given for,
+  // so dragging to a new region or switching type silently revokes it.
+  const cueKey = `${cueStart.toFixed(3)}-${cueEnd.toFixed(3)}-${cueType}`;
+  const nonAdAck = nonAdAckKey === cueKey;
   const canSave = regionDurationValid && !saving && (!isNonAd || nonAdAck);
 
   // The last persisted template for the current selection. Save-and-preview and
@@ -527,11 +528,10 @@ function CueMarkModal({
     setWeakWarning(null);
     try {
       const template = await ensureTemplate();
-      const bracketKey = `${cueStart.toFixed(3)}-${cueEnd.toFixed(3)}-${cueType}`;
-      if (template.weakCue && weakWarnedForRef.current !== bracketKey) {
+      if (template.weakCue && weakWarnedForRef.current !== cueKey) {
         // First save of this weak bracket: flag it and stay open so the user
         // can pick a recurring sound, or click Save again to keep it anyway.
-        weakWarnedForRef.current = bracketKey;
+        weakWarnedForRef.current = cueKey;
         setWeakWarning(
           'This sound appears only once in this episode, so it cannot bracket '
           + 'an ad break. Pick a sound that repeats, or click Save cue again to '
@@ -884,7 +884,7 @@ function CueMarkModal({
                   type="checkbox"
                   className="mt-0.5"
                   checked={nonAdAck}
-                  onChange={(e) => setNonAdAck(e.target.checked)}
+                  onChange={(e) => setNonAdAckKey(e.target.checked ? cueKey : null)}
                 />
                 <span>
                   This is show content (intro, outro, or transition), not an ad.
