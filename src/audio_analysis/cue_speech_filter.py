@@ -1,0 +1,73 @@
+"""Music/speech discriminator for recurring cue candidates (issue #350).
+
+A common spoken phrase repeats within an episode like an ad-break sting, so the
+fingerprint recurrence scan suggests it. It reads as speech, though: its energy
+sits in the formant band, it is not tonal, and it is gappy (pauses between
+words). A produced sting -- even a bass jingle with a voiceover, like the
+measured WSJ content-transition cue (band ratio 0.32, flatness 0.0003, sustained
+0.90) -- is tonal and/or sustained with energy outside the band.
+
+So we drop a recurring candidate only when ALL three speech-like conditions hold,
+which keeps musical cues. This is applied to WITHIN-episode recurring candidates
+only; cross-episode intro/outro candidates (often legitimately spoken) are exempt.
+
+numpy + scipy.fft only (no librosa). Decode spans with
+``cue_features.decode_pcm_window``.
+"""
+import logging
+
+import numpy as np
+from scipy.fft import rfft, rfftfreq
+
+logger = logging.getLogger('podcast.audio_analysis.cue_speech_filter')
+
+_N_FFT = 512
+_HOP = 160          # 10 ms at 16 kHz
+_SUSTAIN_FLOOR = 0.15   # frame RMS (normalized to the clip max) counted as "energy present"
+
+
+def speechiness_features(pcm, sample_rate=16000, *, lo_hz=300.0, hi_hz=3400.0):
+    """Return ``(speech_band_ratio, spectral_flatness, sustained_frac)`` for a clip.
+
+    - speech_band_ratio: share of spectral energy in ``[lo_hz, hi_hz]`` (formants).
+    - spectral_flatness: geometric/arithmetic mean of the power spectrum, averaged
+      over frames (near 0 = tonal/musical, toward 1 = noisy/speech-like).
+    - sustained_frac: fraction of frames whose energy clears a floor (music is
+      continuous; speech is gappy).
+
+    Degenerate (too short / silent) clips return music-like values so the caller
+    never drops them -- this filter only removes confident speech.
+    """
+    pcm = np.asarray(pcm, dtype=np.float32)
+    if pcm.size < _N_FFT * 2:
+        return 0.0, 0.0, 1.0
+    win = np.hanning(_N_FFT)
+    frames = np.array([pcm[i:i + _N_FFT] * win
+                       for i in range(0, pcm.size - _N_FFT, _HOP)])
+    if frames.size == 0:
+        return 0.0, 0.0, 1.0
+    spectra = np.abs(rfft(frames, axis=1)) ** 2
+    total = spectra.sum() + 1e-12
+    freqs = rfftfreq(_N_FFT, 1.0 / sample_rate)
+    band = (freqs >= lo_hz) & (freqs <= hi_hz)
+    speech_band_ratio = float(spectra[:, band].sum() / total)
+
+    ps = spectra + 1e-12
+    flatness = float((np.exp(np.log(ps).mean(axis=1)) / ps.mean(axis=1)).mean())
+
+    rms = np.sqrt((frames ** 2).mean(axis=1))
+    peak = rms.max() + 1e-12
+    sustained_frac = float((rms / peak > _SUSTAIN_FLOOR).mean())
+    return speech_band_ratio, flatness, sustained_frac
+
+
+def is_likely_speech(pcm, sample_rate=16000, *, lo_hz=300.0, hi_hz=3400.0,
+                     ratio_max=0.55, flatness_min=0.02, sustained_max=0.65):
+    """True only when a clip looks like plain speech on all three axes.
+
+    Conservative by design (AND of the three conditions) so a tonal or sustained
+    sting, or one with energy outside the formant band, is always kept.
+    """
+    ratio, flatness, sustained = speechiness_features(
+        pcm, sample_rate, lo_hz=lo_hz, hi_hz=hi_hz)
+    return ratio > ratio_max and flatness > flatness_min and sustained < sustained_max

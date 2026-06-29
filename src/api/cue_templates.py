@@ -33,6 +33,7 @@ from audio_analysis.cue_template_matcher import (
     AudioCueTemplateMatcher, DEFAULT_MATCH_SCORE,
 )
 from audio_analysis.cue_candidates import merge_cue_candidates
+from audio_analysis.cue_speech_filter import is_likely_speech
 from audio_analysis.cue_detector import AudioCueDetector
 from audio_analysis.detected_cues import build_detected_cues
 from audio_fingerprinter import AudioFingerprinter
@@ -42,7 +43,10 @@ from config import (
     AUDIO_CUE_FREQ_MAX_HZ,
     AUDIO_CUE_SCAN_FREQ_MIN_HZ, AUDIO_CUE_SCAN_PROMINENCE_DB,
     AUDIO_CUE_SCAN_RELEASE_DB, AUDIO_CUE_SCAN_MAX_DURATION_SECONDS,
-    AUDIO_CUE_FP_WINDOW_SECONDS,
+    AUDIO_CUE_FP_WINDOW_SECONDS, AUDIO_CUE_FP_RECURRING_WINDOW_SECONDS,
+    AUDIO_CUE_SPEECH_BAND_LO_HZ, AUDIO_CUE_SPEECH_BAND_HI_HZ,
+    AUDIO_CUE_SPEECH_BAND_RATIO_MAX, AUDIO_CUE_SPEECH_FLATNESS_MIN,
+    AUDIO_CUE_SPEECH_SUSTAINED_MAX,
     AUDIO_CUE_XEP_HEAD_SECONDS, AUDIO_CUE_XEP_TAIL_SECONDS,
     AUDIO_CUE_XEP_MAX_SIBLINGS, AUDIO_CUE_XEP_SIBLING_LOOKBACK,
     AUDIO_CUE_XEP_MIN_MATCHES,
@@ -751,6 +755,37 @@ def _completed_sibling_audio_paths(db, storage, slug, episode_id):
     return paths
 
 
+def _drop_speechlike_recurring(recurring, audio_path):
+    """Drop recurring candidates that are plainly speech (common phrases), #350.
+
+    Decodes each candidate's audio span and applies the music/speech
+    discriminator; only confident speech is removed, so musical stings (even with
+    voiceover) survive. On any decode error the candidate is kept. Cross-episode
+    intro/outro candidates are NOT passed here -- those are often legitimately
+    spoken.
+    """
+    kept, dropped = [], 0
+    for c in recurring:
+        try:
+            pcm = decode_pcm_window(audio_path, c['start'], c['end'], SAMPLE_RATE_HZ)
+            if is_likely_speech(
+                pcm, SAMPLE_RATE_HZ,
+                lo_hz=AUDIO_CUE_SPEECH_BAND_LO_HZ, hi_hz=AUDIO_CUE_SPEECH_BAND_HI_HZ,
+                ratio_max=AUDIO_CUE_SPEECH_BAND_RATIO_MAX,
+                flatness_min=AUDIO_CUE_SPEECH_FLATNESS_MIN,
+                sustained_max=AUDIO_CUE_SPEECH_SUSTAINED_MAX,
+            ):
+                dropped += 1
+                continue
+        except Exception:
+            logger.debug('speech filter: decode failed for %s [%s-%s], keeping',
+                         audio_path, c.get('start'), c.get('end'))
+        kept.append(c)
+    if dropped:
+        logger.info('cue candidate scan: dropped %d speech-like recurring candidate(s)', dropped)
+    return kept
+
+
 def _run_cue_candidate_scan(podcast_id, episode_id, slug, audio_path,
                             similarity, min_count):
     """Background worker: find cue-template candidates, then persist them.
@@ -776,7 +811,11 @@ def _run_cue_candidate_scan(podcast_id, episode_id, slug, audio_path,
                 raise RuntimeError(f'fingerprint decode failed for {audio_path}')
         recurring = fp.discover_recurring_spots(
             audio_path, similarity=similarity, min_count=min_count,
+            window_seconds=AUDIO_CUE_FP_RECURRING_WINDOW_SECONDS,
             target_fingerprint=target_fp)
+        # Drop within-episode candidates that are just common spoken phrases (#350);
+        # the cross-episode intro/outro pass below is exempt (intros can be spoken).
+        recurring = _drop_speechlike_recurring(recurring, audio_path)
         try:
             siblings = _completed_sibling_audio_paths(db, storage, slug, episode_id)
             cross_episode = fp.discover_cross_episode_cues(

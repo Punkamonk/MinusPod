@@ -221,7 +221,8 @@ AUDIO_CUE_PAIR_MAX_BREAK_FRACTION = 0.5
 # so 0.73 buys headroom; 0.70 is a noise cliff (the candidate list triples and a
 # non-ad cluster nearly ties the real sting), so do not go below ~0.72.
 AUDIO_CUE_RECURRENCE_SIMILARITY = 0.73   # fingerprint bit-similarity to call two windows the same sound
-AUDIO_CUE_RECURRENCE_MIN_COUNT = 3       # minimum occurrences to suggest a sound
+AUDIO_CUE_RECURRENCE_MIN_COUNT = 5       # minimum occurrences to suggest a sound (raised from 3: a
+                                         # common phrase clears 3 easily; a produced sting recurs more)
 # Cross-episode intro/outro detection (candidate scan). Real intros/outros play
 # once per episode, so within-episode recurrence cannot see them, but they recur
 # ACROSS episodes near the start/end. We fingerprint this episode's head and tail
@@ -241,7 +242,10 @@ AUDIO_CUE_XEP_SIMILARITY = AUDIO_CUE_RECURRENCE_SIMILARITY  # bit-similarity thr
 # seeds LSH buckets; each bucket's first member anchors a full self-scan whose
 # segment is then grown to its true length and its whole extent claimed so a long
 # recurring block surfaces as one candidate, not many fragments.
-AUDIO_CUE_FP_WINDOW_SECONDS = 2.0        # LSH probe window (~16 subfingerprints)
+AUDIO_CUE_FP_WINDOW_SECONDS = 2.0        # LSH probe window (~16 subfingerprints) for cross-episode intro/outro
+AUDIO_CUE_FP_RECURRING_WINDOW_SECONDS = 4.0  # longer probe window for WITHIN-episode recurrence (#350): a
+                                         # ~1-2s common phrase no longer fills a window; a real sting (the
+                                         # measured WSJ cue is 2.82s) still does. Cross-episode keeps 2.0s.
 AUDIO_CUE_FP_KEY_BITS = 6                # top bits sampled per keyed subfingerprint
 AUDIO_CUE_FP_KEY_SAMPLES = 4             # subfingerprints sampled to form an LSH key
 AUDIO_CUE_FP_MIN_GAP_SECONDS = 5.0       # occurrences closer than this are the same instance
@@ -249,6 +253,19 @@ AUDIO_CUE_FP_MAX_COUNT = 30              # >this many repeats is pervasive fille
 AUDIO_CUE_FP_MAX_LEN_SECONDS = 30.0      # cap on segment-length extension
 AUDIO_CUE_FP_MAX_ANCHORS = 600           # cap on anchors scanned (bounds long-episode work)
 AUDIO_CUE_FP_MAX_CANDIDATES = 10         # cap on candidates returned to the UI
+# Music/speech discriminator for WITHIN-episode recurring candidates (#350). A
+# common spoken phrase repeats like a sting but reads as speech: its energy sits
+# in the formant band, it is not tonal, and it is gappy. A produced sting (even a
+# bass jingle with voiceover) is tonal and/or sustained with energy outside the
+# band. Drop a recurring candidate only when ALL speech-like conditions hold, so
+# musical cues are kept. Anchored to the measured WSJ content-transition cue
+# (speech-band ratio 0.32, flatness 0.0003, sustained 0.90 -> kept). Applied to
+# recurring candidates only; cross-episode intro/outro (often spoken) is exempt.
+AUDIO_CUE_SPEECH_BAND_LO_HZ = 300.0      # formant-band lower edge for the energy ratio
+AUDIO_CUE_SPEECH_BAND_HI_HZ = 3400.0     # formant-band upper edge
+AUDIO_CUE_SPEECH_BAND_RATIO_MAX = 0.55   # formant-band energy share above this looks like talking
+AUDIO_CUE_SPEECH_FLATNESS_MIN = 0.02     # spectral flatness above this is non-tonal (speech/noise)
+AUDIO_CUE_SPEECH_SUSTAINED_MAX = 0.65    # sustained-energy fraction below this is gappy (speech)
 # Generous loudness discovery profile for the capture-UI loud spots (the
 # template-free "jump to a loud spot" markers), separate from the precise
 # live-detection band above. Real ad-break sounds are often sustained,
