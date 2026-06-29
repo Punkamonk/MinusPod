@@ -1,7 +1,7 @@
 import CollapsibleSection from '../../components/CollapsibleSection';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import PromptField from './PromptField';
-import { clampNumericInput } from '../../utils/clampNumericInput';
+import NumberInput from '../../components/NumberInput';
 
 export interface ReviewerState {
   enabled: boolean;
@@ -37,18 +37,6 @@ function ExperimentsSection({
   // Clamp numeric input on edit so an empty or out-of-range value never reaches
   // Save (the backend rejects them). maxShift stays out: it has weaker semantics
   // and leans on the native min/max only.
-  const clampUpdate = (
-    key: 'parallelAds' | 'minTrimThreshold',
-    raw: string,
-    lo: number,
-    hi: number,
-    fallback: number,
-    parse: (s: string) => number,
-  ) => {
-    const v = clampNumericInput(raw, lo, hi, fallback, parse);
-    if (v !== undefined) update(key, v);
-  };
-
   return (
     <CollapsibleSection
       title="Ad Reviewer"
@@ -100,14 +88,14 @@ function ExperimentsSection({
               Max boundary shift
             </label>
             <div className="flex items-center gap-3">
-              <input
-                type="number"
+              <NumberInput
                 id="reviewMaxBoundaryShift"
                 value={reviewer.maxShift}
-                onChange={(e) => update('maxShift', parseInt(e.target.value, 10) || 60)}
                 min={1}
                 max={600}
-                className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                fallback={60}
+                parse={(s) => parseInt(s, 10)}
+                onCommit={(v) => update('maxShift', v)}
               />
               <span className="text-sm text-muted-foreground">seconds (1-600)</span>
             </div>
@@ -121,15 +109,15 @@ function ExperimentsSection({
               Parallel ad reviews
             </label>
             <div className="flex items-center gap-3">
-              <input
-                type="number"
+              <NumberInput
                 id="reviewerParallelAds"
                 value={reviewer.parallelAds}
-                onChange={(e) => clampUpdate('parallelAds', e.target.value, 1, 32, 4, (s) => parseInt(s, 10))}
                 min={1}
                 max={32}
                 step={1}
-                className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                fallback={4}
+                parse={(s) => parseInt(s, 10)}
+                onCommit={(v) => update('parallelAds', v)}
               />
               <span className="text-sm text-muted-foreground">ads at a time (1-32)</span>
             </div>
@@ -163,14 +151,13 @@ function ExperimentsSection({
                 Minimum trim threshold
               </label>
               <div className="flex items-center gap-3">
-                <input
-                  type="number"
+                <NumberInput
                   id="minTrimThreshold"
                   value={reviewer.minTrimThreshold}
-                  onChange={(e) => clampUpdate('minTrimThreshold', e.target.value, 1, 120, 20, parseFloat)}
                   min={1}
                   max={120}
-                  className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                  fallback={20}
+                  onCommit={(v) => update('minTrimThreshold', v)}
                 />
                 <span className="text-sm text-muted-foreground">seconds (1-120)</span>
               </div>

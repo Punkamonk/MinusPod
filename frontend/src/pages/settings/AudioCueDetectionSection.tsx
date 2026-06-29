@@ -1,6 +1,6 @@
 import CollapsibleSection from '../../components/CollapsibleSection';
 import ToggleSwitch from '../../components/ToggleSwitch';
-import { clampNumericInput } from '../../utils/clampNumericInput';
+import NumberInput from '../../components/NumberInput';
 
 export interface AudioCueState {
   enabled: boolean;
@@ -43,18 +43,6 @@ function AudioCueDetectionSection({ audioCue, onChange }: AudioCueDetectionSecti
   const update = <K extends keyof AudioCueState>(key: K, value: AudioCueState[K]) =>
     onChange({ ...audioCue, [key]: value });
 
-  const numUpdate = (
-    key: NumericKey,
-    raw: string,
-    lo: number,
-    hi: number,
-    fallback: number,
-    parse: (s: string) => number,
-  ) => {
-    const v = clampNumericInput(raw, lo, hi, fallback, parse);
-    if (v !== undefined) update(key, v);
-  };
-
   const numRow = (
     key: NumericKey, id: string, label: string,
     lo: number, hi: number, step: number, fallback: number, hint: string,
@@ -63,15 +51,15 @@ function AudioCueDetectionSection({ audioCue, onChange }: AudioCueDetectionSecti
     <div>
       <label htmlFor={id} className="block text-sm font-medium text-foreground mb-2">{label}</label>
       <div className="flex items-center gap-3">
-        <input
-          type="number"
+        <NumberInput
           id={id}
           value={audioCue[key]}
           min={lo}
           max={hi}
           step={step}
-          onChange={(e) => numUpdate(key, e.target.value, lo, hi, fallback, parse)}
-          className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+          fallback={fallback}
+          parse={parse}
+          onCommit={(v) => update(key, v)}
         />
         <span className="text-sm text-muted-foreground">{lo} to {hi}</span>
       </div>
@@ -106,26 +94,28 @@ function AudioCueDetectionSection({ audioCue, onChange }: AudioCueDetectionSecti
             <div>
               <span className="block text-sm font-medium text-foreground mb-2">Frequency band</span>
               <div className="flex items-center gap-3">
-                <input
-                  type="number"
-                  aria-label="Band low edge in Hz"
+                <NumberInput
+                  ariaLabel="Band low edge in Hz"
                   value={audioCue.freqMinHz}
-                  onChange={(e) => numUpdate('freqMinHz', e.target.value, 20, 20000, 1500, (s) => parseInt(s, 10))}
                   min={20}
                   max={20000}
                   step={50}
+                  fallback={1500}
+                  parse={(s) => parseInt(s, 10)}
                   className={inputClass}
+                  onCommit={(v) => update('freqMinHz', v)}
                 />
                 <span className="text-sm text-muted-foreground">to</span>
-                <input
-                  type="number"
-                  aria-label="Band high edge in Hz"
+                <NumberInput
+                  ariaLabel="Band high edge in Hz"
                   value={audioCue.freqMaxHz}
-                  onChange={(e) => numUpdate('freqMaxHz', e.target.value, 20, 20000, 8000, (s) => parseInt(s, 10))}
                   min={20}
                   max={20000}
                   step={50}
+                  fallback={8000}
+                  parse={(s) => parseInt(s, 10)}
                   className={inputClass}
+                  onCommit={(v) => update('freqMaxHz', v)}
                 />
                 <span className="text-sm text-muted-foreground">Hz</span>
               </div>
@@ -139,15 +129,14 @@ function AudioCueDetectionSection({ audioCue, onChange }: AudioCueDetectionSecti
                 Prominence threshold
               </label>
               <div className="flex items-center gap-3">
-                <input
-                  type="number"
+                <NumberInput
                   id="audioCueProminence"
                   value={audioCue.prominenceDb}
-                  onChange={(e) => numUpdate('prominenceDb', e.target.value, 1, 40, 9, parseFloat)}
                   min={1}
                   max={40}
                   step={0.5}
-                  className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                  fallback={9}
+                  onCommit={(v) => update('prominenceDb', v)}
                 />
                 <span className="text-sm text-muted-foreground">dB above baseline (1-40)</span>
               </div>
@@ -161,15 +150,14 @@ function AudioCueDetectionSection({ audioCue, onChange }: AudioCueDetectionSecti
                 Minimum confidence
               </label>
               <div className="flex items-center gap-3">
-                <input
-                  type="number"
+                <NumberInput
                   id="audioCueMinConfidence"
                   value={audioCue.minConfidence}
-                  onChange={(e) => numUpdate('minConfidence', e.target.value, 0, 1, 0.8, parseFloat)}
                   min={0}
                   max={1}
                   step={0.05}
-                  className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                  fallback={0.8}
+                  onCommit={(v) => update('minConfidence', v)}
                 />
                 <span className="text-sm text-muted-foreground">0-1</span>
               </div>
@@ -183,15 +171,14 @@ function AudioCueDetectionSection({ audioCue, onChange }: AudioCueDetectionSecti
                 Template match score
               </label>
               <div className="flex items-center gap-3">
-                <input
-                  type="number"
+                <NumberInput
                   id="audioCueTemplateScore"
                   value={audioCue.templateScore}
-                  onChange={(e) => numUpdate('templateScore', e.target.value, 0, 0.99, 0.75, parseFloat)}
                   min={0}
                   max={0.99}
                   step={0.05}
-                  className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                  fallback={0.75}
+                  onCommit={(v) => update('templateScore', v)}
                 />
                 <span className="text-sm text-muted-foreground">0-0.99</span>
               </div>

@@ -1,4 +1,5 @@
 import CollapsibleSection from '../../components/CollapsibleSection';
+import NumberInput from '../../components/NumberInput';
 import ToggleSwitch from '../../components/ToggleSwitch';
 
 interface GlobalDefaultsSectionProps {
@@ -50,16 +51,14 @@ function GlobalDefaultsSection({
             Max episodes per served feed
           </label>
           <div className="flex items-center gap-3">
-            <input
-              type="number"
+            <NumberInput
               id="maxFeedEpisodesGlobal"
               value={maxFeedEpisodes}
-              onChange={(e) =>
-                onMaxFeedEpisodesChange(parseInt(e.target.value, 10) || 0)
-              }
               min={10}
               max={500}
-              className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+              fallback={10}
+              parse={(s) => parseInt(s, 10)}
+              onCommit={onMaxFeedEpisodesChange}
             />
             <span className="text-sm text-muted-foreground">episodes (10-500)</span>
           </div>

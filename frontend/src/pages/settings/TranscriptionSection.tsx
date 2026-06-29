@@ -1,6 +1,7 @@
 import { WHISPER_BACKENDS, type WhisperModel, type WhisperBackend, type WhisperApiConfig } from '../../api/types';
 import CollapsibleSection from '../../components/CollapsibleSection';
 import LanguageCombobox from '../../components/LanguageCombobox';
+import NumberInput from '../../components/NumberInput';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import ProviderKeyField from './ProviderKeyField';
 import type { ProviderName, ProviderStatus, ProviderTestResult, ProvidersResponse } from '../../api/providers';
@@ -180,14 +181,14 @@ function TranscriptionSection({
                   <label htmlFor="transcribeMaxChunkSeconds" className="text-sm text-muted-foreground w-44">
                     Max chunk seconds:
                   </label>
-                  <input
-                    type="number"
+                  <NumberInput
                     id="transcribeMaxChunkSeconds"
                     value={transcribeMaxChunkSeconds}
-                    onChange={(e) => onTranscribeMaxChunkSecondsChange(parseInt(e.target.value, 10) || 600)}
                     min={1}
                     max={7200}
-                    className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                    fallback={600}
+                    parse={(s) => parseInt(s, 10)}
+                    onCommit={onTranscribeMaxChunkSecondsChange}
                   />
                   <span className="text-sm text-muted-foreground">600 for Whisper, 28 for Parakeet</span>
                 </div>
@@ -195,14 +196,14 @@ function TranscriptionSection({
                   <label htmlFor="transcribeConcurrentChunks" className="text-sm text-muted-foreground w-44">
                     Concurrent chunks:
                   </label>
-                  <input
-                    type="number"
+                  <NumberInput
                     id="transcribeConcurrentChunks"
                     value={transcribeConcurrentChunks}
-                    onChange={(e) => onTranscribeConcurrentChunksChange(parseInt(e.target.value, 10) || 4)}
                     min={1}
                     max={32}
-                    className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                    fallback={4}
+                    parse={(s) => parseInt(s, 10)}
+                    onCommit={onTranscribeConcurrentChunksChange}
                   />
                   <span className="text-sm text-muted-foreground">match backend's worker count</span>
                 </div>
@@ -210,14 +211,14 @@ function TranscriptionSection({
                   <label htmlFor="transcribeChunkOverlapSeconds" className="text-sm text-muted-foreground w-44">
                     Chunk overlap seconds:
                   </label>
-                  <input
-                    type="number"
+                  <NumberInput
                     id="transcribeChunkOverlapSeconds"
                     value={transcribeChunkOverlapSeconds}
-                    onChange={(e) => onTranscribeChunkOverlapSecondsChange(parseInt(e.target.value, 10) || 30)}
                     min={1}
                     max={600}
-                    className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                    fallback={30}
+                    parse={(s) => parseInt(s, 10)}
+                    onCommit={onTranscribeChunkOverlapSecondsChange}
                   />
                   <span className="text-sm text-muted-foreground">for word-boundary dedupe</span>
                 </div>
@@ -294,14 +295,14 @@ function TranscriptionSection({
             <label htmlFor="softTimeoutMinutes" className="text-sm text-muted-foreground w-36">
               Soft timeout:
             </label>
-            <input
-              type="number"
+            <NumberInput
               id="softTimeoutMinutes"
               value={softTimeoutMinutes}
-              onChange={(e) => onSoftTimeoutChange(parseInt(e.target.value, 10) || 0)}
               min={softMinMinutes}
               max={hardMaxMinutes}
-              className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+              fallback={softMinMinutes}
+              parse={(s) => parseInt(s, 10)}
+              onCommit={onSoftTimeoutChange}
             />
             <span className="text-sm text-muted-foreground">minutes (default 60)</span>
           </div>
@@ -309,14 +310,14 @@ function TranscriptionSection({
             <label htmlFor="hardTimeoutMinutes" className="text-sm text-muted-foreground w-36">
               Hard timeout:
             </label>
-            <input
-              type="number"
+            <NumberInput
               id="hardTimeoutMinutes"
               value={hardTimeoutMinutes}
-              onChange={(e) => onHardTimeoutChange(parseInt(e.target.value, 10) || 0)}
               min={softMinMinutes + 1}
               max={hardMaxMinutes}
-              className="w-24 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+              fallback={softMinMinutes + 1}
+              parse={(s) => parseInt(s, 10)}
+              onCommit={onHardTimeoutChange}
             />
             <span className="text-sm text-muted-foreground">minutes (default 120)</span>
           </div>
