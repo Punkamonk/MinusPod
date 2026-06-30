@@ -4459,6 +4459,47 @@ paths:
         '200':
           description: Updated protection state
 
+  /tags/vocabulary:
+    get:
+      summary: Get the canonical community-pattern tag vocabulary
+      tags: [Patterns]
+      description: >
+        Returns the fixed tag vocabulary used by the pattern and sponsor tag
+        pickers: the full tag list plus the podcast-genre, sponsor-industry, and
+        special-tag groupings. The vocabulary ships with the app image and only
+        changes when vocabulary_version is bumped.
+      responses:
+        '200':
+          description: Tag vocabulary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  vocabulary_version: { type: integer }
+                  all_tags: { type: array, items: { type: string } }
+                  podcast_genres:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        tag:         { type: string }
+                        description: { type: string }
+                  sponsor_industries:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        tag:         { type: string }
+                        description: { type: string }
+                  special_tags:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        tag:         { type: string }
+                        description: { type: string }
+
   /feeds/{slug}/tags:
     get:
       summary: Get a feed's tag breakdown (rss / episode / user / effective)

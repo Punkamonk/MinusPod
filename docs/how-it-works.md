@@ -43,13 +43,13 @@ The verification model can be configured separately from the first pass model in
 
 ### Sliding Window Processing
 
-For long episodes, transcripts are processed in overlapping 10-minute windows:
+For long episodes, transcripts are processed in overlapping windows:
 
-- **Window Size** - 10 minutes of transcript per API call
-- **Overlap** - 3 minutes between windows so ads at boundaries aren't missed
+- **Window Size** - how much transcript each detection request covers (default 10 minutes)
+- **Overlap** - trailing overlap between windows so ads at boundaries aren't missed (default 3 minutes)
 - **Deduplication** - Ads detected in multiple windows are automatically merged
 
-A 60-minute episode is processed as 9 overlapping windows, with duplicate detections merged.
+At the defaults a 60-minute episode is processed as 9 overlapping windows, with duplicate detections merged. The window size and overlap are both configurable; see [detection window geometry](configuration.md#detection-window-geometry) for the ranges and when to lower them.
 
 ### Processing Queue
 
@@ -118,14 +118,13 @@ Access the Patterns page from the navigation bar to:
 
 A global status bar shows real-time processing progress via Server-Sent Events. It displays the current episode title, processing stage (Transcribing, Detecting Ads, Processing Audio), a progress bar, and queue depth. Click it to navigate to the processing episode.
 
+### Chapter Generation
+
+When enabled (Settings > Transcripts & Chapters > Generate Chapters, on by default), MinusPod writes Podcasting 2.0 chapters for each episode after the ads are cut. An LLM finds topic transitions in the transcript, anchors them to any timestamps the show lists in its description, and titles each chapter, keeping them at least three minutes apart. Chapters are served as a `podcast:chapters` JSON file and can be re-run from the episode page. The Chapters Model in Settings picks the model; a small model like Haiku works well.
+
 ### Reprocessing Modes
 
-When reprocessing an episode from the UI, two modes are available:
-
-- Reprocess (default): uses learned patterns from the pattern database plus LLM analysis
-- Full Analysis: skips the pattern database entirely for a fresh LLM-only analysis
-
-Full Analysis is useful when you want to re-evaluate an episode without learned patterns (e.g., after disabling patterns that caused false positives).
+You can re-run detection on an episode without re-fetching it, in any of four modes: Reprocess, Full Analysis, Recut Audio, and Re-detect Ads. See [Reprocessing](configuration.md#reprocessing) for what each one does and which are available as bulk feed actions.
 
 ### Audio Analysis
 
@@ -134,7 +133,7 @@ Audio analysis runs automatically on every episode (lightweight, uses only ffmpe
 - **Volume Analysis** - Detects loudness anomalies using EBU R128 measurement. Identifies sections mastered at different levels than the content baseline.
 - **Transition Detection** - Finds abrupt frame-to-frame loudness jumps that indicate dynamically inserted ad (DAI) boundaries. Pairs up/down transitions into candidate ad regions.
 - **Audio Enforcement** - After LLM detection, uncovered audio signals with ad language in the transcript are promoted to ads. DAI transitions with high confidence (>=0.8) or sponsor matches are also promoted. Existing ad boundaries are extended when signals partially overlap.
-- **Audio Cue Templates** - When a feed has a learned cue template (a marked ding or stinger), an MFCC normalized cross-correlation matcher finds that exact sound across the episode and emits an `audio_cue` signal at each occurrence. The cue is given to the model as supporting evidence, and after detection a boundary-snap pass moves the start and end of a detected ad to the nearest high-confidence cue (capped by the reviewer's max boundary shift). With the opt-in cue-pair setting on, two cues bracketing a break the model missed synthesize a cue-only ad that the reviewer still evaluates. The cue never cuts on its own: it refines edges and, when enabled, proposes missed breaks for review.
+- **Audio Cue Templates** - When a feed has a learned cue template (a marked ding or stinger), an MFCC matcher finds that exact sound across the episode and snaps a detected ad's edges to the nearest high-confidence cue, capped by the reviewer's max boundary shift. The cue never cuts on its own. See [Audio Cue Detection](audio-cues.md) for setup, cue types, and the opt-in cue-pair option.
 
 ---
 

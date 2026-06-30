@@ -4,7 +4,7 @@
 
 ---
 
-## Web Interface
+## Overview
 
 The server includes a web-based management UI at `/ui/`:
 
@@ -14,7 +14,7 @@ The server includes a web-based management UI at `/ui/`:
 - Feed detail page groups its controls into collapsible sections (feed settings, tags, ad distribution) so the page stays scannable
 - Ad Distribution panel on the feed detail page: a histogram of where ads have historically been cut across the feed, with learned prior zones marked
 - Episode discovery: all episodes surface on refresh, process any episode from the feed detail page
-- Bulk actions: select multiple episodes to process, reprocess, reprocess (full), reprocess (LLM-only, re-detect on the existing transcript), or delete
+- Bulk actions: select multiple episodes to process, reprocess, run a full analysis, re-detect ads on the existing transcript, or delete (the per-episode Recut Audio mode is not a bulk action)
 - Sort by publish date, episode number, or creation date; paginated (25/50/100/500 per page)
 - Pattern management: view and manage cross-episode ad patterns with sponsor names
 - Sponsor management: view, add, edit, and remove sponsors, each with its linked-pattern count, created and last-matched dates, and tags; plus a tab for name normalization rules
@@ -23,6 +23,7 @@ The server includes a web-based management UI at `/ui/`:
 - Settings for LLM provider, AI models, ad detection prompts, retention, system stats, token usage and cost
 - Real-time status bar showing processing progress across all pages
 - OPML export with original or ad-free (modified) feed URLs
+- Optional cover-art badge that marks the filtered feed (Settings > Cover Art), with a Refresh all artwork button
 - Global Defaults group in settings (Auto-Process, Max Feed Episodes, Only Expose Processed) that every feed inherits, with per-feed overrides on each feed's settings page
 - Webhook notifications for processed episodes, permanent failures, auth failures, and structural rate-limit hits
 - Podcast search via PodcastIndex.org
@@ -55,7 +56,7 @@ Each rule has two fields: `terms` (the regex to find) and `canonical` (the repla
 
 The API exposes these fields as `terms`/`canonical`; the older names `pattern`/`replacement` are still accepted when writing a rule.
 
-### Ad Editor Workflow
+### Ad Review Modes
 
 The ad editor supports two review modes, selected by a toggle above the ads list:
 
@@ -68,7 +69,7 @@ Since 2.5.14, original audio has its own retention input under the same section:
 
 The **Original Transcript** panel on the Episode Detail page shows the full pre-cut transcript so you can see exactly what text was identified and removed.
 
-### Ad Editor
+### Waveform Ad Editor
 
 Review and adjust ad detections in the browser. 2.2.0 switches the editor to a wavesurfer.js waveform: drag the green start and red end pins to set boundaries, with an orange playhead, 1x to 20x zoom (slider or mouse wheel), and a transport bar (skip back, rewind 10s, play, forward 10s, skip forward, stop). 2.3.1-2.3.4 added a playback speed dropdown (0.5x to 2x) next to the play button and a full-episode scrubber under the zoom slider so you can jump anywhere in the audio regardless of how the waveform is zoomed. The scrubber shows a muted gray band for the slice currently visible in the waveform, a primary-color fill tracking playback, and a thumb at the current position. Click or drag to seek; Arrow keys nudge by 5s (Shift = 10s), Home/End jump to ends. Edit Ads opens centered on the detected ad with ~30s of context; Add new ad opens with the entire episode visible. Typing a time outside the current waveform window auto-expands the window to include the pin. The Selection text inputs clamp only to episode bounds; cross-field validation (Start before End, at least 1s) happens on Save with a red border and an inline error if invalid.
 
@@ -97,19 +98,7 @@ Submitting creates a new pattern with `created_by='user'` and writes a `'create'
 
 ### Audio Cue Templates
 
-If a show plays a recurring ding or stinger around its ad breaks, you can teach MinusPod that exact sound. Open the feed and expand Audio Cue Templates, then click `+ Mark cue` and pick a recent episode whose original audio is still retained. The picker only lists episodes that still have their original, since a cue can sit inside a removed ad.
-
-The mark dialog uses the same waveform as the ad editor. Drag the green and red pins to bracket the cue (0.2 to 4 seconds), or play to the sound and use Set START / Set END at the playhead. The Snap to onset assist nudges an edge to the nearest sharp amplitude rise so a short ding is easy to bracket tightly; turn it off for a ramped sound with no clean attack. Pick a cue type, then Save, or Save and preview to see every place the cue matches on that episode before it goes live.
-
-The cue type is a dropdown, not free text, so the model always sees a consistent label and knows which edge the cue marks:
-
-- Ad-break boundary (both ends) - the same sound plays entering and leaving the break. Snaps either edge of a detected ad.
-- Ad-break start - snaps an ad's start only, and opens a span when cue-pair gap-filling is on.
-- Ad-break end - snaps an ad's end only, and closes a span.
-- Show intro / Show outro - the show's own open/close sound, not an ad. The model is told to ignore it as a boundary so it stops mis-reading an intro sting as a break.
-- Content transition (may or may not be an ad) - a recurring segment-break sound (intro, ad exit, topic change). Never cut on its own; the model is told a transition happens there, not an ad boundary.
-
-Saved cues are listed with enable checkboxes; Change type swaps a cue's type in place. Test on episode runs every enabled cue against any episode and reports each cue's peak match score, which is the value to tune Template match score against in Settings. Export downloads a cue as a portable zip (a lossless WAV plus a manifest) to share with another install; Import loads one back. On a feed that belongs to a network, Promote to network applies a cue to every show on that network.
+If a show plays a recurring ding or stinger around its ad breaks, you can teach MinusPod that exact sound and have it snap cuts to the chime. Marking a cue, the find-audio-cues scan, cue types, and cue management are all covered in [Audio Cue Detection](audio-cues.md).
 
 ### Screenshots
 

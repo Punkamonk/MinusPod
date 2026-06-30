@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- New [Audio Cue Detection](docs/audio-cues.md) guide. It pulls the cue content that was spread across the configuration, web-interface, and how-it-works docs into one page, and documents the "Find audio cues" scan (recurring stings plus intros and outros shared across a feed) that the prose docs never covered.
+- Added a Features overview to the README, and linked the audio-cues and OpenVINO docs from its table and the docs index.
+- Documented the cover-art badge and its `POST /api/v1/feeds/refresh-artwork` endpoint, chapter generation, and the Recut Audio reprocess mode.
+- Corrected the reprocess-mode list (four modes from the episode menu, three in bulk), noted that the detection window size and overlap are configurable, and replaced the stale `2.8.13` version examples.
+- Fixed API reference inaccuracies: the mode-aware reprocess endpoint is `/api/v1/episodes/{slug}/{id}/reprocess` (the `/feeds/...` path ignores `mode` and always runs a full reprocess), the cue-template create body takes `cueType` (not `label`), and the cue capture range is 0.2 to 10 seconds (up to 60 for a show intro or outro).
+- Added the `GET /api/v1/tags/vocabulary` path to `openapi.yaml`; the spec version stays `2.29.1` (docs-only change).
+- Refreshed every UI screenshot (desktop and mobile, dark theme) and added audio-cue and badged-cover-art images.
+
 ## [2.29.1] - 2026-06-29
 
 ### Fixed

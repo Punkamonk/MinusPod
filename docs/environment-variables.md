@@ -4,11 +4,9 @@
 
 ---
 
-## Environment Variables
-
 Grouped by how often you'll touch them. **Standard** is what a typical deployment sets; **Security** is the hardening surface; **Advanced** are tuning knobs for edge cases; **Optional** are opt-in features.
 
-### Standard
+## Standard
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -41,7 +39,7 @@ Grouped by how often you'll touch them. **Standard** is what a typical deploymen
 | `LOG_FORMAT` | `text` | `text` or `json`. JSON output works with log aggregators (Loki, CloudWatch). |
 | `DATA_DIR` | `/app/data` | Data storage directory. Aliases `DATA_PATH` and `MINUSPOD_DATA_DIR` are also honored. |
 
-### Security
+## Security
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -52,7 +50,7 @@ Grouped by how often you'll touch them. **Standard** is what a typical deploymen
 | `MINUSPOD_TRUSTED_PROXY_COUNT` | `0` | Reverse-proxy hops to trust when reading `X-Forwarded-For`. `1` behind Cloudflare / cloudflared / nginx / Traefik, higher for a multi-proxy chain. **Leaving this at `0` behind a proxy breaks login lockout** (the proxy IP is private/loopback, which the lockout excludes) and per-IP rate limits (they key on the proxy instead of the client); audit logs + auth-failure webhooks also carry the wrong IP. Startup logs a WARN when unset. |
 | `MINUSPOD_ALLOW_PRIVATE_FEED_HOSTS` | `false` | Allow RSS feed sources on private / loopback / LAN hosts. Off by default: feed URLs are untrusted and validated with the strict SSRF tier (DNS-resolved, private/metadata blocked) so a stored URL can't be rebound to an internal address on refresh. Set `true` only if you serve a feed from a private address (e.g. a LAN Audiobookshelf). |
 
-### Advanced
+## Advanced
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -72,7 +70,7 @@ Grouped by how often you'll touch them. **Standard** is what a typical deploymen
 | `SESSION_LIFETIME_HOURS` | `24` | How long authenticated sessions stay valid, in hours. |
 | `OMP_NUM_THREADS` | _(library default)_ | Caps OpenMP threads for local `faster-whisper` CPU transcription. On hybrid Intel CPUs the default can push work onto the slow E-cores and thrash the cache; set it to your performance-core count (more threads is not faster). No effect with a remote Whisper API or on GPU. See [Installation](installation.md#intel-hybrid-cpu-tuning-optional). |
 
-#### LLM stage tunables
+### LLM stage tunables
 
 Every per-stage LLM control in Settings > Ad Detection has a matching env var: the setting key in uppercase. Set one to pin the control (the UI renders it read-only with a note); unset it to hand control back to the stored value. Defaults match the pre-tunable behavior, so an unset variable changes nothing. Annotated list in [`.env.example`](../.env.example); behavior detail in [Configuration](configuration.md#env-var-overrides).
 
@@ -87,7 +85,7 @@ The stage prefixes are `DETECTION_`, `VERIFICATION_`, `REVIEWER_`, `CHAPTER_BOUN
 
 So `DETECTION_TEMPERATURE`, `VERIFICATION_MAX_TOKENS`, `REVIEWER_REASONING_LEVEL`, and so on. Two legacy names still resolve: `AD_DETECTION_MAX_TOKENS` (alias of `DETECTION_MAX_TOKENS`) and `REVIEW_MAX_TOKENS` (alias of `REVIEWER_MAX_TOKENS`).
 
-### Optional
+## Optional
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -96,7 +94,7 @@ So `DETECTION_TEMPERATURE`, `VERIFICATION_MAX_TOKENS`, `REVIEWER_REASONING_LEVEL
 | `MINUSPOD_RELEASE` | _(none)_ | Optional release tag forwarded to Sentry. |
 | `SENTRY_ENVIRONMENT` | `production` | Environment tag forwarded to Sentry. |
 
-### Deprecated
+## Deprecated
 
 | Variable | Description |
 |----------|-------------|

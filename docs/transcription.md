@@ -4,11 +4,9 @@
 
 ---
 
-## Whisper / Transcription
-
 By default, MinusPod uses faster-whisper with a local NVIDIA GPU for transcription. If you don't have an NVIDIA GPU (e.g. Apple Silicon Mac), you can use any OpenAI-compatible whisper API as the transcription backend.
 
-### GPU Compute Type
+## GPU Compute Type
 
 faster-whisper runs on CTranslate2, which only supports certain compute types per GPU generation. MinusPod exposes `WHISPER_COMPUTE_TYPE` as an env var and as a dropdown in Settings > Transcription. The default `auto` picks `float16` on CUDA and `int8` on CPU, matching the prior hardcoded behavior. If `float16` fails at model init (common on Pascal GTX 10xx and Maxwell GTX 9xx, which cannot do fp16 math in CTranslate2), the server retries `int8_float16`, then `int8`, then `float32` and logs the final active type. Any other explicit choice that fails is raised instead of silently masked.
 
@@ -28,7 +26,7 @@ Sources:
 - CTranslate2 compute-type support matrix: [opennmt.net/CTranslate2/quantization.html](https://opennmt.net/CTranslate2/quantization.html)
 - Official NVIDIA CUDA compute-capability table: [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus)
 
-### whisper.cpp with Docker (NVIDIA GPU)
+## whisper.cpp with Docker (NVIDIA GPU)
 
 A ready-to-use compose file is provided at [`docker-compose.whisper.yml`](../docker-compose.whisper.yml). It runs [whisper.cpp](https://github.com/ggml-org/whisper.cpp) as a standalone GPU-accelerated transcription server.
 
@@ -62,7 +60,7 @@ The `--dtw large.v3.turbo` flag enables word-level timestamps for precise ad bou
 
 > **Warning:** If you add `--convert` for use with other clients, be aware that whisper.cpp writes temporary converted files to the current working directory. In Docker, the default CWD may not be writable, causing whisper.cpp to silently return empty transcription results (200 with 0 segments). Set `working_dir: /tmp` in your compose file or mount a writable volume if you need `--convert`.
 
-### whisper.cpp on Apple Silicon (native)
+## whisper.cpp on Apple Silicon (native)
 
 whisper.cpp runs natively on Apple Silicon with Metal acceleration. Build from source or use Homebrew:
 
@@ -87,11 +85,11 @@ WHISPER_DEVICE=cpu
 
 > **Linux users:** Replace `host.docker.internal` with your host IP, or add `extra_hosts: ["host.docker.internal:host-gateway"]` to your Docker service definition.
 
-### Intel GPU (OpenVINO Model Server)
+## Intel GPU (OpenVINO Model Server)
 
 On an Intel host with a capable integrated or discrete GPU, you can offload transcription to the GPU instead of the CPU. OpenVINO Model Server runs Whisper as a remote OpenAI-compatible backend with word-level timestamps, so the CPU image's transcription stops pinning every core. See the dedicated [Intel GPU Transcription (OpenVINO)](transcription-openvino.md) guide for the full setup.
 
-### Groq
+## Groq
 
 [Groq](https://groq.com) offers fast cloud-based whisper transcription:
 
@@ -103,7 +101,7 @@ WHISPER_API_MODEL=whisper-large-v3-turbo
 WHISPER_DEVICE=cpu
 ```
 
-### OpenAI Whisper API
+## OpenAI Whisper API
 
 ```bash
 WHISPER_BACKEND=openai-api
@@ -115,11 +113,11 @@ WHISPER_DEVICE=cpu
 
 All settings can also be configured via the Settings UI under the Transcription section.
 
-### Transcription language
+## Transcription language
 
 Whisper is pinned to English by default. That keeps it from misdetecting on music intros or cold opens (a common failure mode on podcasts). If you run a non-English show, pick the language in Settings > Transcription or set `WHISPER_LANGUAGE` on first boot. Use `auto` for multilingual feeds; Whisper will detect per request. Full list: [supported languages](https://whisper-api.com/docs/languages/).
 
-### Processing timeouts
+## Processing timeouts
 
 Two knobs for long-running jobs, both in the same panel:
 

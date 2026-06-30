@@ -1,5 +1,9 @@
 # Podcasting 2.0 in MinusPod
 
+[< Docs index](README.md) | [Project README](../README.md)
+
+---
+
 MinusPod sits between the original podcast feed and your player. It
 downloads each episode, removes ad segments, re-encodes the audio, and
 serves a modified RSS feed pointing at the processed files.
@@ -178,3 +182,7 @@ External Podcasting 2.0 documentation:
 - [Publishing tools and hosts](https://podcasting2.org/publishing-tools)
 
 Per-tag specifications are linked inline from the tables above.
+
+---
+
+[< Docs index](README.md) | [Project README](../README.md)
