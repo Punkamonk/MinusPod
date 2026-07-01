@@ -653,6 +653,7 @@ interface CueScanModalProps {
 // times per template. No DB writes; pure diagnostic.
 function CueScanModal({ slug, onClose }: CueScanModalProps) {
   useEscape(onClose);
+  const queryClient = useQueryClient();
   const [picking, setPicking] = useState(true);
   const [selectedEpisode, setSelectedEpisode] = useState<Episode | null>(null);
   const [scoreOverride, setScoreOverride] = useState<string>('');
@@ -661,6 +662,9 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
   const [result, setResult] = useState<CueScanResponse | null>(null);
   const [suggestion, setSuggestion] = useState<ThresholdSuggestResponse | null>(null);
   const [suggesting, setSuggesting] = useState(false);
+  const [applied, setApplied] = useState(false);
+  const activeRef = useRef(true);
+  useEffect(() => () => { activeRef.current = false; }, []);
 
   const runScan = async (ep: Episode, override?: number) => {
     setRunning(true);
@@ -680,16 +684,22 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
     if (!selectedEpisode) return;
     setSuggesting(true);
     setSuggestion(null);
+    setApplied(false);
     try {
-      for (let i = 0; i < 60; i++) {
-        const res = await suggestCueThreshold(slug, selectedEpisode.id);
-        if (res.status === 'ready' || res.status === 'error') {
+      for (let i = 0; i < 180; i++) {
+        const res = await suggestCueThreshold(slug, selectedEpisode.id, i === 0);
+        if (!activeRef.current) return;
+        if (res.status === 'error') {
+          setError(res.error || 'Threshold suggest failed');
+          return;
+        }
+        if (res.status === 'ready') {
           setSuggestion(res);
           return;
         }
         await new Promise((r) => setTimeout(r, 1000));
       }
-      setError('Threshold suggest timed out after 60 seconds');
+      setError('Threshold suggest timed out after 3 minutes');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Suggest failed');
     } finally {
@@ -698,11 +708,14 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
   };
 
   const applySuggested = async (value: number) => {
+    setApplied(false);
     if (!window.confirm(
       `Set the global cue match threshold to ${value.toFixed(2)}? This affects every feed with cue templates.`,
     )) return;
     try {
       await updateSettings({ audioCueTemplateScore: value });
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      setApplied(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not apply');
     }
@@ -830,6 +843,9 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
                 >
                   Apply as global default
                 </button>
+              )}
+              {applied && (
+                <span className="ml-2 text-xs text-green-600 dark:text-green-400">Saved as global default</span>
               )}
             </div>
           );

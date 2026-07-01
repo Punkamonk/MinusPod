@@ -36,6 +36,7 @@ from audio_analysis.cue_candidates import merge_cue_candidates
 from audio_analysis.cue_speech_filter import is_likely_speech
 from audio_analysis.cue_detector import AudioCueDetector
 from audio_analysis.detected_cues import build_detected_cues
+from audio_analysis.cue_threshold_suggest import suggest_cue_threshold
 from audio_fingerprinter import AudioFingerprinter
 from config import (
     AUDIO_CUE_CAPTURE_MIN_SECONDS, AUDIO_CUE_CAPTURE_MAX_SECONDS,
@@ -1001,8 +1002,6 @@ def _run_cue_threshold_scan(podcast_id, episode_id, slug, audio_paths,
                             templates, formant_atten, effect_floor):
     """Sweep every template across the given episode audio paths at a low floor,
     gather occurrence scores, and store a suggested global threshold."""
-    from audio_analysis.cue_template_matcher import AudioCueTemplateMatcher
-    from audio_analysis.cue_threshold_suggest import suggest_cue_threshold
     db = get_database()
     try:
         scores = []
@@ -1015,6 +1014,10 @@ def _run_cue_threshold_scan(podcast_id, episode_id, slug, audio_paths,
             max_matches_per_template=200,
             formant_atten_db=formant_atten,
         )
+        if not matcher.is_usable:
+            db.save_cue_threshold_scan_error(
+                podcast_id, episode_id, 'cue templates could not be loaded')
+            return
         for path in audio_paths:
             signals, debug = matcher.detect_with_debug(path)
             for s in signals:

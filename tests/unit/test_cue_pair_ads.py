@@ -250,3 +250,20 @@ def test_orientation_noop_without_llm_ads():
     result = _result_with(_cue(100.0, 100.5), _cue(220.0, 220.5))
     ads = synthesize_ads_from_cue_pairs([], result)
     assert len(ads) == 1  # greedy fallback unchanged when there are no LLM ads
+
+
+def test_orientation_only_demotes_leading_exit_not_mid_episode():
+    from ad_detector.cue_pair_ads import _orient_cues, _Cue
+
+    def C(start):
+        return _Cue(start=start, end=start + 0.5, confidence=0.9,
+                    label='x', template_id=1, role='boundary')
+
+    c0, c1, ca, cb = C(100), C(300), C(500), C(560)
+    cues = [c0, c1, ca, cb]
+    ads = [{'start': 0, 'end': 90}, {'start': 305, 'end': 360}, {'start': 800, 'end': 860}]
+    _orient_cues(cues, ads, 20.0)
+    assert c0.effective_role == 'end'       # leading exit demoted (phantom guard)
+    assert c1.effective_role == 'boundary'  # entry-side demotion removed
+    assert ca.effective_role == 'boundary'  # mid-episode cue never demoted
+    assert cb.effective_role == 'boundary'

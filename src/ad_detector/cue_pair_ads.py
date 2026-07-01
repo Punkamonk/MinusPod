@@ -28,7 +28,6 @@ from config import (
     AUDIO_CUE_PAIR_MAX_BREAK_FRACTION,
     AUDIO_CUE_PAIR_ORIENT_WINDOW_SECONDS,
     AUDIO_CUE_ROLE_DEFAULT,
-    AUDIO_CUE_ROLE_START,
     AUDIO_CUE_ROLE_END,
     AUDIO_CUE_START_EDGE_ROLES,
     AUDIO_CUE_END_EDGE_ROLES,
@@ -117,11 +116,22 @@ def _is_entry_like(cue, idx, elig, ad_starts, window_s):
 
 
 def _orient_cues(cues, ads, window_s):
-    """Give each boundary-role cue an ephemeral effective_role of 'start'/'end'
-    from first-pass LLM ad edges, so a single both-ends cue pairs on the right
-    phase. Only demotes on positive, neighbor-confirmed evidence; anything
-    ambiguous stays 'boundary' (today's behavior). Never suppresses a missed
-    break whose cues have no nearby LLM ad (they stay 'boundary')."""
+    """Pin the opening phase of a both-ends boundary cue so a leading unpaired
+    exit cue cannot open a pair that spans show content.
+
+    A feed whose single cue brackets both ends of every ad break, but whose
+    opening ad has no entry cue, yields an ordered sequence exit, entry, exit,
+    entry ...; greedy pairing would pair the leading exit with the first entry
+    over CONTENT. Using the first-pass LLM ad edges, the leading exit cues
+    (edge-eligible cues before the first ad-entry cue, sitting just after an LLM
+    ad end) are marked closer-only, so pairing starts at the first real entry.
+
+    Only the leading run is touched: a mid-episode cue is never demoted, so a
+    genuinely missed break bracketed by two boundary cues still synthesizes. A
+    missed break in the very first (pre-entry) position is indistinguishable from
+    a content span there, so orientation favors leaving that ad over cutting into
+    content -- the safer direction. Demotes only on positive LLM evidence; feeds
+    with no LLM ads, or window_s == 0, behave exactly as before."""
     if window_s <= 0 or not ads:
         return
     ad_starts = sorted(float(a['start']) for a in ads if _ad_edges_ok(a))
@@ -135,21 +145,21 @@ def _orient_cues(cues, ads, window_s):
     elig = [c for c in cues
             if c.role in AUDIO_CUE_START_EDGE_ROLES
             or c.role in AUDIO_CUE_END_EDGE_ROLES]
-    exit_like = [_is_exit_like(c, i, elig, ad_ends, window_s) for i, c in enumerate(elig)]
-    entry_like = [_is_entry_like(c, i, elig, ad_starts, window_s) for i, c in enumerate(elig)]
-    for i, c in enumerate(elig):
-        if c.role != AUDIO_CUE_ROLE_DEFAULT:
-            continue  # only orient ambiguous 'boundary' cues
-        ex, en = exit_like[i], entry_like[i]
-        next_entry = i + 1 < len(elig) and entry_like[i + 1]
-        prev_exit = i - 1 >= 0 and exit_like[i - 1]
-        # Demote to closer-only only when the NEXT eligible cue is an entry (so
-        # the span between them is content, not a missed break). Symmetric on the
-        # entry side. This keeps a missed-break entry cue openable.
-        if ex and not en and next_entry:
+    # The first ad-entry cue: greedy pairing is already correctly phased from
+    # there on, so only cues before it can be a leading unpaired exit. Limiting
+    # orientation to that leading run keeps it from demoting a mid-episode cue
+    # and stranding a genuinely missed break bracketed by two boundary cues.
+    first_entry = next(
+        (i for i, c in enumerate(elig)
+         if _is_entry_like(c, i, elig, ad_starts, window_s)),
+        None,
+    )
+    if first_entry is None:
+        return
+    for i in range(first_entry):
+        c = elig[i]
+        if c.role == AUDIO_CUE_ROLE_DEFAULT and _is_exit_like(c, i, elig, ad_ends, window_s):
             c.effective_role = AUDIO_CUE_ROLE_END
-        elif en and not ex and prev_exit:
-            c.effective_role = AUDIO_CUE_ROLE_START
 
 
 def synthesize_ads_from_cue_pairs(
