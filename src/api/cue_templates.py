@@ -117,7 +117,7 @@ def _template_to_meta_dict(row: dict) -> dict:
         'enabled': bool(row['enabled']),
         'createdAt': row['created_at'],
         'createdBy': row['created_by'] if 'created_by' in row.keys() else None,
-        'hasAudio': bool(row.get('pcm_blob')),
+        'hasAudio': bool(row.get('pcm_blob')) or bool(row.get('has_audio')),
     }
 
 

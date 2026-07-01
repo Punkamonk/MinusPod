@@ -282,6 +282,37 @@ def test_cue_template_audio_404_for_unknown(app_client, seeded):
     assert resp.status_code == 404
 
 
+def test_list_shows_has_audio_true(app_client, seeded):
+    headers = _csrf(app_client)
+    slug = seeded['slug']
+    _seed_template(seeded['db'], slug)
+    r = app_client.get(f'/api/v1/feeds/{slug}/cue-templates', headers=headers)
+    assert r.status_code == 200
+    templates = r.get_json()['templates']
+    assert len(templates) == 1
+    assert templates[0]['hasAudio'] is True
+
+
+def test_audio_422_no_pcm_and_list_shows_false(app_client, seeded):
+    from audio_analysis.cue_features import N_COEFFS, serialize_mfcc
+    headers = _csrf(app_client)
+    db = seeded['db']
+    slug = seeded['slug']
+    pid = db.get_podcast_by_slug(slug)['id']
+    mfcc = np.zeros((5, N_COEFFS), dtype=np.float32)
+    tid = db.create_cue_template(
+        podcast_id=pid, cue_type='ad_break_boundary', source_episode_id=None,
+        source_offset_s=0.0, duration_s=0.5, sample_rate=16000, n_coeffs=N_COEFFS,
+        mfcc_blob=serialize_mfcc(mfcc), pcm_blob=None, pcm_sample_rate=None,
+    )
+    resp = app_client.get(f'/api/v1/cue-templates/{tid}/audio', headers=headers)
+    assert resp.status_code == 422
+    r = app_client.get(f'/api/v1/feeds/{slug}/cue-templates', headers=headers)
+    tpls = r.get_json()['templates']
+    match = next(t for t in tpls if t['id'] == tid)
+    assert match['hasAudio'] is False
+
+
 # --- settings validation ---------------------------------------------------
 
 def test_cue_threshold_suggest_starts_and_completes(app_client, seeded):

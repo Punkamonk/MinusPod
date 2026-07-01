@@ -5359,11 +5359,11 @@ paths:
               required: [episodeId]
               properties:
                 episodeId:
-                  type: integer
+                  type: string
                   description: Anchor episode to include in the sweep.
                 rescan:
                   type: boolean
-                  description: Force a fresh cue scan even if results are cached.
+                  description: Force a fresh scan even if results are cached.
       responses:
         '200':
           description: Threshold suggestion result
@@ -5374,33 +5374,65 @@ paths:
                 required: [episodeId, status]
                 properties:
                   episodeId:
-                    type: integer
+                    type: string
                   status:
                     type: string
                     enum: [scanning, ready, error]
                     description: scanning while results are being gathered, ready when a suggestion is available, error on failure.
                   suggestion:
-                    type: number
-                    description: Proposed threshold (0-1). Present when status is ready.
+                    type: object
+                    description: Suggestion object. Present when status is ready.
+                    properties:
+                      confidence:
+                        type: string
+                        enum: [high, partial, low]
+                        description: high when signal is clearly above the effect floor; partial when signal is below the effect floor; low when no clear gap was found.
+                      suggested:
+                        type: number
+                        nullable: true
+                        description: Proposed threshold (0-1), or null on low confidence.
+                      noiseCeiling:
+                        type: number
+                        description: Top of the noise cluster.
+                      signalFloor:
+                        type: number
+                        description: Bottom of the signal cluster.
+                      gapWidth:
+                        type: number
+                        description: Width of the gap between noise and signal.
+                      signalCount:
+                        type: integer
+                        description: Number of occurrences in the signal cluster.
+                      effectFloor:
+                        type: number
+                        description: Lowest confidence at which a cue can affect a cut on this install.
+                      effectFloorWarning:
+                        type: string
+                        nullable: true
+                        enum: [signal-below-floor, null]
+                        description: signal-below-floor when the signal cluster sits below the effect floor; null otherwise.
+                      scoresN:
+                        type: integer
+                        description: Total number of occurrence scores used.
+                      reason:
+                        type: string
+                        description: Human-readable reason. Present on low confidence results.
                   sampleEpisodes:
                     type: integer
                     description: Number of episodes included in the sweep.
                   floorUsed:
                     type: number
-                    description: Noise-floor value the suggestion was derived from.
+                    description: Low-floor threshold the sweep used to gather scores.
                   perTemplate:
-                    type: array
-                    description: Per-template breakdown. Present when status is ready.
-                    items:
-                      type: object
-                      properties:
-                        templateId:
-                          type: integer
-                        suggestion:
-                          type: number
+                    type: object
+                    description: Map of templateId to peak score across the sampled episodes. Present when status is ready.
+                    additionalProperties:
+                      type: number
                   error:
                     type: string
                     description: Error message. Present when status is error.
+        '400':
+          description: No cue templates on feed, or invalid request
         '404':
           description: Feed or episode not found
 

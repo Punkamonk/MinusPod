@@ -111,7 +111,8 @@ class CueTemplateMixin:
         cursor = conn.execute(
             "SELECT id, podcast_id, label, cue_type, source_episode_id, source_offset_s, "
             "duration_s, sample_rate, n_coeffs, scope, network_id, "
-            "enabled, created_at, created_by "
+            "enabled, created_at, created_by, "
+            "(pcm_blob IS NOT NULL) AS has_audio "
             "FROM audio_cue_templates WHERE podcast_id = ? "
             "ORDER BY created_at DESC",
             (podcast_id,),
@@ -132,7 +133,8 @@ class CueTemplateMixin:
         cursor = conn.execute(
             """SELECT id, podcast_id, label, cue_type, source_episode_id, source_offset_s,
                       duration_s, sample_rate, n_coeffs, scope, network_id,
-                      enabled, created_at, created_by
+                      enabled, created_at, created_by,
+                      (pcm_blob IS NOT NULL) AS has_audio
                FROM audio_cue_templates
                WHERE podcast_id = :pid
                   OR (scope = 'network' AND network_id IS NOT NULL AND network_id != ''
