@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import wave
 import zipfile
 from pathlib import Path
@@ -72,10 +73,12 @@ def load_template(source: Path) -> Dict[str, Any]:
     }
 
 
+_logger = logging.getLogger("cuebench.templates")
+
+
 def load_templates(sources: List[Path]) -> List[Dict[str, Any]]:
     """Load and validate multiple template sources. Skips failures with a warning."""
-    import logging
-    logger = logging.getLogger("cuebench.templates")
+    logger = _logger
     rows = []
     for src in sources:
         try:
@@ -116,6 +119,18 @@ def _validate_manifest(manifest: dict, source: Path) -> None:
     if version not in (1, 2):
         raise ValueError(
             f"{source}: unsupported schemaVersion {version!r}; expected 1 or 2"
+        )
+    sample_rate = manifest.get("sampleRate")
+    if sample_rate is not None and sample_rate != SAMPLE_RATE_HZ:
+        raise ValueError(
+            f"{source}: manifest sampleRate {sample_rate!r} != {SAMPLE_RATE_HZ};"
+            f" re-export the cue at {SAMPLE_RATE_HZ} Hz"
+        )
+    n_coeffs = manifest.get("nCoeffs")
+    if n_coeffs is not None and n_coeffs != N_COEFFS:
+        raise ValueError(
+            f"{source}: manifest nCoeffs {n_coeffs!r} != {N_COEFFS};"
+            f" re-export the cue with {N_COEFFS} MFCC coefficients"
         )
 
 

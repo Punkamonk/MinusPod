@@ -1,6 +1,7 @@
 """Typer CLI for the MinusPod cue-template eval harness."""
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -49,7 +50,9 @@ def _resolve_audio(
         )
         raise typer.Exit(1)
     try:
-        return feeds_mod.fetch(rss or "", max_episodes=max_episodes, audio_files=audio)
+        if rss:
+            return feeds_mod.fetch(rss, max_episodes=max_episodes, audio_files=audio)
+        return feeds_mod.fetch("", max_episodes=max_episodes, audio_files=audio)
     except Exception as e:
         typer.echo(f"error resolving audio: {e}", err=True)
         raise typer.Exit(1)
@@ -151,12 +154,11 @@ def report(
     json_path = (
         Path(output_dir) / "report.json"
         if output_dir
-        else Path(__file__).resolve().parents[3] / "results" / "report.json"
+        else Path(__file__).resolve().parents[2] / "results" / "report.json"
     )
     if not json_path.exists():
         typer.echo(f"error: {json_path} not found -- run sweep first", err=True)
         raise typer.Exit(1)
-    import json
     payload = json.loads(json_path.read_text())
     md_path, _ = report_mod.write(
         payload["sweep"],

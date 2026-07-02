@@ -6,12 +6,17 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-logger = logging.getLogger("cuebench.scan_eval")
-
 from config import (
     AUDIO_CUE_RECURRENCE_SIMILARITY,
     AUDIO_CUE_RECURRENCE_MIN_COUNT,
 )
+
+try:
+    from audio_fingerprinter import AudioFingerprinter
+except ImportError:
+    AudioFingerprinter = None
+
+logger = logging.getLogger("cuebench.scan_eval")
 
 
 def run(
@@ -31,12 +36,10 @@ def run(
       skip_reason: str | None
       results: list[dict]  -- one per episode
     """
-    try:
-        from audio_fingerprinter import AudioFingerprinter
-    except ImportError as e:
+    if AudioFingerprinter is None:
         return {
             "available": False,
-            "skip_reason": f"could not import AudioFingerprinter: {e}",
+            "skip_reason": "could not import AudioFingerprinter",
             "results": [],
         }
 

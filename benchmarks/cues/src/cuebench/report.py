@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-_RESULTS_DIR = Path(__file__).resolve().parents[3] / "results"
+_RESULTS_DIR = Path(__file__).resolve().parents[2] / "results"
 
 
 def write(

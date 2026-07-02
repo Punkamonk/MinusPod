@@ -146,10 +146,16 @@ def _sweep_one_profile(
         signals, debug = matcher.detect_with_debug(str(path))
         for sig in signals:
             score = (sig.details or {}).get("score", sig.confidence)
-            all_scores.append(score)
             tid = (sig.details or {}).get("template_id")
-            if tid in per_id_scores:
-                per_id_scores[tid].append(score)
+            if tid not in per_id_scores:
+                logger.warning(
+                    "signal has unknown template_id %r; skipping from all_scores"
+                    " and per-template to keep aggregations consistent",
+                    tid,
+                )
+                continue
+            all_scores.append(score)
+            per_id_scores[tid].append(score)
         for t in debug.get("templates", []):
             tid = t["id"]
             if tid in per_id_peak:

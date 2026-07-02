@@ -73,6 +73,34 @@ class TestValidateManifest:
         with pytest.raises(ValueError, match="schemaVersion"):
             _validate_manifest(manifest, Path("x"))
 
+    def test_wrong_sample_rate_rejected(self):
+        manifest = _make_manifest(sampleRate=44100)
+        with pytest.raises(ValueError, match="sampleRate"):
+            _validate_manifest(manifest, Path("x"))
+
+    def test_correct_sample_rate_accepted(self):
+        manifest = _make_manifest(sampleRate=16000)
+        _validate_manifest(manifest, Path("x"))  # must not raise
+
+    def test_missing_sample_rate_accepted(self):
+        manifest = _make_manifest()
+        del manifest["sampleRate"]
+        _validate_manifest(manifest, Path("x"))  # optional field -- must not raise
+
+    def test_wrong_n_coeffs_rejected(self):
+        manifest = _make_manifest(nCoeffs=20)
+        with pytest.raises(ValueError, match="nCoeffs"):
+            _validate_manifest(manifest, Path("x"))
+
+    def test_correct_n_coeffs_accepted(self):
+        manifest = _make_manifest(nCoeffs=13)
+        _validate_manifest(manifest, Path("x"))  # must not raise
+
+    def test_missing_n_coeffs_accepted(self):
+        manifest = _make_manifest()
+        del manifest["nCoeffs"]
+        _validate_manifest(manifest, Path("x"))  # optional field -- must not raise
+
 
 # ---------------------------------------------------------------------------
 # Tests: _decode_wav validation
