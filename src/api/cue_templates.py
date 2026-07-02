@@ -71,6 +71,7 @@ from config import (
     AUDIO_CUE_AD_AFFINITY_TOLERANCE_SECONDS,
     AUDIO_CUE_AD_AFFINITY_MIN_FRACTION,
     AUDIO_CUE_AD_AFFINITY_PHASE_FRACTION,
+    resolve_cue_template_score,
 )
 from utils.constants import EpisodeStatus
 from utils.validation import is_valid_episode_id
@@ -357,8 +358,15 @@ def cue_scan_episode(slug, episode_id):
             score = max(0.0, min(0.99, float(override)))
         except (TypeError, ValueError):
             return error_response('scoreThreshold must be a number', 400)
+        threshold_source = 'request'
     else:
-        score = db.get_setting_float('audio_cue_template_score', DEFAULT_MATCH_SCORE)
+        per_feed = db.get_podcast_cue_score_override(podcast['id'])
+        if per_feed is not None:
+            score = per_feed
+            threshold_source = 'override'
+        else:
+            score = db.get_setting_float('audio_cue_template_score', DEFAULT_MATCH_SCORE)
+            threshold_source = 'global'
     matcher = AudioCueTemplateMatcher(
         templates=templates, score_threshold=score,
         formant_atten_db=db.get_setting_float(
@@ -381,6 +389,7 @@ def cue_scan_episode(slug, episode_id):
     return json_response({
         'episodeId': episode_id,
         'thresholdUsed': debug['threshold'],
+        'thresholdSource': threshold_source,
         'elapsedSeconds': debug['elapsed_s'],
         'templates': [
             {
@@ -433,7 +442,7 @@ def preview_cue_template(slug, episode_id):
     if err:
         return err
 
-    score = db.get_setting_float('audio_cue_template_score', DEFAULT_MATCH_SCORE)
+    score = resolve_cue_template_score(db, podcast['id'])
     matcher = AudioCueTemplateMatcher(
         templates=[template], score_threshold=score,
         formant_atten_db=db.get_setting_float(
@@ -804,7 +813,7 @@ _AFFINITY_SIBLING_TOP_N = 5
 _AFFINITY_SIBLING_MAX = 2
 
 
-def _sibling_affinity_fallback(recurring, slug, episode_id, db, storage, audio_path):
+def _sibling_affinity_fallback(recurring, slug, episode_id, db, storage, audio_path, podcast_id=None):
     """Compute ad-boundary affinity using up to 2 recent sibling episodes.
 
     Used only when the scanned episode has no usable ad history. Builds ephemeral
@@ -877,8 +886,7 @@ def _sibling_affinity_fallback(recurring, slug, episode_id, db, storage, audio_p
     if not rows:
         return recurring
 
-    score_threshold = db.get_setting_float(
-        'audio_cue_template_score', AUDIO_CUE_TEMPLATE_SCORE)
+    score_threshold = resolve_cue_template_score(db, podcast_id)
     matcher = AudioCueTemplateMatcher(rows, score_threshold=score_threshold)
     pooled_hits = {r['id']: 0 for r in rows}
     pooled_count = {r['id']: 0 for r in rows}
@@ -1030,7 +1038,8 @@ def _run_cue_candidate_scan(podcast_id, episode_id, slug, audio_path,
         else:
             # Sibling fallback: only when scanned episode has no ad history.
             recurring = _sibling_affinity_fallback(
-                recurring, slug, episode_id, db, storage, audio_path)
+                recurring, slug, episode_id, db, storage, audio_path,
+                podcast_id=podcast_id)
         try:
             siblings = _completed_sibling_audio_paths(db, storage, slug, episode_id)
             cross_episode = fp.discover_cross_episode_cues(
@@ -1207,11 +1216,15 @@ def _run_cue_threshold_scan(podcast_id, episode_id, slug, audio_paths,
             for t in debug.get('templates', []):
                 peaks[t['id']] = max(peaks.get(t['id'], 0.0), t.get('peak_score', 0.0))
         suggestion = suggest_cue_threshold(scores, effect_floor=effect_floor)
+        current_threshold = resolve_cue_template_score(db, podcast_id)
+        per_feed_val = db.get_podcast_cue_score_override(podcast_id)
         db.save_cue_threshold_scan_result(podcast_id, episode_id, {
             'suggestion': suggestion,
             'sampleEpisodes': len(audio_paths),
             'floorUsed': AUDIO_CUE_SUGGEST_FLOOR,
             'perTemplate': peaks,
+            'currentThreshold': current_threshold,
+            'scope': 'feed' if per_feed_val is not None else 'global',
         })
     except Exception as e:
         logger.warning(f"Cue threshold scan failed for {slug}:{episode_id}: {e}")

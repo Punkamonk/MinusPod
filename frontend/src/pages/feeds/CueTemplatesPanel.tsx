@@ -22,8 +22,8 @@ import {
   type ThresholdSuggestResponse,
 } from '../../api/cueTemplates';
 import { getCueFeedAdvisory } from '../../api/cueDetections';
-import { getEpisode, getEpisodes, getFeed, getFeeds } from '../../api/feeds';
-import { getSettings, updateSettings } from '../../api/settings';
+import { getEpisode, getEpisodes, getFeed, getFeeds, updateFeed } from '../../api/feeds';
+import { getSettings } from '../../api/settings';
 import type { Feed } from '../../api/types';
 import type { Episode } from '../../api/types';
 import { formatTime } from '../../utils/adReviewHelpers';
@@ -710,11 +710,13 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
   const applySuggested = async (value: number) => {
     setApplied(false);
     if (!window.confirm(
-      `Set the global cue match threshold to ${value.toFixed(2)}? This affects every feed with cue templates.`,
+      `Set the per-feed cue match threshold to ${value.toFixed(2)} for this feed? ` +
+      `The global setting will not change.`,
     )) return;
     try {
-      await updateSettings({ audioCueTemplateScore: value });
-      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      await updateFeed(slug, { cueTemplateScoreOverride: value });
+      queryClient.invalidateQueries({ queryKey: ['feed', slug] });
+      queryClient.invalidateQueries({ queryKey: ['feeds'] });
       setApplied(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not apply');

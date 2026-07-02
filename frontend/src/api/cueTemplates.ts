@@ -180,6 +180,7 @@ export interface CueScanTemplateResult {
 export interface CueScanResponse {
   episodeId: string;
   thresholdUsed: number;
+  thresholdSource?: 'override' | 'global' | 'request';
   elapsedSeconds: number;
   templates: CueScanTemplateResult[];
 }
@@ -216,6 +217,8 @@ export interface ThresholdSuggestResponse {
   suggestion?: ThresholdSuggestion;
   sampleEpisodes?: number;
   floorUsed?: number;
+  currentThreshold?: number;
+  scope?: 'feed' | 'global';
 }
 
 export async function suggestCueThreshold(

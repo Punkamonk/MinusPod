@@ -489,6 +489,13 @@ paths:
                     - keep_content
                     - null
                   description: Per-feed ad-detection mode. 'keep_content' (experimental) has the LLM label show content and removes everything else; null or 'blacklist' is the default, which labels and removes ads.
+                cueTemplateScoreOverride:
+                  type:
+                    - number
+                    - 'null'
+                  minimum: 0.30
+                  maximum: 0.99
+                  description: Per-feed ZNCC match threshold for audio cue template matching. Overrides the global audioCueTemplateScore setting for this feed. null or omitted clears the override and falls back to the global setting.
                 maxEpisodes:
                   type:
                     - integer
@@ -5001,6 +5008,13 @@ paths:
                     type: string
                   thresholdUsed:
                     type: number
+                  thresholdSource:
+                    type: string
+                    enum:
+                      - override
+                      - global
+                      - request
+                    description: Source of the threshold value. 'override' = per-feed column; 'global' = global setting; 'request' = scoreThreshold body field.
                   elapsedSeconds:
                     type: number
                   templates:
@@ -5439,6 +5453,15 @@ paths:
                   floorUsed:
                     type: number
                     description: Low-floor threshold the sweep used to gather scores.
+                  currentThreshold:
+                    type: number
+                    description: The threshold in effect for this feed at scan time (per-feed override if set, else global setting).
+                  scope:
+                    type: string
+                    enum:
+                      - feed
+                      - global
+                    description: Whether currentThreshold came from a per-feed override ('feed') or the global setting ('global').
                   perTemplate:
                     type: object
                     description: Map of templateId to peak score across the sampled episodes. Present when status is ready.
@@ -5753,6 +5776,13 @@ components:
             - keep_content
             - null
           description: Per-feed ad-detection mode. 'keep_content' (experimental) labels show content and removes everything else; null or 'blacklist' is the default ad-removal behavior.
+        cueTemplateScoreOverride:
+          type:
+            - number
+            - 'null'
+          minimum: 0.30
+          maximum: 0.99
+          description: Per-feed ZNCC match threshold override for audio cue template matching. null means the global audioCueTemplateScore setting applies.
         maxEpisodes:
           type:
             - integer

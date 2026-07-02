@@ -350,6 +350,29 @@ def resolve_detection_mode(db, slug):
         return DETECTION_MODE_BLACKLIST
     return mode if mode in DETECTION_MODES else DETECTION_MODE_BLACKLIST
 
+
+def resolve_cue_template_score(db, podcast_id):
+    """Per-feed cue match threshold, falling back to the global setting.
+
+    If the feed has a non-None cue_template_score_override, that value wins.
+    Otherwise returns the global audio_cue_template_score setting, or the
+    hard-coded default when the setting is absent.
+    """
+    try:
+        if db and podcast_id is not None:
+            override = db.get_podcast_cue_score_override(podcast_id)
+            if override is not None:
+                return override
+    except Exception:
+        pass
+    try:
+        if db:
+            return db.get_setting_float('audio_cue_template_score', AUDIO_CUE_TEMPLATE_SCORE)
+    except Exception:
+        pass
+    return AUDIO_CUE_TEMPLATE_SCORE
+
+
 # Cue template types (#350). A cue is one of a fixed set of types chosen from a
 # dropdown, never freeform text, so the phrase fed to the LLM prompt is always
 # consistent and the matching role is explicit. Maps type key -> (canonical

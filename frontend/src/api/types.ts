@@ -19,6 +19,7 @@ export interface Feed {
   languageOverride?: string | null;
   titleOverride?: string | null;
   detectionMode?: string | null;
+  cueTemplateScoreOverride?: number | null;
   maxEpisodes?: number | null;
   onlyExposeProcessedEpisodes?: boolean | null;
 }

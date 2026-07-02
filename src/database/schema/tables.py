@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS podcasts (
     language_override TEXT,
     title_override TEXT,
     detection_mode TEXT,
+    cue_template_score_override REAL,
     skip_second_pass INTEGER DEFAULT 0,
     max_episodes INTEGER,
     only_expose_processed_episodes INTEGER,

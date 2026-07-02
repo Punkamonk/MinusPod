@@ -15,6 +15,7 @@ from .base import AudioAnalysisResult
 from .volume_analyzer import VolumeAnalyzer
 from .transition_detector import TransitionDetector
 from .cue_template_matcher import AudioCueTemplateMatcher, DEFAULT_MATCH_SCORE
+from config import AUDIO_CUE_FORMANT_ATTEN_DB, resolve_cue_template_score
 
 # Import from utils for consistent audio duration implementation
 from utils.audio import get_audio_duration
@@ -136,10 +137,7 @@ class AudioAnalyzer:
                 if feed_id is not None else []
             )
             if templates:
-                score = self.db.get_setting_float(
-                    'audio_cue_template_score', DEFAULT_MATCH_SCORE,
-                )
-                from config import AUDIO_CUE_FORMANT_ATTEN_DB
+                score = resolve_cue_template_score(self.db, feed_id)
                 matcher = AudioCueTemplateMatcher(
                     templates=templates, score_threshold=score,
                     formant_atten_db=self.db.get_setting_float(

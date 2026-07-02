@@ -420,6 +420,7 @@ class SchemaMixin:
             ('language_override', 'TEXT'),
             ('title_override', 'TEXT'),
             ('detection_mode', 'TEXT'),
+            ('cue_template_score_override', 'REAL'),
             ('skip_second_pass', 'INTEGER DEFAULT 0'),
             ('max_episodes', 'INTEGER'),
             ('etag', 'TEXT'),
