@@ -46,9 +46,10 @@ function TransportBar({
 }: TransportBarProps) {
   return (
     <div className="mt-3 px-3 py-2 rounded-lg bg-secondary/50 border border-border">
-      {/* Primary controls -- centered on their own row so the transport reads
-          as the focal cluster, identically in both editors. */}
-      <div className="flex items-center justify-center gap-0.5 flex-wrap">
+      {/* Primary controls -- the transport cluster is centered as the focal
+          element; the speed selector is pinned to the right of the SAME row
+          (absolute, so it never wraps to its own line on a narrow modal). */}
+      <div className="relative flex items-center justify-center gap-0.5">
         <button type="button" onClick={onSeekToStart} className={`p-1.5 rounded ${ghostBtn}`} title="Jump to START pin">
           <SkipBack className="w-4 h-4" />
         </button>
@@ -78,7 +79,7 @@ function TransportBar({
         <button type="button" onClick={onStop} className={`p-1.5 rounded ${ghostBtn}`} title="Stop (pause + return to START)">
           <Square className="w-4 h-4" />
         </button>
-        <label className="relative inline-flex items-center ml-0.5" title="Playback speed">
+        <label className="absolute right-1 top-1/2 -translate-y-1/2 inline-flex items-center" title="Playback speed">
           <span className="sr-only">Playback speed</span>
           <select
             value={playbackRate}

@@ -6,11 +6,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.31.2] - 2026-07-01
+
+### Changed
+
+- The playback speed control stays on the transport row, pinned to the right, instead of dropping to its own line on a narrow screen. The transport buttons stay centered.
+
 ## [2.31.1] - 2026-07-01
 
 ### Changed
 
-- The cue editor's transport bar no longer wraps on a narrow screen. The play-selection control is a compact icon-only amber button, the playback speed stays on the transport row, and the time readout is centered under the controls. The amber shifts a shade darker in light mode for contrast.
+- The cue editor's play-selection control is now a compact icon-only amber button, and the time readout is centered under the controls. The amber shifts a shade darker in light mode for contrast.
 - The Add/Edit ad editor can now audition its selection: the same play-selection control plays only the marked ad span (start to end), matching the cue editor. Scrubbing, dragging a pin, or seeking during the audition ends it, so it never pauses playback you start afterward.
 
 ## [2.31.0] - 2026-07-01
