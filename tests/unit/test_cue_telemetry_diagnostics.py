@@ -116,6 +116,29 @@ def test_unused_reason_out_of_reach():
     assert recs[0]['unused_reason'] == 'out_of_reach'
 
 
+def test_unused_reason_out_of_reach_start_role_past_ad_start():
+    # Role-aware asymmetric reach (finding 10): a start-role cue's END sits 6s PAST
+    # the ad start (cue.end = ad_start + 6). Its window is [ad_start-lead, ad_start
+    # +lag] on cue.end, i.e. signed d=ad_start-cue.end in [-lag, +lead] = [-4, +10].
+    # d = -6 < -4 -> out_of_reach. The old symmetric abs() gate (|-6| <= max(10,4))
+    # wrongly called this 'unpaired'.
+    cue = _tcue(106.0, 106.0, role='start', cue_type='ad_break_start', conf=0.95)
+    ads = [{'start': 100.0, 'end': 300.0}]
+    recs = build_cue_detection_records(ads, _result(signals=[cue]), pre_snap_ads=ads,
+                                       snap_confidence=0.80, snap_lead_s=10.0, snap_lag_s=4.0)
+    assert recs[0]['unused_reason'] == 'out_of_reach'
+
+
+def test_unused_reason_in_reach_start_role_within_one_sided_window():
+    # Same lead=10/lag=4, but the start-role cue's END is 8s BEFORE the ad start
+    # (d = ad_start - cue.end = +8, within [-4, +10]) -> within reach, not out.
+    cue = _tcue(92.0, 92.0, role='start', cue_type='ad_break_start', conf=0.95)
+    ads = [{'start': 100.0, 'end': 300.0}]
+    recs = build_cue_detection_records(ads, _result(signals=[cue]), pre_snap_ads=ads,
+                                       snap_confidence=0.80, snap_lead_s=10.0, snap_lag_s=4.0)
+    assert recs[0]['unused_reason'] != 'out_of_reach'
+
+
 def test_unused_reason_unpaired_default():
     # Eligible, high-conf, within reach of an ad edge but still not used and no
     # pair diagnostics -> unpaired.

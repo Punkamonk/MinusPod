@@ -190,7 +190,14 @@ function CueDetectionsSection({ slug, episodeId, detections }: CueDetectionsSect
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  {d.verdict === 'pending' ? (
+                  {d.outcome === 'below_threshold' ? (
+                    <span
+                      className="px-1.5 py-0.5 text-xs rounded font-medium bg-muted text-muted-foreground"
+                      title="Informational; not counted in stats"
+                    >
+                      informational
+                    </span>
+                  ) : d.verdict === 'pending' ? (
                     <>
                       <button
                         onClick={() => mutation.mutate({ id: d.id, verdict: 'confirmed' })}

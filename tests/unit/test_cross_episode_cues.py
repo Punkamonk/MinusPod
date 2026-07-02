@@ -218,6 +218,43 @@ def test_fine_hi_retracts_coarse_overshoot():
     assert count == 2  # no survivor traded away for the retract
 
 
+def test_emitted_run_never_below_min_len_with_min_len_gt_win():
+    # INVARIANT (finding 3): with min_len (24) > win (16), every emitted run must
+    # satisfy (end - start) >= min_len. The retraction floor is max(win, min_len)
+    # so fine retraction can never shrink a coarse-valid run below min_len and
+    # drop it. Exercises the min_len > win path across seeds.
+    step, win, min_len = 8, 16, 24
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        seg = _rand(min_len + 2, rng)
+        target = np.concatenate([_rand(24, rng), seg, _rand(30, rng)])
+        sib1 = np.concatenate([_rand(10, rng), seg, _rand(30, rng)])
+        sib2 = np.concatenate([_rand(20, rng), seg, _rand(30, rng)])
+        segs = _find_shared_segments(target, [sib1, sib2], win=win, step=step,
+                                     similarity=0.73, min_matches=2,
+                                     min_len=min_len, max_len=400)
+        for start, end, _ in segs:
+            assert (end - start) >= min_len  # coarse-valid run never retracted away
+
+
+def test_capped_run_still_one_candidate_after_refinement():
+    # INVARIANT (finding 5): a shared run longer than max_len yields ONE capped
+    # candidate, not adjacent fragments. coarse_capped is recorded BEFORE fine
+    # refinement so a pulled-back hi cannot defeat the skip-past-true-end walk.
+    rng = np.random.default_rng(12)
+    step, win = 8, 16
+    seg = _rand(300, rng)  # far longer than max_len
+    target = np.concatenate([_rand(10, rng), seg, _rand(10, rng)])
+    sib1 = np.concatenate([_rand(5, rng), seg, _rand(5, rng)])
+    sib2 = np.concatenate([_rand(15, rng), seg, _rand(5, rng)])
+    segs = _find_shared_segments(target, [sib1, sib2], win=win, step=step,
+                                 similarity=0.73, min_matches=2, min_len=win,
+                                 max_len=120)
+    assert len(segs) == 1
+    start, end, _ = segs[0]
+    assert (end - start) <= 120
+
+
 def test_fine_pass_preserves_survivor_count():
     # SENSITIVITY (reviewer repro): 3 siblings share seg; right after the true
     # boundary sib3 diverges into noise while sib1/sib2 share a short 3-subfp

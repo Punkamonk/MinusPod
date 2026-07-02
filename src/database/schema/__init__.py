@@ -1441,6 +1441,11 @@ class SchemaMixin:
                 )
                 before_cd = conn.execute(
                     "SELECT COUNT(*) FROM cue_detections").fetchone()[0]
+                # One explicit transaction: create/insert/drop/rename roll back
+                # atomically on any mid-way crash, leaving no orphan. Self-heal
+                # first drops any orphan a prior crashed rebuild left behind.
+                conn.execute("DROP TABLE IF EXISTS cue_detections_rebuild")
+                conn.execute("BEGIN")
                 conn.execute("""
                     CREATE TABLE cue_detections_rebuild (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1468,13 +1473,13 @@ class SchemaMixin:
                 after_cd = conn.execute(
                     "SELECT COUNT(*) FROM cue_detections_rebuild").fetchone()[0]
                 if after_cd != before_cd:
-                    conn.execute("DROP TABLE cue_detections_rebuild")
                     raise RuntimeError(
                         f"outcome CHECK rebuild row mismatch: {before_cd} != {after_cd}")
                 conn.execute("DROP TABLE cue_detections")
                 conn.execute(
                     "ALTER TABLE cue_detections_rebuild "
                     "RENAME TO cue_detections")
+                conn.execute("COMMIT")
                 logger.info(
                     "Migration: dropped legacy outcome CHECK on "
                     "cue_detections (%d rows preserved)", before_cd)

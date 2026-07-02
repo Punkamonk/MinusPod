@@ -282,6 +282,11 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                     const v = parseFloat(raw);
                     if (!Number.isNaN(v) && v >= CUE_SCORE_MIN && v <= CUE_SCORE_MAX) {
                       updateMutation.mutate({ cueTemplateScoreOverride: v });
+                    } else {
+                      // Invalid input: revert to the persisted value so the
+                      // field doesn't keep showing unsaved text.
+                      setCueScoreInput(feed.cueTemplateScoreOverride != null
+                        ? String(feed.cueTemplateScoreOverride) : '');
                     }
                   }
                 }}

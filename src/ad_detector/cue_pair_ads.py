@@ -337,12 +337,14 @@ def synthesize_ads_from_cue_pairs(
 
     # A trailing eligible cue (index len-1) is never an opener in the loop above,
     # and any opener that fell through without a partner is already handled. Mark
-    # the remaining unconsumed, unclassified cues by role: closer-capable cues
-    # simply found no opener (no_partner); the rest are a phase mismatch.
+    # the remaining unconsumed, unclassified cues by role: any cue that is start-
+    # or end-capable in context simply found no partner (no_partner); only a cue
+    # that can play neither part is a phase mismatch.
     for idx, c in enumerate(cues):
         if consumed[idx] or reasons[idx] is not None:
             continue
-        if c.effective_role in AUDIO_CUE_END_EDGE_ROLES:
+        if (c.effective_role in AUDIO_CUE_START_EDGE_ROLES
+                or c.effective_role in AUDIO_CUE_END_EDGE_ROLES):
             reasons[idx] = SKIP_NO_PARTNER
         else:
             reasons[idx] = SKIP_PHASE_MISMATCH

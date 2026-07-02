@@ -325,9 +325,10 @@ class AudioCueTemplateMatcher:
                             'score': round(score, 3),
                         },
                     ))
-                elif (len(per_template_near_misses[tpl.template_id])
-                      < AUDIO_CUE_NEAR_MISS_MAX_PER_TEMPLATE * 5):
+                else:
                     # In [near_miss_floor, threshold): advisory near-miss only.
+                    # Append unconditionally -- finalize() dedupes then caps by
+                    # score so the strongest survive; _peak_pick bounds memory.
                     per_template_near_misses[tpl.template_id].append({
                         'template_id': tpl.template_id,
                         'label': tpl.label,

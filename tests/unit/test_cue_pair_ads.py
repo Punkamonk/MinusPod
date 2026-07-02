@@ -326,8 +326,9 @@ def test_diag_no_partner_in_band():
 
 
 def test_diag_phase_mismatch_on_wrong_order():
-    # An 'end'-role cue cannot open and a 'start'-role cue cannot close, so a
-    # sequence of end-then-start never pairs: both are phase-mismatched.
+    # An 'end'-role cue cannot open, so as an opener candidate it is a phase
+    # mismatch. The trailing 'start'-role cue is start-capable but has no opener
+    # before it, so it simply found no partner (not a phase mismatch).
     result = _result_with(
         _typed_cue(100.0, 100.5, role='end', cue_type='ad_break_end'),
         _typed_cue(220.0, 220.5, role='start', cue_type='ad_break_start'),
@@ -335,7 +336,22 @@ def test_diag_phase_mismatch_on_wrong_order():
     ads, diag = _synth_impl([], result)
     assert not any(a.get('detection_stage') == 'cue_pair' for a in ads)
     assert diag[(1, 100.0)] == 'phase_mismatch'
-    assert diag[(1, 220.0)] == 'phase_mismatch'
+    assert diag[(1, 220.0)] == 'no_partner_in_band'
+
+
+def test_diag_trailing_start_cue_is_no_partner_not_phase_mismatch():
+    # A trailing start-role cue (last index) is never visited as an opener by the
+    # range(len-1) loop, so it falls to post-loop classification. It IS start-
+    # capable, so it simply found no partner -> no_partner_in_band, not a phase
+    # mismatch. The leading end-role cue cannot open, so it also gets no_partner.
+    result = _result_with(
+        _typed_cue(100.0, 100.5, role='end', cue_type='ad_break_end'),
+        _typed_cue(220.0, 220.5, role='start', cue_type='ad_break_start'),
+        _typed_cue(900.0, 900.5, role='start', cue_type='ad_break_start'),
+    )
+    ads, diag = _synth_impl([], result)
+    assert not any(a.get('detection_stage') == 'cue_pair' for a in ads)
+    assert diag[(1, 900.0)] == 'no_partner_in_band'
 
 
 def test_diag_empty_when_pair_succeeds():

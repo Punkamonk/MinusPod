@@ -131,3 +131,30 @@ def test_migration_idempotent_on_second_init(tmp_path):
         "SELECT sql FROM sqlite_master WHERE name='cue_detections'"
     ).fetchone()[0]
     assert 'CHECK(outcome' not in sql
+
+
+def test_migration_self_heals_orphan_rebuild_table(tmp_path):
+    # A prior boot crashed mid-rebuild, leaving an orphan cue_detections_rebuild
+    # and the legacy CHECK still on cue_detections. The migration must drop the
+    # orphan, complete the rebuild, and accept below_threshold afterwards.
+    db_path = tmp_path / 'podcast.db'
+    _seed_legacy_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE cue_detections_rebuild (id INTEGER PRIMARY KEY, junk TEXT)")
+    conn.execute("INSERT INTO cue_detections_rebuild (id, junk) VALUES (1, 'stale')")
+    conn.commit()
+    conn.close()
+
+    Database._instance = None
+    conn = Database(data_dir=str(tmp_path)).get_connection()  # must self-heal
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='cue_detections'"
+    ).fetchone()[0]
+    assert 'CHECK(outcome' not in sql
+    assert conn.execute(
+        "SELECT COUNT(*) FROM cue_detections").fetchone()[0] == len(SEEDED_OUTCOMES)
+    conn.execute(_INSERT, ('nm', 'tpl-nm', 20.0, 20.5, 0.7, 0.7, 'below_threshold'))
+    conn.commit()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM cue_detections WHERE outcome='below_threshold'"
+    ).fetchone()[0] == 1

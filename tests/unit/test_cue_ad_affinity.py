@@ -211,8 +211,9 @@ class TestSiblingAffinityFallback:
         return storage
 
     def _sibling_row(self, eid, spans):
+        marked = [{**s, 'was_cut': True} for s in spans]
         return {'episode_id': eid, 'original_duration': 3600,
-                'ad_markers_json': json.dumps(spans)}
+                'ad_markers_json': json.dumps(marked)}
 
     def _run(self, recurring, db, storage):
         from api.cue_templates import _sibling_affinity_fallback
@@ -320,12 +321,30 @@ class TestScanWiring:
     def test_episode_history_skips_sibling_fallback_and_types(self):
         recurring = [{'start': 99.0, 'end': 102.0, 'count': 2,
                       'occurrences': [99.5, 159.0]}]
-        history = json.dumps([{'start': 100.0, 'end': 160.0}])
+        history = json.dumps([{'start': 100.0, 'end': 160.0, 'was_cut': True}])
         fallback, saved = self._scan(history, recurring)
         assert not fallback.called
         assert saved[0]['suggestedType'] == 'ad_break_boundary'
         assert saved[0]['affinitySource'] == 'episode'
         assert saved[0]['adBoundaryHits'] == 2
+
+    def test_rejected_marker_is_not_a_boundary(self):
+        # A was_cut=False (reviewer-rejected) marker must not count: with no cut
+        # marker there is no ad history, so the sibling fallback runs instead.
+        recurring = [{'start': 99.0, 'end': 102.0, 'count': 2,
+                      'occurrences': [99.5, 159.0]}]
+        history = json.dumps([{'start': 100.0, 'end': 160.0, 'was_cut': False}])
+        fallback, _ = self._scan(history, recurring)
+        assert fallback.called
+
+    def test_missing_was_cut_key_set_is_untrusted(self):
+        # Raw pass-1 markers (no was_cut on any) are untrusted -> no boundaries,
+        # so the sibling fallback runs (mirrors positional_prior's set defense).
+        recurring = [{'start': 99.0, 'end': 102.0, 'count': 2,
+                      'occurrences': [99.5, 159.0]}]
+        history = json.dumps([{'start': 100.0, 'end': 160.0}])
+        fallback, _ = self._scan(history, recurring)
+        assert fallback.called
 
     def test_no_episode_history_triggers_sibling_fallback(self):
         recurring = [{'start': 99.0, 'end': 102.0, 'count': 2,

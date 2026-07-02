@@ -809,19 +809,31 @@ def _completed_sibling_audio_paths(db, storage, slug, episode_id):
 
 
 def _parse_ad_markers(raw):
-    """Parse ad_markers_json; tolerates None/bad JSON. Returns [] on failure."""
+    """Parse ad_markers_json into only the markers that were actually cut.
+
+    Mirrors positional_prior's was_cut defense so affinity typing never treats a
+    reviewer-rejected marker as a boundary: a raw pass-1 set (no marker carries
+    was_cut) is untrusted and yields nothing; otherwise only was_cut markers
+    count. Tolerates None/bad JSON (returns []).
+    """
     try:
         parsed = json.loads(raw) if raw else []
-        return parsed if isinstance(parsed, list) else []
     except (json.JSONDecodeError, TypeError, ValueError):
         logger.warning('cue_templates: unparseable ad_markers_json')
         return []
+    if not isinstance(parsed, list):
+        return []
+    if parsed and not any(isinstance(m, dict) and 'was_cut' in m for m in parsed):
+        return []  # raw pass-1 output, never confidence-gated -- untrusted
+    return [m for m in parsed if isinstance(m, dict) and m.get('was_cut')]
 
 
 # Number of top recurring candidates to run sibling matching against.
 _AFFINITY_SIBLING_TOP_N = 5
 # Max siblings to pull ad history from for sibling-fallback affinity.
 _AFFINITY_SIBLING_MAX = 2
+# Bounds per-row episode lookups; raise with sibling lookback if ever needed.
+_AFFINITY_HISTORY_SCAN_MAX = 8
 
 
 def _sibling_affinity_fallback(recurring, slug, episode_id, db, storage, audio_path, podcast_id=None):
@@ -840,7 +852,7 @@ def _sibling_affinity_fallback(recurring, slug, episode_id, db, storage, audio_p
         limit=AUDIO_CUE_XEP_SIBLING_LOOKBACK)
     usable_siblings = []
     for _i, row in enumerate(sibling_rows):
-        if _i >= 8:
+        if _i >= _AFFINITY_HISTORY_SCAN_MAX:
             break
         sib_eid = row['episode_id']
         sib_ep = db.get_episode(slug, sib_eid)

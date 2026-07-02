@@ -195,16 +195,52 @@ def _unused_reason(cue, role, ad_spans, edge_distance, snap_confidence,
     """
     if role == AUDIO_CUE_ROLE_NON_AD:
         return 'advisory_role'
-    if _inside_any_span(cue.start, cue.end, ad_spans):
-        return 'covered'
     if cue.confidence < snap_confidence:
         return 'below_snap_confidence'
     pair_reason = pair_skip_diagnostics.get(_cue_key(template_id, cue.start))
     if pair_reason:
         return pair_reason
-    if edge_distance is None or abs(edge_distance) > max(snap_lead_s, snap_lag_s):
+    # Role-aware reach check mirrors _pick_cue_for_start/_pick_cue_for_end.
+    # sign convention: d = edge - cue_ref (from _nearest_signed).
+    #   start-role: cue.end vs ad_start -> reachable iff d in [-lag, +lead]
+    #   end-role:   cue.start vs ad_end -> reachable iff d in [-lead, +lag]
+    #   boundary:   either window suffices (picks whichever edge is closer).
+    # Reach is checked before 'covered' so that a directional cue outside its
+    # snap window reports out_of_reach even when it happens to fall inside the
+    # LLM span.  Boundary cues keep 'covered' first because a span-interior
+    # boundary cue has no un-covered edge to act on regardless of distance.
+    in_reach = edge_distance is not None and _in_reach(
+        role, edge_distance, snap_lead_s, snap_lag_s
+    )
+    is_directional = (
+        role in AUDIO_CUE_START_EDGE_ROLES) != (role in AUDIO_CUE_END_EDGE_ROLES
+    )
+    if is_directional and not in_reach:
+        return 'out_of_reach'
+    if _inside_any_span(cue.start, cue.end, ad_spans):
+        return 'covered'
+    if not in_reach:
         return 'out_of_reach'
     return 'unpaired'
+
+
+def _in_reach(role, edge_distance, snap_lead_s, snap_lag_s):
+    """True if edge_distance falls within the role-specific snap window.
+
+    Mirrors _pick_cue_for_start and _pick_cue_for_end from cue_boundary_snap:
+      start-role: cue.end in [ad_start-lead, ad_start+lag]  -> d in [-lag, +lead]
+      end-role:   cue.start in [ad_end-lag, ad_end+lead]    -> d in [-lead, +lag]
+      boundary:   either side is sufficient.
+    """
+    d = edge_distance
+    start_ok = -snap_lag_s <= d <= snap_lead_s
+    end_ok = -snap_lead_s <= d <= snap_lag_s
+    if role in AUDIO_CUE_START_EDGE_ROLES and role not in AUDIO_CUE_END_EDGE_ROLES:
+        return start_ok
+    if role in AUDIO_CUE_END_EDGE_ROLES and role not in AUDIO_CUE_START_EDGE_ROLES:
+        return end_ok
+    # boundary or unknown: reachable if either window applies
+    return start_ok or end_ok
 
 
 def _inside_any_span(start, end, ad_spans):
