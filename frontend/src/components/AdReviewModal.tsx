@@ -120,6 +120,10 @@ function AdReviewModal({
   const scrubberRef = useRef<HTMLDivElement>(null);    // full-episode play scrubber (seeks audio)
   const windowScrubberRef = useRef<HTMLDivElement>(null); // full-episode pan scrubber (pans zoomed window)
   const audioRef = useRef<HTMLAudioElement>(null);
+  // The timeupdate listener that stops "Play selection" at the ad END. Held in
+  // a ref so togglePlay/stopPlayback can cancel it, otherwise a stale listener
+  // would pause unrelated playback the next time the playhead crosses adEnd.
+  const selectionStopRef = useRef<(() => void) | null>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<ReturnType<typeof RegionsPlugin.create> | null>(null);
   const adRegionRef = useRef<ReturnType<RegionsPlugin['addRegion']> | null>(null);
@@ -418,9 +422,61 @@ function AdReviewModal({
 
   // ------------------------------------------------------------------
   // Audio playback.
+  const clearSelectionStop = () => {
+    if (selectionStopRef.current) selectionStopRef.current();
+    selectionStopRef.current = null;
+  };
+
+  // Play only the ad span (adStart -> adEnd), then pause at the end. Mirrors the
+  // cue modal so both editors audition their selection the same way. Seeks after
+  // metadata loads (a pre-load seek is dropped by Chrome/Safari). The audition
+  // ends on the first user seek after ours -- cursor scrub, pin drag, keyboard,
+  // reset -- so the stop listener can never fire on unrelated later playback
+  // (the many seek paths do not funnel through one handler to clear it). Like
+  // the cue modal, the stop point is the adEnd at play time; editing bounds
+  // mid-audition without seeking still stops at the old end.
+  const playSelection = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    clearSelectionStop();
+    const begin = () => {
+      const stop = () => {
+        const a = audioRef.current;
+        if (a && a.currentTime >= adEnd) {
+          a.pause();
+          setIsPlaying(false);
+          clearSelectionStop();
+        }
+      };
+      // Our own seek to adStart below fires one 'seeked' (browsers fire it even
+      // when already at that position); skip exactly that one. Any later seek is
+      // the user taking over, so cancel the audition.
+      let skipInitialSeek = true;
+      const onSeeked = () => {
+        if (skipInitialSeek) { skipInitialSeek = false; return; }
+        clearSelectionStop();
+      };
+      audio.addEventListener('timeupdate', stop);
+      audio.addEventListener('seeked', onSeeked);
+      selectionStopRef.current = () => {
+        audio.removeEventListener('timeupdate', stop);
+        audio.removeEventListener('seeked', onSeeked);
+      };
+      audio.currentTime = adStart;
+      audio.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+    };
+    if (audio.readyState >= 1) {
+      begin();
+    } else {
+      audio.addEventListener('loadedmetadata', begin, { once: true });
+      selectionStopRef.current = () => audio.removeEventListener('loadedmetadata', begin);
+    }
+  };
+
   const togglePlay = () => {
     const audio = audioRef.current;
     if (!audio) return;
+    clearSelectionStop();
     if (audio.paused) {
       // Safety net: if the cursor is parked at episode origin (or otherwise
       // far before the visible window), snap to the ad start before playing
@@ -451,6 +507,7 @@ function AdReviewModal({
   const stopPlayback = () => {
     const audio = audioRef.current;
     if (!audio) return;
+    clearSelectionStop();
     audio.pause();
     audio.currentTime = adStart;
     setIsPlaying(false);
@@ -1224,6 +1281,7 @@ function AdReviewModal({
             selectionDuration={adEnd - adStart}
             inSelection={currentTime >= adStart && currentTime <= adEnd}
             selectionLabel="inside ad"
+            onPlaySelection={playSelection}
           />
 
           <div className="mt-2 text-xs text-muted-foreground">

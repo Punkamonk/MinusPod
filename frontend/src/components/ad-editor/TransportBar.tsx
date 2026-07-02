@@ -6,8 +6,9 @@ import { PLAYBACK_RATES, ghostBtn, primaryBtn, selectionBtn } from './controlSty
 // Shared playback transport bar for the audio-editor modals (AdReviewModal and
 // CueMarkModal). Purely presentational: the host owns the <audio> element, the
 // playhead loop, and all handlers. Rendering from one component keeps the two
-// modals' controls identical. The optional "Play selection" button sits in a
-// wrapping left group so it never crams the icon cluster on mobile.
+// modals' controls identical. All controls (transport, the optional amber
+// "play selection" icon, and the speed selector) sit on one centered row that
+// wraps as a unit on narrow screens; the selection readout is centered below.
 interface TransportBarProps {
   isPlaying: boolean;
   onTogglePlay: () => void;
@@ -62,12 +63,10 @@ function TransportBar({
             type="button"
             onClick={onPlaySelection}
             className={`ml-0.5 ${selectionBtn}`}
-            title="Play the bracketed selection only"
+            title="Play the selection only"
             aria-label="Play selection"
           >
-            <span aria-hidden="true" className="text-xs font-bold leading-none">[</span>
             <Play className="w-4 h-4" />
-            <span aria-hidden="true" className="text-xs font-bold leading-none">]</span>
           </button>
         )}
         <button type="button" onClick={() => onSeekRelative(10)} className={`p-1.5 rounded ${ghostBtn}`} title="Forward 10s">
@@ -101,18 +100,16 @@ function TransportBar({
           </svg>
         </label>
       </div>
-      {/* Secondary row: selection readout (right, pushed over with ml-auto). */}
-      <div className="mt-2 flex items-center gap-2 flex-wrap">
-        <div className="ml-auto flex items-center gap-2 text-xs tabular-nums text-muted-foreground">
-          <span className="text-foreground">{formatTime(currentTime)}</span>
-          <span>/</span>
-          {selectionInfo ?? <span>{formatTime(selectionDuration)} selection</span>}
-          {inSelection && (
-            <span className="ml-2 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 text-[10px] font-semibold uppercase tracking-wider">
-              {selectionLabel}
-            </span>
-          )}
-        </div>
+      {/* Secondary row: selection readout, centered under the controls. */}
+      <div className="mt-2 flex items-center justify-center gap-2 flex-wrap text-xs tabular-nums text-muted-foreground">
+        <span className="text-foreground">{formatTime(currentTime)}</span>
+        <span>/</span>
+        {selectionInfo ?? <span>{formatTime(selectionDuration)} selection</span>}
+        {inSelection && (
+          <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-500 text-[10px] font-semibold uppercase tracking-wider">
+            {selectionLabel}
+          </span>
+        )}
       </div>
     </div>
   );
