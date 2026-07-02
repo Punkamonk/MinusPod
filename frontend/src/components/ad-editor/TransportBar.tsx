@@ -65,11 +65,12 @@ function TransportBar({
 
   return (
     <div className="mt-3 mx-auto w-fit max-w-full px-3 py-2 rounded-lg bg-secondary/50 border border-border">
-      {/* All controls on one centered row: the transport cluster and the speed
-          control (a compact custom button) stay grouped together, so the speed
-          sits right next to the transport at any width instead of drifting to a
-          far edge on a wide modal. */}
-      <div className="flex items-center justify-center gap-0.5">
+      {/* Controls and the selection readout share one row on desktop (there is
+          plenty of width) and stack on mobile, so the editor is not three lines
+          tall on a wide screen. The transport cluster keeps the speed control
+          grouped beside it at any width. */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-center sm:gap-4">
+        <div className="flex items-center justify-center gap-0.5">
         <button type="button" onClick={onSeekToStart} className={`p-1.5 rounded ${ghostBtn}`} title="Jump to START pin">
           <SkipBack className="w-4 h-4" />
         </button>
@@ -135,16 +136,17 @@ function TransportBar({
           )}
         </div>
       </div>
-      {/* Secondary row: selection readout, centered under the controls. */}
-      <div className="mt-2 flex items-center justify-center gap-2 flex-wrap text-xs tabular-nums text-muted-foreground">
-        <span className="text-foreground">{formatTime(currentTime)}</span>
-        <span>/</span>
-        {selectionInfo ?? <span>{formatTime(selectionDuration)} selection</span>}
-        {inSelection && (
-          <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-500 text-[10px] font-semibold uppercase tracking-wider">
-            {selectionLabel}
-          </span>
-        )}
+        {/* Selection readout: below the controls on mobile, beside them on desktop. */}
+        <div className="mt-2 sm:mt-0 flex items-center justify-center gap-2 flex-wrap text-xs tabular-nums text-muted-foreground">
+          <span className="text-foreground">{formatTime(currentTime)}</span>
+          <span>/</span>
+          {selectionInfo ?? <span>{formatTime(selectionDuration)} selection</span>}
+          {inSelection && (
+            <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-500 text-[10px] font-semibold uppercase tracking-wider">
+              {selectionLabel}
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
