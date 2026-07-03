@@ -175,7 +175,12 @@ def test_feed_points_at_badge_endpoint_when_enabled_and_cached():
     st.save_artwork(slug, _png(), 'image/png', 'https://example.com/art.png')
 
     served = _serve(slug, watermark=True)
-    assert f'https://mp.example.com/{slug}/cover-minuspod.jpg' in served
+    token = st.artwork_version(slug)
+    assert token
+    # 2.32.5 invariant: the token is in the path and the URL ends in .jpg, so
+    # Pocket Casts / Apple accept it (a ?v= query would be rejected).
+    assert f'https://mp.example.com/{slug}/cover-minuspod-{token}.jpg' in served
+    assert '?v=' not in served
     assert 'https://example.com/art.png' not in served
 
 

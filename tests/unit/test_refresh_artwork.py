@@ -80,7 +80,7 @@ def test_refresh_feed_artwork_rebuilds_served_rss_with_badge():
          patch.object(mf.storage, 'download_artwork', return_value=True):
         assert mf.refresh_feed_artwork(slug) is True
     served = mf.storage.get_rss(slug)
-    assert f'/{slug}/cover-minuspod.jpg' in served
+    assert f'/{slug}/cover-minuspod-' in served
     assert 'https://example.com/art.png' not in served
 
 
@@ -97,7 +97,7 @@ def test_served_cover_url_is_cache_busted_with_version():
     served = mf.storage.get_rss(slug)
     token = mf.storage.artwork_version(slug)
     assert token
-    assert f'/{slug}/cover-minuspod.jpg?v={token}' in served
+    assert f'/{slug}/cover-minuspod-{token}.jpg' in served
 
 
 def test_artwork_version_is_content_addressed():

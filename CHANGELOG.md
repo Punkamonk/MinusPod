@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.32.5] - 2026-07-03
+
+### Fixed
+
+- The cover-art cache-bust token was a query string (`cover-minuspod.jpg?v=<hash>`), so the channel image URL did not end in a recognized image extension. Pocket Casts (and Apple) reject such artwork URLs and never fetch them, so the badged cover did not load even though the URL served 200. The token now lives in the path (`cover-minuspod-<hash>.jpg`), which ends in `.jpg`; a new `/<slug>/cover-minuspod-<token>.jpg` route (and its `/episodes/` alias) serves it, with the token ignored since the current variant always matches the current token. Cache-busting behavior and the Cloudflare `.jpg` allow rule are unchanged.
+
 ## [2.32.4] - 2026-07-03
 
 ### Fixed

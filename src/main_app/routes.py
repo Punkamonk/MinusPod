@@ -464,16 +464,20 @@ def register_routes(app):
         return response
 
     @app.route('/<slug>/cover-minuspod.jpg')
+    @app.route('/<slug>/cover-minuspod-<token>.jpg')
     @app.route('/episodes/<slug>/cover-minuspod.jpg')
+    @app.route('/episodes/<slug>/cover-minuspod-<token>.jpg')
     @validate_slug_param
     @log_request_detailed
-    def serve_minuspod_cover(slug):
+    def serve_minuspod_cover(slug, token=None):
         """Serve the MinusPod-badged cover art (issue #420). This is podcast-level
         artwork, so the served feed points its channel image at the podcast-level
-        path /<slug>/cover-minuspod.jpg when the watermark setting is on. The
-        older /episodes/<slug>/cover-minuspod.jpg path stays as a back-compat
-        alias for apps that cached the previous URL. Both are public paths the
-        feed host forwards."""
+        path /<slug>/cover-minuspod-<token>.jpg when the watermark setting is on.
+        The <token> is a content hash that cache-busts a changed cover/badge while
+        keeping the URL ending in .jpg (podcast apps reject a query-string token);
+        it is ignored for serving, since the current variant always matches the
+        current token. The token-less and /episodes/ paths stay as back-compat
+        aliases for apps that cached a previous URL."""
         result = storage.get_watermarked_artwork(slug)
         if not result:
             abort(404)

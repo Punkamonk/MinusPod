@@ -162,6 +162,22 @@ def test_minuspod_cover_podcast_level_path_serves_badged_jpeg(client):
     assert response.headers.get('Access-Control-Allow-Origin') == '*'
 
 
+def test_minuspod_cover_versioned_path_serves_badged_jpeg(client):
+    """The versioned /<slug>/cover-minuspod-<token>.jpg route (2.32.5) serves the
+    current badged cover regardless of the token, so the cache-bust URL the feed
+    emits (ending in .jpg, not a ?v= query Pocket Casts/Apple reject) resolves."""
+    slug = 'cover-versioned'
+    st = routes_mod.storage
+    st.db.create_podcast(slug, f'https://example.com/{slug}.xml', slug)
+    st.save_artwork(slug, _png_bytes(), 'image/png', 'https://example.com/a.png')
+
+    response = client.get(f'/{slug}/cover-minuspod-deadbeef.jpg')
+    assert response.status_code == 200
+    assert response.mimetype == 'image/jpeg'
+    alias = client.get(f'/episodes/{slug}/cover-minuspod-deadbeef.jpg')
+    assert alias.status_code == 200
+
+
 def test_minuspod_cover_404_without_art(client):
     slug = 'cover-none'
     st = routes_mod.storage
