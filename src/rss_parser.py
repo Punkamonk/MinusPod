@@ -709,7 +709,14 @@ class RSSParser:
         # serves apps that cached the old URL. Falls back to upstream when the
         # cover isn't cached (the variant endpoint would 404).
         if watermark_artwork and storage is not None and storage.has_artwork(slug):
-            artwork_url = f"{self._resolved_base_url()}/{slug}/cover-minuspod.jpg"
+            badged = f"{self._resolved_base_url()}/{slug}/cover-minuspod.jpg"
+            # Cache-bust so apps re-fetch when the cover or badge changes: apps
+            # key channel art on the URL, so a static path never refreshes. The
+            # token is content-addressed and stable otherwise, and the query
+            # string is not part of uri.path so the Cloudflare .jpg allow still
+            # matches.
+            version = storage.artwork_version(slug)
+            artwork_url = f"{badged}?v={version}" if version else badged
         if artwork_url:
             channel_title = effective_title or ''
             channel_link = channel.get('link', '') or ''

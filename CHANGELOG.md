@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.32.4] - 2026-07-03
+
+### Fixed
+
+- Served feeds pointed the channel image at a static `/<slug>/cover-minuspod.jpg` URL, so podcast apps that cache cover art by URL (Pocket Casts, Apple) never re-fetched the badged art after a cover or badge change, even though `lastBuildDate` is regenerated on every render. The badged cover URL now carries a content-addressed `?v=` token (`storage.artwork_version`: an md5 of the source cover bytes folded with `cover_badge_salt`, the badge asset's own fingerprint plus a `BADGE_REVISION` constant). The token shifts when the cover bytes or the badge change and is stable otherwise, so apps re-pull only when the art actually changed; a cover re-hosted at the same URL is not re-downloaded by the existing `download_artwork` short-circuit, so it does not shift until the cover is actually re-fetched. The cached badge variant is also regenerated when it predates its cover or badge inputs, so a change reaches apps on the passive refresh path, not only via "Refresh all artwork". The `?v=` lives in the query string, which is not part of the request path, so the Cloudflare `.jpg` allow rule still matches.
+
 ## [2.32.3] - 2026-07-02
 
 ### Fixed

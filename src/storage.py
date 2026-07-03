@@ -1,4 +1,5 @@
 """Storage management with SQLite database and file operations."""
+import hashlib
 import json
 import logging
 import os
@@ -9,7 +10,7 @@ import tempfile
 import shutil
 
 from config import BROWSER_USER_AGENT, HTTP_MAX_REDIRECTS_FEED, HTTP_TIMEOUT_FETCH
-from artwork_watermark import composite_watermark
+from artwork_watermark import composite_watermark, cover_badge_salt, badge_path
 from utils.episode_paths import episode_filename
 from utils.http import safe_url_for_log
 from utils.url import SSRFError
@@ -503,7 +504,8 @@ class Storage:
         podcast_dir = self.get_podcast_dir(slug)
         variant_path = podcast_dir / _WATERMARK_VARIANT
 
-        if variant_path.exists():
+        if variant_path.exists() and not self._watermark_variant_stale(
+                podcast_dir, variant_path):
             try:
                 with open(variant_path, 'rb') as f:
                     return f.read(), 'image/jpeg'
@@ -527,6 +529,48 @@ class Storage:
             logger.warning(f"[{slug}] failed caching watermark: {e}")
 
         return composited, 'image/jpeg'
+
+    def artwork_version(self, slug: str) -> Optional[str]:
+        """Short content-addressed token for the badged cover-art URL cache-bust.
+
+        Shifts when the source cover bytes or the badge (cover_badge_salt: badge
+        asset fingerprint plus BADGE_REVISION) change, and is stable otherwise,
+        so downstream apps (Pocket Casts et al. cache channel art by URL and
+        rarely re-pull it) only re-fetch when the art actually changed. None when
+        there is no readable source cover, so the caller falls back to the bare
+        URL rather than aborting the whole feed render on an I/O error.
+        """
+        try:
+            source = self.get_artwork(slug)
+        except OSError as e:
+            logger.warning(f"[{slug}] artwork_version read failed: {e}")
+            return None
+        if not source:
+            return None
+        digest = hashlib.md5(source[0], usedforsecurity=False)
+        digest.update(cover_badge_salt().encode())
+        return digest.hexdigest()[:8]
+
+    def _watermark_variant_stale(self, podcast_dir, variant_path) -> bool:
+        """True if the cached badge variant predates the source cover or the
+        badge asset, so a fresh composite is served after a cover or badge
+        change even on the passive refresh path that never clears the cache.
+        """
+        try:
+            variant_mtime = variant_path.stat().st_mtime
+        except OSError:
+            return True
+        newest = 0.0
+        inputs = [podcast_dir / f"artwork{ext}"
+                  for ext in ('.jpg', '.png', '.gif', '.webp')]
+        inputs.append(badge_path())
+        for path in inputs:
+            try:
+                if path is not None and path.exists():
+                    newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                return True
+        return newest > variant_mtime
 
     def has_artwork(self, slug: str) -> bool:
         """True if any cached source artwork file exists (no read)."""

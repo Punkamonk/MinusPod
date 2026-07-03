@@ -6,6 +6,7 @@ feed's cover art is visually distinct from the original in a podcast app
 (with a hairline ring and soft shadow) so it stays visible on light, dark, and
 busy covers alike.
 """
+import hashlib
 import logging
 import os
 from io import BytesIO
@@ -15,6 +16,13 @@ from typing import Optional, Tuple
 from PIL import Image, ImageDraw, ImageFilter
 
 logger = logging.getLogger(__name__)
+
+# Bump only for a code-only rendering change to the badge (chip color, layout)
+# that does not swap the asset file -- an asset swap is picked up automatically
+# by badge_fingerprint(). Both feed into cover_badge_salt(), which storage folds
+# into the cover-art URL cache-bust token so downstream apps re-fetch a changed
+# badge instead of serving the stale cache.
+BADGE_REVISION = 1
 
 # Repo/app root: src/artwork_watermark.py -> parents[1]. In the container that
 # is /app, where the built frontend lives under static/ui.
@@ -52,6 +60,33 @@ def badge_path() -> Optional[Path]:
             if path.is_file():
                 return path
     return None
+
+
+_BADGE_FINGERPRINT: Optional[str] = None
+
+
+def badge_fingerprint() -> str:
+    """Short content hash of the active badge asset, memoized for the process.
+
+    Folded into cover_badge_salt() so swapping the badge image (a new build or a
+    MINUSPOD_WATERMARK_BADGE override) shifts every feed's artwork URL with no
+    manual BADGE_REVISION bump. Empty string when no badge asset is available.
+    """
+    global _BADGE_FINGERPRINT
+    if _BADGE_FINGERPRINT is None:
+        path = badge_path()
+        try:
+            _BADGE_FINGERPRINT = hashlib.md5(
+                path.read_bytes(), usedforsecurity=False).hexdigest()[:8] if path else ''
+        except OSError:
+            _BADGE_FINGERPRINT = ''
+    return _BADGE_FINGERPRINT
+
+
+def cover_badge_salt() -> str:
+    """Badge-identity salt folded into the cover-art cache-bust token. Changes
+    when the badge asset (badge_fingerprint) or the rendering revision changes."""
+    return f"{BADGE_REVISION}:{badge_fingerprint()}"
 
 
 def _build_badge(chip_side: int, waveform: Image.Image) -> Tuple[Image.Image, int]:

@@ -84,6 +84,64 @@ def test_refresh_feed_artwork_rebuilds_served_rss_with_badge():
     assert 'https://example.com/art.png' not in served
 
 
+def test_served_cover_url_is_cache_busted_with_version():
+    # Apps cache channel art by URL, so a static cover path never refreshes.
+    # The served URL must carry the content-addressed ?v= token so a cover or
+    # badge change shifts the URL and downstream apps re-fetch.
+    slug = 'art-cachebust'
+    _seed(slug)
+    mf.db.set_setting('artwork_watermark_enabled', 'true')
+    with patch.object(mf.rss_parser, 'fetch_feed', return_value=_feed_xml()), \
+         patch.object(mf.storage, 'download_artwork', return_value=True):
+        assert mf.refresh_feed_artwork(slug) is True
+    served = mf.storage.get_rss(slug)
+    token = mf.storage.artwork_version(slug)
+    assert token
+    assert f'/{slug}/cover-minuspod.jpg?v={token}' in served
+
+
+def test_artwork_version_is_content_addressed():
+    slug = 'art-version'
+    _seed(slug)  # seeded with the white _png()
+    v1 = mf.storage.artwork_version(slug)
+    assert v1 and mf.storage.artwork_version(slug) == v1  # stable for same bytes
+    # A different cover shifts the token so the URL cache-busts.
+    other = io.BytesIO()
+    Image.new('RGB', (300, 300), (10, 20, 30)).save(other, 'PNG')
+    mf.storage.save_artwork(slug, other.getvalue(), 'image/png',
+                            'https://example.com/art.png')
+    assert mf.storage.artwork_version(slug) != v1
+    # No source cover -> no token (caller falls back to the bare URL).
+    assert mf.storage.artwork_version('no-such-feed') is None
+
+
+def test_artwork_version_shifts_when_badge_changes():
+    # The badge-identity half of the token (cover_badge_salt) must cache-bust a
+    # badge change, not just a cover change, so a redesigned badge on unchanged
+    # covers still re-reaches apps.
+    slug = 'art-badge-rev'
+    _seed(slug)
+    v1 = mf.storage.artwork_version(slug)
+    with patch('artwork_watermark.BADGE_REVISION', 999):
+        v2 = mf.storage.artwork_version(slug)
+    assert v1 and v2 and v1 != v2
+
+
+def test_stale_watermark_variant_is_regenerated():
+    # A variant older than its cover/badge inputs must be recomposited, so a
+    # badge or cover change reaches apps even on the passive refresh path that
+    # never clears the cache.
+    slug = 'art-stale'
+    _seed(slug)
+    mf.storage.get_watermarked_artwork(slug)  # composite + cache the variant
+    variant = mf.storage.get_podcast_dir(slug) / 'artwork-minuspod.jpg'
+    assert variant.exists()
+    old = variant.stat().st_mtime - 3600
+    os.utime(variant, (old, old))  # backdate so it predates the source cover
+    mf.storage.get_watermarked_artwork(slug)
+    assert variant.stat().st_mtime > old  # regenerated, not served stale
+
+
 def test_refresh_feed_artwork_drops_cached_badge_variant():
     # Regression: on a cache-hit cover, download_artwork no-ops and never drops
     # the badge variant, so refresh must drop it explicitly to recomposite with
