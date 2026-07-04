@@ -150,6 +150,8 @@ export interface AdSegment {
   detection_stage?: DetectionStage;
   // Present when an audio cue snapped this ad's start/end edge (#350).
   cue_snap?: { start?: Record<string, unknown>; end?: Record<string, unknown> };
+  // Present when a silence span snapped this ad's start/end edge (Phase B).
+  silence_snap?: { start?: Record<string, unknown>; end?: Record<string, unknown> };
   validation?: AdValidation;
   // Ad reviewer (issue #197) -- populated only when the reviewer ran on this ad.
   reviewer_verdict?: 'confirmed' | 'adjust' | 'reject' | 'resurrect' | 'failure';

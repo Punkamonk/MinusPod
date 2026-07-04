@@ -17,6 +17,7 @@ from ad_detector import (
 from ad_detector.cue_boundary_snap import snap_ad_boundaries_to_cues
 from ad_detector.cue_pair_ads import synthesize_ads_from_cue_pairs
 from ad_detector.cue_telemetry import build_cue_detection_records
+from ad_detector.silence_boundary_snap import snap_ad_boundaries_to_silence
 from ad_reviewer import (
     AdReviewer, ReviewVerdict, split_resurrection_pool,
 )
@@ -447,7 +448,26 @@ def _detect_ads_first_pass(ctx, segments, audio_path,
                 f"[{slug}:{episode_id}] Cue boundary snap skipped: {e}"
             )
 
+    # Snap ad edges to nearby silence spans (per-feed opt-in, Phase B task B3).
+    # Runs after cue snap; cue-snapped edges are skipped inside the function.
+    # Implicitly gated: B2 only populates silence_spans for opted-in feeds.
+    silence_spans = audio_analysis_result.silence_spans if audio_analysis_result else []
+    if first_pass_ads and silence_spans:
+        try:
+            snap_ad_boundaries_to_silence(
+                first_pass_ads, silence_spans,
+                max_distance_s=cue_settings['silence_snap_max_distance'],
+                min_silence_s=cue_settings['silence_snap_min_duration'],
+            )
+        except Exception as e:
+            audio_logger.warning(
+                f"[{slug}:{episode_id}] Silence boundary snap skipped: {e}"
+            )
+
     # Record per-cue detection telemetry (advisory only; never alters the cuts).
+    # NOTE: build_cue_detection_records measures against pre_snap_ads captured
+    # before both cue snap and silence snap run, so edge distances reflect the
+    # original LLM boundaries in both cases (telemetry-safety verified).
     # Captures every template cue with its match score and how detection used it
     # (snap / pair / none / below_threshold), plus edge distance and unused
     # reason, so the user can judge a feed's cues and tune thresholds (#350).

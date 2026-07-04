@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Boundary-snap settings plumbing: two per-feed opt-in toggles, "Snap cuts to silence" and "Snap to content transitions" (Feed settings), and three global silence-snap tunables, silence threshold (dBFS), minimum silence duration, and maximum snap distance (Settings > Audio Cue Detection > Ad cutting). The flags and tunables are stored and served end-to-end; the detection and snap behavior that consumes them lands in a follow-up.
+- Silence boundary snap: for feeds with silence snap enabled, LLM-detected ad edges are snapped to the midpoint of the nearest qualifying silence span (within 2s, at least 0.3s long). Cue snap takes precedence; silence snap skips any edge already committed by cue snap. Two guards prevent broken cuts: an edge snap that would reduce a removable ad below the minimum removal duration (10s) is reverted for the entire ad; a snap that would leave less than 1s gap between adjacent ads is rejected. Snap details are stored per edge in `silence_snap` and surfaced as a "Silence snapped" badge in the episode ad list.
 
 ## [2.35.0] - 2026-07-04
 

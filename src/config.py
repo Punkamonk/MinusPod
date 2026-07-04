@@ -393,7 +393,7 @@ def resolve_cue_template_score(db, podcast_id):
 
 
 
-# (override_col, setting_key, code_default, out_key) for the six float cue knobs.
+# (override_col, setting_key, code_default, out_key) for the float cue knobs.
 _CUE_FLOAT_KNOBS = [
     ('cue_pair_min_break_override',       'audio_cue_pair_min_break_seconds',  AUDIO_CUE_PAIR_MIN_BREAK_SECONDS,    'pair_min_break'),
     ('cue_pair_max_break_override',       'audio_cue_pair_max_break_seconds',  AUDIO_CUE_PAIR_MAX_BREAK_SECONDS,    'pair_max_break'),
@@ -401,6 +401,10 @@ _CUE_FLOAT_KNOBS = [
     ('cue_snap_confidence_override',      'audio_cue_snap_confidence',         AUDIO_CUE_SNAP_CONFIDENCE,           'snap_confidence'),
     ('cue_snap_lead_override',            'audio_cue_snap_lead_seconds',       AUDIO_CUE_SNAP_LEAD_SECONDS,         'snap_lead'),
     ('cue_snap_lag_override',             'audio_cue_snap_lag_seconds',        AUDIO_CUE_SNAP_LAG_SECONDS,          'snap_lag'),
+    # Silence-snap tunables (Phase B, task B3). No per-feed override column;
+    # these read from global settings only, falling back to code defaults.
+    (None, 'silence_snap_max_distance_seconds', SILENCE_SNAP_MAX_DISTANCE_SECONDS, 'silence_snap_max_distance'),
+    (None, 'silence_snap_min_duration_seconds',  SILENCE_SNAP_MIN_DURATION_SECONDS, 'silence_snap_min_duration'),
 ]
 
 
@@ -433,7 +437,7 @@ def resolve_feed_cue_settings(db, podcast_id):
 
     result = {'create_from_pairs': create_from_pairs}
     for override_col, setting_key, code_default, out_key in _CUE_FLOAT_KNOBS:
-        raw = overrides.get(override_col)
+        raw = overrides.get(override_col) if override_col is not None else None
         if raw is not None:
             result[out_key] = float(raw)
         else:

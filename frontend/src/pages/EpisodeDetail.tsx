@@ -541,6 +541,14 @@ function EpisodeDetail() {
                       Cue snapped
                     </span>
                   )}
+                  {segment.silence_snap && (
+                    <span
+                      className="px-1.5 py-0.5 text-xs rounded font-medium bg-teal-500/20 text-teal-600 dark:text-teal-400"
+                      title="Ad edge snapped to nearby silence"
+                    >
+                      Silence snapped
+                    </span>
+                  )}
                   {segment.sponsor && (
                     <span
                       className="px-1.5 py-0.5 text-xs rounded font-medium bg-muted text-muted-foreground"

@@ -137,7 +137,7 @@ class ReviewResult:
 
 
 def _format_cue_section(*, audio_analysis, ad_start: float, ad_end: float,
-                        cue_pair=None, cue_snap=None,
+                        cue_pair=None, cue_snap=None, silence_snap=None,
                         bucket_radius: float = 60.0) -> str:
     """Render audio cue context for the reviewer's per-ad user prompt (#350).
 
@@ -322,6 +322,21 @@ def _format_cue_section(*, audio_analysis, ad_start: float, ad_end: float,
                 "CUE SNAP APPLIED: " + "; ".join(moved) +
                 ". Do not undo these snaps; they land the cut on the chime "
                 "rather than mid-conversation."
+            )
+    if silence_snap:
+        moved = []
+        for edge in ('start', 'end'):
+            rec = silence_snap.get(edge)
+            if not rec:
+                continue
+            moved.append(
+                f"{edge} snapped to silence midpoint "
+                f"(was {rec['original']}s, silence {rec['silence_start']}s-{rec['silence_end']}s)"
+            )
+        if moved:
+            lines.append(
+                "SILENCE SNAP APPLIED: " + "; ".join(moved) +
+                ". The edge sits in a silence gap deliberately; do not move it."
             )
     if not lines:
         return ""
@@ -813,6 +828,7 @@ class AdReviewer:
             ad_end=end,
             cue_pair=ad.get('cue_pair'),
             cue_snap=ad.get('cue_snap'),
+            silence_snap=ad.get('silence_snap'),
             bucket_radius=float(max_shift),
         )
 
