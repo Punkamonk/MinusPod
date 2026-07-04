@@ -15,10 +15,14 @@ from .base import AudioAnalysisResult
 from .volume_analyzer import VolumeAnalyzer
 from .transition_detector import TransitionDetector
 from .cue_template_matcher import AudioCueTemplateMatcher
+from .silence_detector import SilenceDetector
 from config import (
     AUDIO_CUE_FORMANT_ATTEN_DB,
+    SILENCE_SNAP_NOISE_DB,
+    SILENCE_SNAP_MIN_DURATION_SECONDS,
     resolve_cue_template_score,
     resolve_near_miss_floor,
+    resolve_silence_snap_enabled,
 )
 
 # Import from utils for consistent audio duration implementation
@@ -176,6 +180,26 @@ class AudioAnalyzer:
             logger.warning(f"Failed to load audio cue settings: {e}")
             return False, None
 
+    def _load_silence_config(self, feed_id: Optional[int] = None):
+        """Return a SilenceDetector when silence-snap is enabled for this feed.
+
+        Returns None when the flag is off (default) or no DB is available.
+        Settings are read per run so the toggle takes effect without restart.
+        """
+        if not self.db:
+            return None
+        try:
+            if not resolve_silence_snap_enabled(self.db, feed_id):
+                return None
+            noise_db = self.db.get_setting_float('silence_snap_noise_db', SILENCE_SNAP_NOISE_DB)
+            min_dur = self.db.get_setting_float(
+                'silence_snap_min_duration_seconds', SILENCE_SNAP_MIN_DURATION_SECONDS
+            )
+            return SilenceDetector(noise_db=noise_db, min_silence_s=min_dur)
+        except Exception as exc:
+            logger.warning('Failed to load silence config: %s', exc)
+            return None
+
     def is_enabled(self) -> bool:
         """Audio analysis is always enabled (volume-only is lightweight, uses ffmpeg)."""
         return True
@@ -321,8 +345,26 @@ class AudioAnalyzer:
                 # so no extra log here.
                 signals.extend(cue_result)
 
+        # Silence detection (Phase B) -- per-feed opt-in via silence_snap_enabled.
+        # Runs its own ffmpeg silencedetect pass; skipped when flag is off (default).
+        silence_spans: List[Dict[str, Any]] = []
+        silence_detector = self._load_silence_config(feed_id=feed_id)
+        if silence_detector:
+            if status_callback:
+                status_callback("analyzing: silence", 45)
+            silence_result, silence_error = self._run_component_with_timeout(
+                'silence',
+                lambda: silence_detector.detect(audio_path),
+                timeouts.get('silence', timeouts['volume']),
+            )
+            if silence_error:
+                errors.append(silence_error)
+            else:
+                silence_spans = silence_result or []
+
         result.signals = signals
         result.cue_near_misses = cue_near_misses
+        result.silence_spans = silence_spans
         result.errors = errors
         result.loudness_baseline = baseline
         result.loudness_frames = frames
