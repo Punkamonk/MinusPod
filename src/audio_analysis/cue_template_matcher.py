@@ -280,6 +280,11 @@ class AudioCueTemplateMatcher:
                     'duration_s': tpl.duration_s,
                     'peak_score': round(per_template_peak_score.get(tpl.template_id, 0.0), 3),
                     'match_count': match_counts[tpl.template_id],
+                    # eff_threshold is what actually gates matches for this template;
+                    # it may differ from the instance score_threshold when a per-template
+                    # override is set. Surface it so callers can report accurate
+                    # pass/fail without comparing against the instance value.
+                    'eff_threshold': tpl.eff_threshold,
                 }
                 for tpl in self._templates
             ],

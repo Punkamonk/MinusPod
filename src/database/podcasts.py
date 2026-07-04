@@ -124,20 +124,16 @@ class PodcastMixin:
         fields = []
         values = []
         for key, value in kwargs.items():
-            if key in ('title', 'description', 'artwork_url', 'artwork_cached',
-                       'last_checked_at', 'source_url', 'network_id', 'dai_platform',
-                       'network_id_override', 'audio_analysis_override', 'auto_process_override',
-                       'language_override', 'title_override', 'detection_mode',
-                       'cue_template_score_override',
-                       'cue_create_from_pairs_override',
-                       'cue_pair_min_break_override',
-                       'cue_pair_max_break_override',
-                       'cue_pair_max_break_fraction_override',
-                       'cue_snap_confidence_override',
-                       'cue_snap_lead_override',
-                       'cue_snap_lag_override',
-                       'max_episodes', 'etag',
-                       'last_modified_header', 'only_expose_processed_episodes'):
+            if key in (
+                'title', 'description', 'artwork_url', 'artwork_cached',
+                'last_checked_at', 'source_url', 'network_id', 'dai_platform',
+                'network_id_override', 'audio_analysis_override', 'auto_process_override',
+                'language_override', 'title_override', 'detection_mode',
+                'cue_template_score_override',
+                *self._CUE_OVERRIDE_COLS,
+                'max_episodes', 'etag',
+                'last_modified_header', 'only_expose_processed_episodes',
+            ):
                 fields.append(f"{key} = ?")
                 values.append(value)
             elif key in ('tags', 'user_tags'):
