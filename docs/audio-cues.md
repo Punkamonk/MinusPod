@@ -34,6 +34,40 @@ After detection, a boundary-snap pass moves the start and end of a detected ad t
 the nearest high-confidence cue, capped by the reviewer's Max boundary shift, so
 the cut lands on the chime rather than a beat into or out of the spoken read.
 
+### Silence snap
+
+DAI-inserted ads are usually bracketed by short silences the platform injects at
+the splice point. After cue snap runs, a second pass moves any remaining edge to
+the midpoint of the nearest qualifying silence span.
+
+Silence snap is per-feed and off by default. Enable it with the **Snap cuts to
+silence** toggle in Feed settings on the feed detail page. Any edge already moved
+by cue snap is skipped.
+
+Three tunables under Settings > Experiments > Audio Cue Detection > Ad cutting
+shape the detector:
+
+- **Silence threshold (dBFS)** - audio quieter than this counts as silence
+  (-90 to -20, default -50). Raise it if the feed's ad-break gaps carry room tone
+  that never drops below the default; lower it if ordinary speech pauses count as
+  silence.
+- **Silence minimum duration (s)** - shortest quiet span that qualifies
+  (0.1 to 5, default 0.3). Raise it if short natural pauses qualify as splice
+  silences.
+- **Silence snap max distance (s)** - farthest an ad edge may move to reach a
+  detected silence (0.25 to 10, default 2). Widen it if edges consistently land
+  farther than 2 s from the real splice; a wider window risks snapping to a
+  pause inside the ad.
+
+Two guards are always active: a snap that would shrink an ad below the removal
+minimum is reverted, and a snap that would close the gap to a neighboring ad
+below the merge threshold is rejected.
+
+Enable it on feeds with dynamically inserted ads and audible silence gaps at the
+splice points; the "Silence snapped" badge in the detected-ads list on the
+episode page shows it working. Leave it off on feeds where the host pauses
+mid-read.
+
 ## Cue types
 
 You pick a type from a fixed dropdown rather than typing a label, so the model
@@ -50,7 +84,11 @@ move:
   sting as a break. Never moves a boundary.
 - **Content transition (may or may not be an ad)** - a recurring segment-break
   sound that may or may not sit next to an ad. Never cut on its own; the model is
-  told a transition happens there, not an ad boundary.
+  told a transition happens there, not an ad boundary. With the per-feed **Snap
+  to content transitions** toggle enabled in Feed settings, a matched transition
+  cue may move a detected ad's edges the same way a boundary cue does. Enable it
+  only after Test on episode confirms the template matches accurately on this
+  feed.
 
 ## Marking a cue
 
@@ -171,6 +209,13 @@ Uses accepted cues to snap ad edges or build ads from cue pairs.
   snap the boundary.
 - **Snap lag window (s)** - how far after an ad edge a cue may sit and still snap
   the boundary.
+- **Silence threshold (dBFS)** - audio quieter than this counts as silence for
+  silence snap (-90 to -20, default -50). Applies only on feeds with the
+  per-feed **Snap cuts to silence** toggle enabled.
+- **Silence minimum duration (s)** - shortest quiet span that counts as a
+  silence (0.1 to 5, default 0.3).
+- **Silence snap max distance (s)** - farthest an ad edge may move to reach a
+  detected silence (0.25 to 10, default 2).
 - **Cue-pair confidence floor** - minimum cue confidence to synthesize an ad from
   a cue pair. Higher than the snap floor because this creates an ad rather than
   refining one.
@@ -187,7 +232,7 @@ Uses accepted cues to snap ad edges or build ads from cue pairs.
 
 ## Per-feed overrides
 
-Per-feed controls sit in two places on the feed detail page under Feed settings:
+Per-feed controls sit on the feed detail page under Feed settings:
 
 - **Cue threshold** (`cueTemplateScoreOverride`) - per-feed match score override,
   0.30 to 0.99. Empty means use the global Template match score. A per-template
@@ -203,6 +248,11 @@ Per-feed controls sit in two places on the feed detail page under Feed settings:
   - **Snap confidence** (`cueSnapConfidenceOverride`) - 0-1.
   - **Snap lead** (`cueSnapLeadOverride`) - seconds.
   - **Snap lag** (`cueSnapLagOverride`) - seconds.
+- **Snap cuts to silence** (`silenceSnapEnabled`) - off by default. Edges not
+  already moved by cue snap are moved to the midpoint of the nearest qualifying
+  silence. See Silence snap above.
+- **Snap to content transitions** (`transitionSnapEnabled`) - off by default.
+  Content-transition cues may snap ad edges the same way boundary cues do.
 
 Overrides are set at `PATCH /api/v1/feeds/<slug>` and apply to episodes
 processed after the change.
