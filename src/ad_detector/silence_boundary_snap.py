@@ -10,8 +10,9 @@ already committed by cue snap. Pure function; no DB, no LLM, no IO.
 """
 from __future__ import annotations
 
+import bisect
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from config import MIN_AD_DURATION_FOR_REMOVAL, MERGE_GAP_SECONDS
 
@@ -22,29 +23,37 @@ def _midpoint(span: Dict) -> float:
     return (span['start'] + span['end']) / 2.0
 
 
-def _span_duration(span: Dict) -> float:
-    return span.get('duration', span['end'] - span['start'])
-
-
 def _pick_span(
     spans: List[Dict],
     edge: float,
     max_distance_s: float,
     min_silence_s: float,
     exclude_ids: set,
+    span_ends: List[float],
     proposed_must_be_less_than: Optional[float] = None,
     proposed_must_be_greater_than: Optional[float] = None,
-) -> Optional[Dict]:
-    """Return the best silence span to snap ``edge`` to.
+) -> Optional[Tuple[Dict, float]]:
+    """Return (best_span, midpoint) to snap ``edge`` to, or None.
 
     Selection key: nearest midpoint first; ties within 0.1s -> longer silence.
+
+    span_ends must be a precomputed list of span['end'] values in the same
+    order as spans (i.e. sorted by start since the producer sorts by start and
+    spans are non-overlapping, making ends monotonically non-decreasing too).
     """
-    # Cache (span, mid, dur) so the max() key never recomputes them.
+    # Lower bound: midpoint <= end, so end < edge - max_distance_s guarantees
+    # mid < edge - max_distance_s, failing |mid - edge| <= max_distance_s.
+    lo = bisect.bisect_left(span_ends, edge - max_distance_s)
+
     candidates = []
-    for span in spans:
+    for span in spans[lo:]:
+        # Upper bound: midpoint >= start, so start > edge + max_distance_s
+        # guarantees mid > edge + max_distance_s, failing |mid - edge| <= max_distance_s.
+        if span['start'] > edge + max_distance_s:
+            break
         if id(span) in exclude_ids:
             continue
-        dur = _span_duration(span)
+        dur = span['duration']
         if dur < min_silence_s:
             continue
         mid = _midpoint(span)
@@ -63,8 +72,8 @@ def _pick_span(
         return None
 
     # Nearest first; within 0.1s bucket -> longer silence wins.
-    best, _, _ = max(candidates, key=lambda t: (-round(abs(t[1] - edge), 1), t[2]))
-    return best
+    best, mid, _ = max(candidates, key=lambda t: (-round(abs(t[1] - edge), 1), t[2]))
+    return best, mid
 
 
 def snap_ad_boundaries_to_silence(
@@ -93,6 +102,11 @@ def snap_ad_boundaries_to_silence(
     # Sort ads by start so neighbour lookup is deterministic.
     ads.sort(key=lambda a: a.get('start', 0.0))
 
+    # Precompute ends list for bisect lower-bound in _pick_span.
+    # silence_detector sorts spans by start; non-overlapping spans also have
+    # monotonically non-decreasing ends, so bisect_left on this list is safe.
+    span_ends = [s['end'] for s in silence_spans]
+
     for idx, ad in enumerate(ads):
         try:
             original_start = float(ad['start'])
@@ -114,15 +128,17 @@ def snap_ad_boundaries_to_silence(
             # Guard B (start): reads prev_ad['end'] after any prior snap (ads mutated in order).
             prev_end = prev_ad.get('end') if prev_ad else None
 
-            span = _pick_span(
+            result = _pick_span(
                 silence_spans, original_start,
                 max_distance_s=max_distance_s,
                 min_silence_s=min_silence_s,
                 exclude_ids=used_span_ids,
+                span_ends=span_ends,
                 proposed_must_be_less_than=original_end,
             )
-            if span is not None:
-                mid = round(_midpoint(span), 3)
+            if result is not None:
+                span, mid = result
+                mid = round(mid, 3)
                 # Merge-gap guard: reject if gap to preceding ad is too small.
                 gap_ok = (prev_end is None) or (mid - prev_end >= MERGE_GAP_SECONDS)
                 if gap_ok:
@@ -149,15 +165,17 @@ def snap_ad_boundaries_to_silence(
             # so the two sides together guarantee at least one sees the committed gap.
             next_start = next_ad.get('start') if next_ad else None
 
-            span = _pick_span(
+            result = _pick_span(
                 silence_spans, original_end,
                 max_distance_s=max_distance_s,
                 min_silence_s=min_silence_s,
                 exclude_ids=used_span_ids,
+                span_ends=span_ends,
                 proposed_must_be_greater_than=new_start,
             )
-            if span is not None:
-                mid = round(_midpoint(span), 3)
+            if result is not None:
+                span, mid = result
+                mid = round(mid, 3)
                 # Merge-gap guard: reject if gap to following ad is too small.
                 gap_ok = (next_start is None) or (next_start - mid >= MERGE_GAP_SECONDS)
                 if gap_ok:
@@ -211,5 +229,5 @@ def _build_record(original: float, snap_point: float, span: Dict) -> Dict:
         'silence_end': round(span['end'], 3),
         'snap_point': round(snap_point, 3),
         'shift_seconds': round(snap_point - original, 3),
-        'silence_duration': round(_span_duration(span), 3),
+        'silence_duration': round(span['duration'], 3),
     }

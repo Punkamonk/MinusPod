@@ -182,6 +182,15 @@ def snap_ad_boundaries_to_cues(
     return ads
 
 
+def _transition_eligible(cue, role: str, allow_transition: bool) -> bool:
+    """Return True if a non-ad-role cue may snap via the transition opt-in path."""
+    return (
+        allow_transition
+        and role == AUDIO_CUE_ROLE_NON_AD
+        and is_transition_cue(cue.details)
+    )
+
+
 def _pick_cue_for_start(
     cues: List, ad_start: float, ad_end: Optional[float],
     snap_lead_s: float, snap_lag_s: float,
@@ -207,8 +216,7 @@ def _pick_cue_for_start(
         # path widens eligibility only for content_transition (not show_intro/
         # show_outro, which share the role but must never snap).
         if role not in AUDIO_CUE_START_EDGE_ROLES:
-            if not (allow_transition and role == AUDIO_CUE_ROLE_NON_AD
-                    and is_transition_cue(cue.details)):
+            if not _transition_eligible(cue, role, allow_transition):
                 continue
         cue_end = cue.end
         if cue_end < low or cue_end > high:
@@ -260,8 +268,7 @@ def _pick_cue_for_end(
         # Same gate as _pick_cue_for_start: transition behaves like 'boundary'
         # (both edges) so it is eligible here too.
         if role not in AUDIO_CUE_END_EDGE_ROLES:
-            if not (allow_transition and role == AUDIO_CUE_ROLE_NON_AD
-                    and is_transition_cue(cue.details)):
+            if not _transition_eligible(cue, role, allow_transition):
                 continue
         cue_start = cue.start
         if cue_start < low or cue_start > high:

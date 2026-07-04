@@ -401,3 +401,52 @@ def test_both_guards_trigger_causes_whole_ad_revert():
     # Neighbors untouched (silence_snap only modifies the ad being processed)
     assert prev_ad['end'] == 10.0
     assert next_ad['start'] == 61.0
+
+
+# ---------------------------------------------------------------------------
+# Bisect bound-edge correctness (2a)
+#
+# Eligibility criterion: |midpoint - edge| <= max_distance_s.
+# midpoint = (start + end) / 2.
+# Lower bound cut: end < edge - max_distance_s => mid < edge - max_distance_s => ineligible.
+# Upper bound cut: start > edge + max_distance_s => mid > edge + max_distance_s => ineligible.
+# ---------------------------------------------------------------------------
+
+def test_lower_bound_span_end_just_inside_is_eligible():
+    # edge=100, max_distance=2.0. A zero-width span at end=98.001 has
+    # mid=98.001, dist=1.999 <= 2.0 -> eligible and snaps.
+    ads = [_ad(100.0, 160.0)]
+    spans = [_span(98.001, 98.001)]  # zero-width, mid=98.001, dur=0
+    snap_ad_boundaries_to_silence(ads, spans, max_distance_s=2.0, min_silence_s=0.0)
+    assert ads[0]['start'] == 98.001
+
+
+def test_lower_bound_span_nonzero_width_end_equals_cutoff_is_ineligible():
+    # edge=100, max_distance=2.0, cutoff end = 98.0.
+    # Span start=97.0, end=98.0 -> mid=97.5, dist=2.5 > 2.0 -> ineligible.
+    # The midpoint criterion (not the bisect cut) rejects this span.
+    ads = [_ad(100.0, 160.0)]
+    spans = [_span(97.0, 98.0)]  # mid=97.5, dist=2.5
+    snap_ad_boundaries_to_silence(ads, spans, max_distance_s=2.0, min_silence_s=0.0)
+    assert ads[0]['start'] == 100.0
+    assert 'silence_snap' not in ads[0]
+
+
+def test_upper_bound_span_start_just_inside_is_eligible():
+    # edge=100, max_distance=2.0. A zero-width span at start=101.999 has
+    # mid=101.999, dist=1.999 <= 2.0 -> eligible (with tiny shift > 0.01).
+    ads = [_ad(100.0, 160.0)]
+    spans = [_span(101.999, 101.999)]  # zero-width, mid=101.999, dist=1.999
+    snap_ad_boundaries_to_silence(ads, spans, max_distance_s=2.0, min_silence_s=0.0)
+    assert ads[0]['start'] == 101.999
+
+
+def test_upper_bound_span_nonzero_width_start_equals_cutoff_is_ineligible():
+    # edge=100, max_distance=2.0, cutoff start = 102.0.
+    # Span start=102.0, end=103.0 -> mid=102.5, dist=2.5 > 2.0 -> ineligible.
+    # The midpoint criterion rejects this span (start == cutoff, but mid > edge+max).
+    ads = [_ad(100.0, 160.0)]
+    spans = [_span(102.0, 103.0)]  # mid=102.5, dist=2.5
+    snap_ad_boundaries_to_silence(ads, spans, max_distance_s=2.0, min_silence_s=0.0)
+    assert ads[0]['start'] == 100.0
+    assert 'silence_snap' not in ads[0]
