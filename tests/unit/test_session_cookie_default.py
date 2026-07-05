@@ -19,11 +19,11 @@ class TestDefaultSessionCookieSecure:
         monkeypatch.setenv('BASE_URL', 'http://localhost:8000')
         assert fn() is False
 
-    def test_unset_base_url_empty_returns_false(self, monkeypatch):
-        """No explicit env var + no BASE_URL -> Secure=False (unknown, safe default)."""
+    def test_unset_base_url_empty_returns_true(self, monkeypatch):
+        """No explicit env var + no BASE_URL -> Secure=True (secure by default)."""
         monkeypatch.delenv('SESSION_COOKIE_SECURE', raising=False)
         monkeypatch.delenv('BASE_URL', raising=False)
-        assert fn() is False
+        assert fn() is True
 
     def test_explicit_true_overrides_base_url(self, monkeypatch):
         """Explicit SESSION_COOKIE_SECURE=true is honored even over http BASE_URL."""

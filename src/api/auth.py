@@ -5,6 +5,7 @@ import os
 from flask import current_app, request, session
 from werkzeug.security import generate_password_hash, check_password_hash
 
+from utils.session_defaults import base_url_is_https
 from utils.validation import is_public_ip_for_lockout
 
 from api import (
@@ -23,7 +24,7 @@ def _session_cookie_will_be_dropped(secure_cookie, request_is_secure, base_url):
     insecure because the proxy hop count is unset (warned about separately)."""
     if not secure_cookie or request_is_secure:
         return False
-    return not base_url.lower().startswith('https')
+    return not base_url_is_https(base_url)
 
 
 def _warn_if_session_cookie_unstorable():

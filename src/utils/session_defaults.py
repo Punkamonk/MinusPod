@@ -6,18 +6,29 @@ without triggering the full application initialization sequence.
 import os
 
 
+def base_url_is_plaintext_http(base_url: str) -> bool:
+    """Return True when base_url uses plain HTTP (starts with 'http://')."""
+    return base_url.lower().startswith('http://')
+
+
+def base_url_is_https(base_url: str) -> bool:
+    """Return True when base_url uses HTTPS (starts with 'https')."""
+    return base_url.lower().startswith('https')
+
+
 def _default_session_cookie_secure() -> bool:
     """Return the value to use for SESSION_COOKIE_SECURE.
 
-    If the environment variable is explicitly set, honor it. If unset, derive
-    from BASE_URL: Secure only when the deployment is HTTPS. This prevents the
-    silent login-bounce loop a Secure cookie causes over plain HTTP. Operators
-    who terminate TLS at a proxy should set BASE_URL=https://... (which is
-    already required for correct feed URLs) or set SESSION_COOKIE_SECURE
-    explicitly.
+    Secure by default. Downgrades to False only when BASE_URL is explicitly
+    plain HTTP (starts with 'http://'). Operators serving over plain HTTP must
+    set BASE_URL=http://... or set SESSION_COOKIE_SECURE=false explicitly.
+    Operators terminating TLS at a proxy must set BASE_URL=https://... (already
+    required for correct feed URLs) or set SESSION_COOKIE_SECURE=true explicitly.
+    Unset or empty BASE_URL defaults to True (safe).
     """
     explicit = os.environ.get('SESSION_COOKIE_SECURE')
     if explicit is not None:
         return explicit.lower() == 'true'
     base_url = os.environ.get('BASE_URL', '')
-    return base_url.lower().startswith('https')
+    # Downgrade only on a positive plain-HTTP signal; unknown/empty stays True.
+    return not base_url_is_plaintext_http(base_url)
