@@ -3,7 +3,6 @@
 The helper is extracted from the SESSION_COOKIE_SECURE config assembly so it is
 unit-testable independently of the Flask app startup sequence.
 """
-import pytest
 from utils.session_defaults import _default_session_cookie_secure as fn
 
 
