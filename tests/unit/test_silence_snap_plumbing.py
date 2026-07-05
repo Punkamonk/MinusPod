@@ -31,7 +31,6 @@ def _base_cue_settings(**overrides):
         'snap_confidence': 0.80,
         'snap_lead': 10.0,
         'snap_lag': 4.0,
-        'silence_snap_enabled': False,
         'transition_snap_enabled': False,
     }
     base.update(overrides)

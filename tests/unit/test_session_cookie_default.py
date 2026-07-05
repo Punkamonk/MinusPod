@@ -48,3 +48,9 @@ class TestDefaultSessionCookieSecure:
         monkeypatch.delenv('SESSION_COOKIE_SECURE', raising=False)
         monkeypatch.setenv('BASE_URL', 'HTTPS://example.com')
         assert fn() is True
+
+    def test_explicit_value_whitespace_stripped(self, monkeypatch):
+        """Explicit value tolerates surrounding whitespace."""
+        monkeypatch.setenv('SESSION_COOKIE_SECURE', '  true  ')
+        monkeypatch.delenv('BASE_URL', raising=False)
+        assert fn() is True

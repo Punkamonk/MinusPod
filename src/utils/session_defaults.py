@@ -28,7 +28,7 @@ def _default_session_cookie_secure() -> bool:
     """
     explicit = os.environ.get('SESSION_COOKIE_SECURE')
     if explicit is not None:
-        return explicit.lower() == 'true'
+        return explicit.strip().lower() == 'true'
     base_url = os.environ.get('BASE_URL', '')
     # Downgrade only on a positive plain-HTTP signal; unknown/empty stays True.
     return not base_url_is_plaintext_http(base_url)
