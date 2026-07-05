@@ -3,6 +3,7 @@ import { useNavigate, Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { takeLoginRedirect } from '../utils/loginRedirect';
+import LoadingSpinner from '../components/LoadingSpinner';
 
 function Login() {
   const navigate = useNavigate();
@@ -11,6 +12,16 @@ function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Show a spinner (not the login form) while auth status is still resolving,
+  // so a returning user does not see a flash of the form before the redirect.
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <LoadingSpinner size="lg" />
+      </div>
+    );
+  }
 
   // Guard: wait for auth status (!isLoading) and suppress during submit
   // (!isSubmitting -- handleSubmit owns navigation once it starts, and
