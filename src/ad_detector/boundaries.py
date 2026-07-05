@@ -855,7 +855,7 @@ def merge_ads_across_short_content_gaps(
         ads: Detected ad segments (any order; sorted internally).
         segments: Transcript segments for the episode.
         min_content_seconds: Gap with less than this much speech -> merge.
-            0 disables the content check (always merge).
+            <= 0 disables the pass entirely (no merging).
         max_merged_seconds: Safety cap; skip merge if result would exceed this.
 
     Returns:
@@ -863,6 +863,10 @@ def merge_ads_across_short_content_gaps(
     """
     if not ads or len(ads) < 2:
         return sorted(ads, key=lambda x: x['start']) if ads else ads
+    # Disabled, or no transcript to measure content with: never merge.
+    # Without segments every gap would measure 0 content and over-merge.
+    if min_content_seconds <= 0 or not segments:
+        return sorted(ads, key=lambda x: x['start'])
 
     ads = sorted(ads, key=lambda x: x['start'])
 
@@ -883,14 +887,10 @@ def merge_ads_across_short_content_gaps(
                 break
 
             # Measure actual show-content duration in the gap.
-            # min_content_seconds == 0 disables the content guard (always merge).
-            if min_content_seconds > 0:
-                content_seconds = _content_duration_in_range(segments, gap_start, gap_end)
-                if content_seconds >= min_content_seconds:
-                    # Real show content between ads -- do not merge.
-                    break
-            else:
-                content_seconds = 0.0
+            content_seconds = _content_duration_in_range(segments, gap_start, gap_end)
+            if content_seconds >= min_content_seconds:
+                # Real show content between ads -- do not merge.
+                break
 
             # Safety: skip if result would be too long.
             merged_duration = next_ad['end'] - current_ad['start']
@@ -908,6 +908,8 @@ def merge_ads_across_short_content_gaps(
                 f"{next_ad['start']:.1f}s-{next_ad['end']:.1f}s"
             )
 
+            # Inner-edge cue_snap/silence_snap records are dropped with next_ad;
+            # current_ad's end-snap record goes stale (advisory-only downstream).
             current_ad['end'] = next_ad['end']
             current_ad['merged_distinct_ads'] = True
             current_ad['confidence'] = max(current_ad.get('confidence', 0.0),

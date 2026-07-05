@@ -44,7 +44,7 @@ class TestMergeAcrossShortContentGaps:
     def test_filler_gap_sets_merged_distinct_ads_flag(self):
         """merged_distinct_ads must be True after a filler-gap merge."""
         ads = [_ad(10, 40), _ad(50, 80)]
-        segments = []
+        segments = [_seg(0, 5, 'Intro.')]  # out-of-gap; gap itself untranscribed
         result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
         assert len(result) == 1
         assert result[0].get('merged_distinct_ads') is True
@@ -52,7 +52,7 @@ class TestMergeAcrossShortContentGaps:
     def test_filler_gap_appends_reason(self):
         """Merged ad reason string must reference the merge."""
         ads = [_ad(10, 40, reason='BetterHelp ad'), _ad(50, 80, reason='NordVPN ad')]
-        segments = []
+        segments = [_seg(0, 5, 'Intro.')]  # out-of-gap; gap itself untranscribed
         result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
         assert len(result) == 1
         assert 'NordVPN' in result[0]['reason'] or 'merged' in result[0]['reason'].lower()
@@ -86,7 +86,7 @@ class TestMergeAcrossShortContentGaps:
     def test_different_sponsors_filler_gap_merges(self):
         """Cross-sponsor merge is the intended use case; must succeed."""
         ads = [_ad(10, 40, sponsor='BetterHelp'), _ad(50, 80, sponsor='NordVPN')]
-        segments = []
+        segments = [_seg(0, 5, 'Intro.')]  # out-of-gap; gap itself untranscribed
         result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
         assert len(result) == 1
 
@@ -94,14 +94,14 @@ class TestMergeAcrossShortContentGaps:
         """When merged span would exceed max_merged_seconds, skip merge, keep both."""
         ads = [_ad(0, 200), _ad(205, 400)]
         # merged span = 400s > max 300s
-        segments = []
+        segments = [_seg(0, 5, 'Intro.')]  # out-of-gap; gap itself untranscribed
         result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
         assert len(result) == 2, "Oversized merge must be skipped"
 
     def test_confidence_is_max_of_two(self):
         """Merged ad confidence must be the max of the two source ads."""
         ads = [_ad(10, 40, confidence=0.70), _ad(50, 80, confidence=0.92)]
-        segments = []
+        segments = [_seg(0, 5, 'Intro.')]  # out-of-gap; gap itself untranscribed
         result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
         assert len(result) == 1
         assert result[0]['confidence'] == 0.92
@@ -109,7 +109,7 @@ class TestMergeAcrossShortContentGaps:
     def test_sponsor_none_does_not_overwrite_real_sponsor(self):
         """Regression: merging a None-sponsor ad must not null-overwrite a real sponsor."""
         ads = [_ad(10, 40, sponsor='BetterHelp'), _ad(50, 80, sponsor=None)]
-        segments = []
+        segments = [_seg(0, 5, 'Intro.')]  # out-of-gap; gap itself untranscribed
         result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
         assert len(result) == 1
         assert result[0].get('sponsor') == 'BetterHelp'
@@ -117,7 +117,7 @@ class TestMergeAcrossShortContentGaps:
     def test_sponsor_none_first_then_real_sponsor(self):
         """None sponsor in first ad must not overwrite real sponsor from second."""
         ads = [_ad(10, 40, sponsor=None), _ad(50, 80, sponsor='NordVPN')]
-        segments = []
+        segments = [_seg(0, 5, 'Intro.')]  # out-of-gap; gap itself untranscribed
         result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
         assert len(result) == 1
         assert result[0].get('sponsor') == 'NordVPN'
@@ -148,18 +148,26 @@ class TestMergeAcrossShortContentGaps:
             {**_ad(10, 40), 'end_text': 'Use code FIRST'},
             {**_ad(50, 80), 'end_text': 'Use code SECOND'},
         ]
-        segments = []
+        segments = [_seg(0, 5, 'Intro.')]  # out-of-gap; gap itself untranscribed
         result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
         assert len(result) == 1
         assert result[0].get('end_text') == 'Use code SECOND'
 
-    def test_zero_min_content_disables_guard(self):
-        """min_content_seconds=0 should merge even when there is show content in gap."""
-        ads = [_ad(10, 40), _ad(100, 130)]
-        segments = [_seg(40, 80, 'Thirty seconds of actual show content right here.')]
+    def test_zero_min_content_disables_pass(self):
+        """min_content_seconds <= 0 disables the pass: nothing merges."""
+        ads = [_ad(10, 40), _ad(50, 80)]
+        segments = [_seg(0, 5, 'Intro.')]  # filler gap that WOULD merge if enabled
         result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=0.0, max_merged_seconds=300.0)
-        # 0 disables: anything < 0 never happens so every gap merges regardless of content
-        assert len(result) == 1
+        assert len(result) == 2, "0 must disable merging, not merge unconditionally"
+
+    def test_no_segments_never_merges(self):
+        """Without a transcript there is no content evidence: never merge.
+
+        Guards the catastrophic path where empty segments make every gap
+        measure 0 content and everything within the cap over-merges."""
+        ads = [_ad(10, 40), _ad(50, 80)]
+        result = merge_ads_across_short_content_gaps(ads, [], min_content_seconds=12.0, max_merged_seconds=300.0)
+        assert len(result) == 2
 
 
 # --- plumbing: setting reaches the pass from _refine_boundaries ---
@@ -170,7 +178,7 @@ class TestMergeGapSettingPlumbing:
         """_refine_boundaries must call merge_ads_across_short_content_gaps
         with the value read from the DB setting."""
         ads_in = [_ad(10, 40), _ad(50, 80)]
-        segments = []
+        segments = [_seg(0, 5, 'Intro.')]  # out-of-gap; gap itself untranscribed
 
         mock_db = MagicMock()
         # _setting_float calls db.get_setting(key) -> str or None
