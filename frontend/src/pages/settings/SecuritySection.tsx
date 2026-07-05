@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { rotateMasterPassphrase } from '../../api/providers';
 import CollapsibleSection from '../../components/CollapsibleSection';
-import { setPassword, removePassword } from '../../api/auth';
+import { setPassword, removePassword, AuthStatus } from '../../api/auth';
 
 const MIN_PASSWORD_LENGTH = 12;
 
@@ -9,7 +9,7 @@ interface SecuritySectionProps {
   cryptoReady?: boolean;
   isPasswordSet: boolean;
   logout: () => Promise<void>;
-  refreshStatus: () => Promise<unknown>;
+  refreshStatus: () => Promise<AuthStatus>;
   plaintextSecretsCount?: number;
 }
 
