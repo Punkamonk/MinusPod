@@ -195,5 +195,5 @@ def test_new_feed_defaults_both_fields_null(app_client, seeded_feed, _auth):
     assert 'maxAdDurationOverride' in body
     assert body['maxAdDurationOverride'] is None
     assert 'cueGatedApproval' in body
-    # cue_gated_approval DEFAULT 0 -> deserializes to False (not None); both read as off
-    assert body['cueGatedApproval'] is False or body['cueGatedApproval'] is None
+    # cue_gated_approval DEFAULT 0 -> deserializes to False (not None)
+    assert body['cueGatedApproval'] is False

@@ -56,8 +56,17 @@ def test_max_ad_duration_db_error_returns_none():
     assert resolve_max_ad_duration_override(_ErrorDB(), 1) is None
 
 
+def test_max_ad_duration_db_error_logs_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger='config'):
+        resolve_max_ad_duration_override(_ErrorDB(), 1)
+    assert any('max_ad_duration_override' in r.message for r in caplog.records), (
+        f"Expected a warning naming the override; got: {[r.message for r in caplog.records]}"
+    )
+
+
 def test_max_ad_duration_zero_returns_zero():
-    # 0 is a valid (if unusual) cap; the resolver does not special-case it.
+    # Resolver does not range-check; 0 is API-invalid (range 1-3600) and can
+    # only arrive via direct DB writes. Documents raw pass-through behavior.
     db = _DB(max_ad_dur=0.0)
     assert resolve_max_ad_duration_override(db, 1) == 0.0
 
