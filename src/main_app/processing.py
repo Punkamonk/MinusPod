@@ -30,6 +30,8 @@ from config import (
     AUDIO_CUE_PAIR_CONFIDENCE, AUDIO_CUE_PAIR_ORIENT_WINDOW_SECONDS,
     resolve_feed_cue_settings,
     resolve_silence_snap_tunables,
+    resolve_max_ad_duration_override,
+    resolve_cue_gated_approval,
 )
 from llm_capabilities import (
     PASS_AD_DETECTION_1, PASS_AD_DETECTION_2,
@@ -597,6 +599,15 @@ def _gate_validation_by_confidence(slug, episode_id, validation_ads, min_cut_con
             ad['was_cut'] = True
             ads_to_remove.append(ad)
             continue
+        # Held ads are high-confidence REVIEWs; they must never be cut.
+        if ad.get('held_for_review'):
+            ad['was_cut'] = False
+            audio_logger.info(
+                f"[{slug}:{episode_id}] Holding ad for review "
+                f"({ad.get('hold_reason', 'unknown')}): "
+                f"{ad['start']:.1f}s-{ad['end']:.1f}s"
+            )
+            continue
         confidence = validation.get('adjusted_confidence', ad.get('confidence', 1.0))
         if confidence < min_cut_confidence:
             low_confidence_count += 1
@@ -613,7 +624,8 @@ def _gate_validation_by_confidence(slug, episode_id, validation_ads, min_cut_con
 
 def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
                           episode_description, episode_duration, min_cut_confidence,
-                          podcast_name, skip_patterns=False, positional_prior=None):
+                          podcast_name, skip_patterns=False, positional_prior=None,
+                          podcast_id=None):
     """Pipeline stage: Refine ad boundaries, detect rolls, validate, gate by confidence.
 
     Returns (ads_to_remove, all_ads_with_validation).
@@ -635,12 +647,18 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
         slug, episode_id, db
     )
 
+    # Resolve per-feed hold settings once (one DB read via get_podcast_cue_settings_overrides).
+    max_ad_duration_override = resolve_max_ad_duration_override(db, podcast_id)
+    cue_gate_enabled = resolve_cue_gated_approval(db, podcast_id)
+
     validator = AdValidator(
         episode_duration, segments, episode_description,
         false_positive_corrections=false_positive_corrections,
         confirmed_corrections=confirmed_corrections,
         min_cut_confidence=min_cut_confidence,
-        positional_prior=positional_prior
+        positional_prior=positional_prior,
+        max_ad_duration_override=max_ad_duration_override,
+        cue_gate_enabled=cue_gate_enabled,
     )
     validation_result = validator.validate(all_ads)
 
@@ -1656,7 +1674,8 @@ def _apply_boundary_adjustments(slug, episode_id, all_ads):
 
 
 def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
-                          episode_description, min_cut_confidence):
+                          episode_description, min_cut_confidence,
+                          podcast_id=None):
     """Build the cut list for a recut from the stored detections plus the user's
     edits, with no re-detection. Manual adds already live in ad_markers_json;
     boundary adjustments are applied here; rejects/confirms and confidence
@@ -1678,11 +1697,21 @@ def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
     false_positive_corrections, confirmed_corrections = _load_user_corrections(
         slug, episode_id, db
     )
+
+    # Resolve per-feed hold settings. If podcast_id was not passed, look it up.
+    if podcast_id is None:
+        podcast_row = db.get_podcast_by_slug(slug)
+        podcast_id = podcast_row.get('id') if podcast_row else None
+    max_ad_duration_override = resolve_max_ad_duration_override(db, podcast_id)
+    cue_gate_enabled = resolve_cue_gated_approval(db, podcast_id)
+
     validator = AdValidator(
         episode_duration, segments, episode_description,
         false_positive_corrections=false_positive_corrections,
         confirmed_corrections=confirmed_corrections,
         min_cut_confidence=min_cut_confidence,
+        max_ad_duration_override=max_ad_duration_override,
+        cue_gate_enabled=cue_gate_enabled,
     )
     validation_result = validator.validate(all_ads)
     ads_to_remove, _low = _gate_validation_by_confidence(
@@ -2003,7 +2032,8 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
             ads_to_remove, all_ads_with_validation = _refine_and_validate(
                 slug, episode_id, all_ads, segments, audio_path,
                 episode_description, episode_duration, min_cut_confidence, podcast_name,
-                skip_patterns=skip_patterns, positional_prior=positional_prior
+                skip_patterns=skip_patterns, positional_prior=positional_prior,
+                podcast_id=ctx.podcast_id,
             )
             _check_cancel(cancel_event, slug, episode_id)
 

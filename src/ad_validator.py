@@ -10,7 +10,8 @@ from config import (
     MAX_AD_DURATION_CONFIRMED, LOW_CONFIDENCE,
     REJECT_CONFIDENCE, HIGH_CONFIDENCE_OVERRIDE, PRE_ROLL, MID_ROLL_1,
     POST_ROLL, MAX_AD_PERCENTAGE, MAX_ADS_PER_5MIN,
-    MERGE_GAP_THRESHOLD, MAX_SILENT_GAP
+    MERGE_GAP_THRESHOLD, MAX_SILENT_GAP,
+    HOLD_REASON_MAX_DURATION, HOLD_REASON_NO_CUE,
 )
 from utils.text import extract_text_from_segments
 from utils.time import overlap_ratio
@@ -97,7 +98,9 @@ class AdValidator:
                  false_positive_corrections: List[Dict] = None,
                  confirmed_corrections: List[Dict] = None,
                  min_cut_confidence: float = 0.80,
-                 positional_prior=None):
+                 positional_prior=None,
+                 max_ad_duration_override: float = None,
+                 cue_gate_enabled: bool = False):
         """Initialize validator.
 
         Args:
@@ -111,6 +114,8 @@ class AdValidator:
             min_cut_confidence: Minimum confidence to auto-accept (user's slider value)
             positional_prior: Optional PositionalPrior with this feed's learned
                               ad-break zones; replaces the global position boosts
+            max_ad_duration_override: Per-feed cap in seconds; None = no cap
+            cue_gate_enabled: When True, ads without cue evidence are held for review
         """
         self.episode_duration = episode_duration
         self.segments = segments or []
@@ -120,6 +125,8 @@ class AdValidator:
         self.confirmed_corrections = confirmed_corrections or []
         self.min_cut_confidence = min_cut_confidence
         self.positional_prior = positional_prior
+        self.max_ad_duration_override = max_ad_duration_override
+        self.cue_gate_enabled = cue_gate_enabled
 
         if self.false_positive_corrections:
             logger.info(f"Loaded {len(self.false_positive_corrections)} false positive corrections")
@@ -308,6 +315,10 @@ class AdValidator:
         corrections = []
         confidence = ad.get('confidence', 1.0)
 
+        # Pop stale held state -- re-derived on every validation pass.
+        ad.pop('held_for_review', None)
+        ad.pop('hold_reason', None)
+
         duration = ad['end'] - ad['start']
         position = ad['start'] / self.episode_duration if self.episode_duration > 0 else 0
 
@@ -379,6 +390,9 @@ class AdValidator:
 
         # Make decision based on adjusted confidence and flags
         decision = self._make_decision(confidence, flags, duration)
+
+        # Apply per-feed hold rules after the base decision.
+        decision = self._apply_hold_rules(ad, decision, confidence, flags, duration)
 
         ad['validation'] = {
             'decision': decision.value,
@@ -547,6 +561,46 @@ class AdValidator:
             return Decision.ACCEPT
         else:
             return Decision.REVIEW
+
+    def _apply_hold_rules(self, ad: Dict, decision: Decision, confidence: float,
+                          flags: List[str], duration: float) -> Decision:
+        """Apply per-feed hold rules after the base decision.
+
+        A held ad gets decision=REVIEW with held_for_review=True so the gate
+        keeps it in the audio. Returns the (possibly updated) decision.
+        """
+        # Rule 1: max duration override.
+        if self.max_ad_duration_override is not None and duration > self.max_ad_duration_override:
+            if decision == Decision.ACCEPT:
+                self._mark_held(ad, flags, HOLD_REASON_MAX_DURATION)
+                return Decision.REVIEW
+            if decision == Decision.REJECT and confidence >= REJECT_CONFIDENCE:
+                # Only hold duration-only rejects -- leave low-confidence junk
+                # and non-duration errors (NOT_AD etc.) as plain REJECT.
+                duration_flags = [f for f in flags if 'ERROR' in f]
+                if all('Very long' in f for f in duration_flags) and duration_flags:
+                    self._mark_held(ad, flags, HOLD_REASON_MAX_DURATION)
+                    return Decision.REVIEW
+
+        # Rule 2: cue-gated approval. Only applies to ACCEPT after rule 1.
+        if self.cue_gate_enabled and decision == Decision.ACCEPT:
+            if ad.get('detection_stage') == 'manual':
+                return decision
+            cue_backed = bool(ad.get('cue_snap')) or ad.get('detection_stage') == 'cue_pair'
+            if not cue_backed:
+                self._mark_held(ad, flags, HOLD_REASON_NO_CUE)
+                return Decision.REVIEW
+
+        return decision
+
+    def _mark_held(self, ad: Dict, flags: List[str], reason: str) -> None:
+        """Set held_for_review state on the ad dict and append a flag entry."""
+        ad['held_for_review'] = True
+        ad['hold_reason'] = reason
+        flags.append(f"INFO: Held for review ({reason})")
+        logger.info(
+            f"Holding ad {ad['start']:.1f}s-{ad['end']:.1f}s for review: {reason}"
+        )
 
     def _clamp_boundaries(self, ads: List[Dict],
                           result: ValidationResult) -> List[Dict]:

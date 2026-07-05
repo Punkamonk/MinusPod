@@ -148,6 +148,107 @@ def _stub_assets_io(monkeypatch, counters):
     monkeypatch.setattr(processing.db, 'save_episode_details', lambda *a, **k: None)
 
 
+def _stub_recut_db(monkeypatch, ads, fp=None, confirmed=None, overrides=None):
+    """Shared monkeypatch helper for _build_recut_ad_list hold tests."""
+    import json as _json
+    monkeypatch.setattr(processing.db, 'get_episode',
+                        lambda s, e: {'ad_markers_json': _json.dumps(ads)})
+    monkeypatch.setattr(processing.db, 'get_episode_corrections', lambda eid: [])
+    monkeypatch.setattr(processing.db, 'get_false_positive_corrections',
+                        lambda eid: fp or [])
+    monkeypatch.setattr(processing.db, 'get_confirmed_corrections',
+                        lambda eid: confirmed or [])
+    # Simulate per-feed settings overrides (or empty = both unset)
+    monkeypatch.setattr(processing.db, 'get_podcast_by_slug',
+                        lambda s: {'id': 42})
+    monkeypatch.setattr(processing.db, 'get_podcast_cue_settings_overrides',
+                        lambda pid: overrides or {})
+
+
+def test_build_recut_held_confirm_is_cut(monkeypatch):
+    # held ad + confirm correction -> FP/confirm early-return wins -> ACCEPT -> cut
+    ads = [{'start': 100.0, 'end': 400.0, 'confidence': 0.95,
+            'reason': 'BetterHelp sponsor', 'held_for_review': True,
+            'hold_reason': 'max_duration'}]
+    _stub_recut_db(monkeypatch, ads,
+                   confirmed=[{'start': 100.0, 'end': 400.0}],
+                   overrides={'max_ad_duration_override': 240.0})
+    ads_to_remove, _ = processing._build_recut_ad_list(
+        'slug', 'ep', [], 3600.0, '', 0.80
+    )
+    assert {a['start'] for a in ads_to_remove} == {100.0}, (
+        "Confirmed held ad must be cut on recut"
+    )
+
+
+def test_build_recut_held_fp_is_uncut_reject(monkeypatch):
+    # held ad + FP correction -> FP early-return wins -> REJECT -> not cut
+    ads = [{'start': 100.0, 'end': 400.0, 'confidence': 0.95,
+            'reason': 'BetterHelp sponsor', 'held_for_review': True,
+            'hold_reason': 'max_duration'}]
+    _stub_recut_db(monkeypatch, ads,
+                   fp=[{'start': 100.0, 'end': 400.0}],
+                   overrides={'max_ad_duration_override': 240.0})
+    ads_to_remove, all_ads = processing._build_recut_ad_list(
+        'slug', 'ep', [], 3600.0, '', 0.80
+    )
+    assert ads_to_remove == [], "FP-corrected held ad must not be cut"
+    assert not all_ads[0].get('held_for_review'), "FP path must clear stale held flag"
+
+
+def test_build_recut_held_nothing_stays_held_uncut(monkeypatch):
+    # held ad + no correction -> re-held by validator -> gate keeps it
+    ads = [{'start': 100.0, 'end': 400.0, 'confidence': 0.95,
+            'reason': 'BetterHelp sponsor'}]
+    _stub_recut_db(monkeypatch, ads,
+                   overrides={'max_ad_duration_override': 240.0})
+    ads_to_remove, all_ads = processing._build_recut_ad_list(
+        'slug', 'ep', [], 3600.0, '', 0.80
+    )
+    assert ads_to_remove == [], "Held ad with no correction must not be cut"
+    assert all_ads[0].get('held_for_review') is True
+    assert all_ads[0].get('was_cut') is False
+
+
+def test_build_recut_manual_on_cue_gated_feed_is_cut(monkeypatch):
+    # detection_stage='manual' is exempt from cue gating -> still cut
+    ads = [{'start': 120.0, 'end': 180.0, 'confidence': 1.0,
+            'detection_stage': 'manual',
+            'reason': 'Manual Co: manually added ad'}]
+    _stub_recut_db(monkeypatch, ads,
+                   overrides={'cue_gated_approval': 1})
+    ads_to_remove, _ = processing._build_recut_ad_list(
+        'slug', 'ep', [], 3600.0, '', 0.80
+    )
+    assert {a['start'] for a in ads_to_remove} == {120.0}, (
+        "Manual ad must be cut even on a cue-gated feed"
+    )
+
+
+def test_gate_held_ad_not_cut_despite_high_confidence():
+    # Regression: a held ad with adjusted_confidence >= min_cut_confidence must
+    # NOT be cut. Before the gate patch, the REVIEW branch fell through to CUT
+    # when confidence was above the threshold.
+    ad = {
+        'start': 100.0,
+        'end': 200.0,
+        'confidence': 0.95,
+        'held_for_review': True,
+        'hold_reason': 'max_duration',
+        'validation': {
+            'decision': 'REVIEW',
+            'adjusted_confidence': 0.95,
+        },
+    }
+    ads_to_remove, _ = processing._gate_validation_by_confidence(
+        'slug', 'ep', [ad], 0.80
+    )
+    assert ads_to_remove == [], (
+        "Held ad must not appear in ads_to_remove regardless of confidence"
+    )
+    assert ad['was_cut'] is False
+
+
 def test_generate_assets_skips_chapters_when_disabled(monkeypatch):
     # Recut path: no AI chapter call, no chapter write.
     counters = {}
