@@ -9,7 +9,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def snapshot_database(db, backup_path: str | Path) -> str:
+def snapshot_database(db, backup_path: str | Path, tighten_dir_perms: bool = True) -> str:
     """Write a consistent snapshot of ``db`` to ``backup_path`` via the
     SQLite online backup API.
 
@@ -17,13 +17,18 @@ def snapshot_database(db, backup_path: str | Path) -> str:
     dump that contains provider secrets can't be read by other UIDs on the
     host. Removes partially-written backup files on failure so callers don't
     have to reason about half-written snapshots.
+
+    ``tighten_dir_perms`` (default True) chmods the parent directory to
+    ``0o700``. Callers that write into a user-chosen destination pass False so a
+    pre-existing shared directory (e.g. a NAS mount) keeps its own permissions.
     """
     path = Path(backup_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        logger.warning("could not tighten backup dir permissions on %s", path.parent)
+    if tighten_dir_perms:
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            logger.warning("could not tighten backup dir permissions on %s", path.parent)
 
     src = db.get_connection()
     dst = sqlite3.connect(str(path))

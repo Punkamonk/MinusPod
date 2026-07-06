@@ -5,12 +5,36 @@ used across the ad detection, transcription, and chapters pipeline.
 """
 
 from datetime import datetime, timezone
-from typing import List, Dict
+from typing import List, Dict, Optional
+
+ISO_FORMAT = '%Y-%m-%dT%H:%M:%SZ'
 
 
 def utc_now_iso() -> str:
     """Return current UTC time as ISO 8601 string (e.g. '2026-03-15T12:00:00Z')."""
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return datetime.now(timezone.utc).strftime(ISO_FORMAT)
+
+
+def utc_now() -> datetime:
+    """Return the current time as a timezone-aware UTC datetime."""
+    return datetime.now(timezone.utc)
+
+
+def parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO 8601 string to a UTC-aware datetime, or None on failure.
+
+    Returns None for empty/None input or an unparseable value. A naive result
+    (no tzinfo) is treated as UTC.
+    """
+    if not value:
+        return None
+    try:
+        dt = parse_iso_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def parse_timestamp(ts) -> float:

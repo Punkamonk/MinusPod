@@ -21,6 +21,7 @@ from secrets_crypto import (
     is_available as crypto_available,
     encrypt_bytes as _encrypt_bytes,
 )
+from db_backup_service import backup_now, BackupInProgressError
 
 logger = logging.getLogger('podcast.api')
 
@@ -333,6 +334,27 @@ def backup_database():
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+@api.route('/system/db-backup/run', methods=['POST'])
+@limiter.limit('6/hour')
+@log_request
+def run_db_backup():
+    """Force a scheduled-style DB backup now, ignoring the enabled flag.
+
+    Distinct from GET /system/backup (which streams a one-off download);
+    this writes to the configured backup destination with rotation.
+    """
+    db = get_database()
+    try:
+        summary = backup_now(db)
+    except BackupInProgressError:
+        return error_response('a backup is already in progress', 409)
+    except Exception as e:
+        # backup_now already stamped db_backup_last_error (surfaced via GET);
+        # keep the client body a flat Error-schema string with no raw str(e).
+        return error_response('Backup failed', 500, details=str(e))
+    return json_response(summary)
 
 
 # ========== API Documentation ==========

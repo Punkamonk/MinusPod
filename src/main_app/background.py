@@ -15,6 +15,14 @@ refresh_logger = logging.getLogger('podcast.refresh')
 audio_logger = logging.getLogger('podcast.audio')
 
 
+def _run_tick(tick_fn, name):
+    """Run one scheduled tick, logging (never raising) on failure."""
+    try:
+        tick_fn(db)
+    except Exception as e:
+        refresh_logger.warning(f"{name} failed: {e}")
+
+
 def run_cleanup():
     """Run episode cleanup based on retention period."""
     try:
@@ -59,16 +67,17 @@ def background_rss_refresh():
     from main_app.feeds import refresh_all_feeds
     from pricing_fetcher import refresh_pricing_if_stale
     from community_sync import community_pattern_sync_tick
+    from db_backup_service import db_backup_tick
     while not shutdown_event.is_set():
         refresh_all_feeds()
         run_cleanup()
         refresh_pricing_if_stale()  # TTL-gated, fetches once per 24h
         # Community pattern sync -- gated by settings.community_sync_enabled
         # and the cron schedule; safe to call every tick.
-        try:
-            community_pattern_sync_tick(db)
-        except Exception as e:
-            refresh_logger.warning(f"community_pattern_sync_tick failed: {e}")
+        _run_tick(community_pattern_sync_tick, 'community_pattern_sync_tick')
+        # Scheduled DB backup -- gated by settings.db_backup_enabled and the
+        # cron schedule; safe to call every tick.
+        _run_tick(db_backup_tick, 'db_backup_tick')
         # Wait 15 minutes, but allow early exit on shutdown
         shutdown_event.wait(timeout=900)
 
