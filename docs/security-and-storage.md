@@ -124,9 +124,9 @@ Scheduled backups copy the SQLite database to a directory you choose, on a cron 
 The copies are written with SQLite's online backup API, so they stay consistent even while the app is running, and the snapshot is a single file with no `-wal` or `-shm` sidecars. Keep count controls the filenames:
 
 - Keep 1 (overwrite): one fixed file, `minuspod-backup.db`, replaced on each run.
-- Keep 2 or more (rotate): timestamped files named `minuspod-backup-YYYYMMDD-HHMMSS.db`, with the oldest pruned once the count is exceeded.
+- Keep 2 or more (rotate): timestamped files named `minuspod-backup-auto-YYYYMMDD-HHMMSS.db`, with the oldest pruned once the count is exceeded. The `-auto-` prefix keeps scheduler files distinct from operator-saved downloads (`minuspod-backup-YYYYMMDD-HHMMSS.db`), so a download parked in the same directory is never pruned.
 
-The default destination is `/app/data/backups/` inside the container. The destination directory is created with mode `0700` and each backup file with mode `0600`, so other UIDs on the host cannot read a dump that holds provider secrets. These files carry the same sensitive contents listed under [Database backup sensitivity](#database-backup-sensitivity) above, and unlike the download path they are never encrypted. Point the destination at a directory you trust, and treat it like a credential store.
+The default destination is `/app/data/backups/` inside the container. When MinusPod creates the destination directory it sets mode `0700`; a directory you point it at that already exists keeps its own permissions. Each backup file is written with mode `0600`, so other UIDs on the host cannot read a dump that holds provider secrets. These files carry the same sensitive contents listed under [Database backup sensitivity](#database-backup-sensitivity) above, and unlike the download path they are never encrypted. Point the destination at a directory you trust, and treat it like a credential store.
 
 To restore from a scheduled snapshot:
 

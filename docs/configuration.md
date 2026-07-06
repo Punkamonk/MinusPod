@@ -214,7 +214,7 @@ Cron examples (all UTC):
 - `0 */6 * * *` - every 6 hours, on the hour
 - `0 4 * * 0` - weekly, Sunday at 04:00
 
-The snapshots are plain SQLite files and are never encrypted, even with `MINUSPOD_MASTER_PASSPHRASE` set. For filenames, restore steps, and why the destination directory is locked to `0700`, see [Scheduled database backups](security-and-storage.md#scheduled-database-backups) in the security guide.
+The snapshots are plain SQLite files and are never encrypted, even with `MINUSPOD_MASTER_PASSPHRASE` set. For filenames, restore steps, and how destination directory permissions are handled, see [Scheduled database backups](security-and-storage.md#scheduled-database-backups) in the security guide.
 
 ---
 
