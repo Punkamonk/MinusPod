@@ -18,10 +18,9 @@ interface Draft {
 
 function DatabaseBackupSection() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['dbBackup'],
     queryFn: getDatabaseBackupSettings,
-    refetchInterval: 60_000,
   });
 
   const [draft, setDraft] = useState<Draft>({});
@@ -44,7 +43,9 @@ function DatabaseBackupSection() {
 
   const runNow = useMutation({
     mutationFn: runDatabaseBackupNow,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['dbBackup'] }),
+    // Invalidate on success AND error so a failed manual run refetches the
+    // status block and shows lastError (the 500 body is a flat message only).
+    onSettled: () => qc.invalidateQueries({ queryKey: ['dbBackup'] }),
   });
 
   // React Compiler memoizes this automatically; a manual useMemo would trip the
@@ -70,6 +71,21 @@ function DatabaseBackupSection() {
     >
       {isLoading ? (
         <p className="text-sm text-muted-foreground">Loading...</p>
+      ) : isError || !data ? (
+        // A failed GET must not render the editable form from fallback defaults;
+        // one Save click would overwrite the real stored settings.
+        <div className="space-y-2">
+          <p className="text-sm text-red-600 dark:text-red-400">
+            Could not load backup settings.
+          </p>
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="px-4 py-2 rounded-lg border border-border hover:bg-accent text-sm"
+          >
+            Retry
+          </button>
+        </div>
       ) : (
         <div className="space-y-4">
           <label className="flex items-center gap-3 cursor-pointer">
@@ -129,10 +145,13 @@ function DatabaseBackupSection() {
             <p className="text-xs text-muted-foreground">
               Directory path inside the container. Empty uses the default.
             </p>
-            {data && data.destWritable === false && data.effectiveDest && (
+            {data.destWritable === false && (
+              // Render whenever the stored dest is not writable, including the
+              // case where validation failed and effectiveDest came back empty;
+              // fall back to the entered path so the message still names it.
               <p className="text-xs text-amber-600 dark:text-amber-400">
-                {data.effectiveDest} is not writable. Backups will fail until
-                this is fixed.
+                {data.effectiveDest || dest || 'The backup destination'} is not
+                writable. Backups will fail until this is fixed.
               </p>
             )}
           </div>
@@ -149,11 +168,15 @@ function DatabaseBackupSection() {
                 id="db-backup-keep"
                 type="number"
                 min={1}
+                max={365}
                 step={1}
                 value={keepCount}
                 onChange={(e) => {
                   const n = parseInt(e.target.value, 10);
-                  setDraft((d) => ({ ...d, keepCount: Number.isNaN(n) ? 1 : Math.max(1, n) }));
+                  setDraft((d) => ({
+                    ...d,
+                    keepCount: Number.isNaN(n) ? 1 : Math.min(365, Math.max(1, n)),
+                  }));
                 }}
                 className="w-20 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground text-sm"
               />

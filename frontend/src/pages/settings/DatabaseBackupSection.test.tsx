@@ -6,10 +6,12 @@
  *   - Save sends the full merged draft (template behavior).
  *   - A 400 from save shows the message inline.
  *   - Run-now success shows "Backup complete" and refetches (proves invalidation).
- *   - Run-now error shows the message and re-enables the button.
+ *   - Run-now error shows the message, re-enables the button, and refetches.
  *   - Disabled state hides the cron input, keeps dest/keep-count, leaves run-now
  *     enabled, and shows lastRun as "never".
  *   - Malformed lastSummary does not crash and drops the "Last result:" row.
+ *   - A failed GET renders an error + Retry (not the form); Retry refetches.
+ *   - destWritable=false with an empty effectiveDest still shows the warning.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -141,17 +143,20 @@ describe('DatabaseBackupSection', () => {
     await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
   });
 
-  it('run-now error shows the message and re-enables the button', async () => {
+  it('run-now error shows the message, re-enables the button, and refetches', async () => {
     mockRun.mockRejectedValue(new Error('a backup is already in progress'));
     const user = userEvent.setup();
     renderSection();
 
     await screen.findByLabelText(/schedule \(cron\)/i);
+    expect(mockGet).toHaveBeenCalledTimes(1);
     const button = screen.getByRole('button', { name: /back up now/i }) as HTMLButtonElement;
     await user.click(button);
 
     expect(await screen.findByText('a backup is already in progress')).toBeDefined();
     expect(button.disabled).toBe(false);
+    // onSettled invalidates on error too, so lastError surfaces after a failed run.
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
   });
 
   it('disabled state hides cron, keeps dest and keep-count, leaves run-now enabled', async () => {
@@ -171,5 +176,32 @@ describe('DatabaseBackupSection', () => {
 
     await screen.findByLabelText(/destination/i);
     expect(screen.queryByText(/last result:/i)).toBeNull();
+  });
+
+  it('renders an error with Retry (not the form) when the GET fails', async () => {
+    mockGet.mockRejectedValue(new Error('boom'));
+    const user = userEvent.setup();
+    renderSection();
+
+    expect(await screen.findByText(/could not load backup settings/i)).toBeDefined();
+    // The editable form must not render from fallback defaults.
+    expect(screen.queryByLabelText(/destination/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull();
+
+    // Retry refetches; make the next GET succeed and confirm the form appears.
+    mockGet.mockResolvedValue(makeSettings());
+    await user.click(screen.getByRole('button', { name: /retry/i }));
+    expect(await screen.findByLabelText(/destination/i)).toBeDefined();
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows the not-writable warning when effectiveDest came back empty', async () => {
+    mockGet.mockResolvedValue(
+      makeSettings({ destWritable: false, effectiveDest: '', dest: '/bad/dest' }),
+    );
+    renderSection();
+
+    await screen.findByLabelText(/destination/i);
+    expect(await screen.findByText(/is not[\s\S]*writable/i)).toBeDefined();
   });
 });
