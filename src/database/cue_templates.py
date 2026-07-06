@@ -216,27 +216,43 @@ class CueTemplateMixin:
 
     # ------------------------------------------------------------------
     # Cached background scans. A slow full-decode scan runs in a background
-    # thread and the API polls a per-(podcast, episode) row instead of holding
-    # the request open past the proxy timeout. Two scan families use the same
-    # claim/poll/save state machine over identically-shaped tables, differing
-    # only by table name and payload column, so the machine lives in one place.
-    # Table and column names are internal constants (never user input), so they
-    # are safe to interpolate into the SQL.
+    # thread and the API polls a cached row instead of holding the request open
+    # past the proxy timeout. Every scan family uses the same claim/poll/save
+    # state machine over an identically-shaped table, so the machine lives in
+    # one place. Families differ only by table name, payload column, and their
+    # primary key: most are keyed by (podcast_id, episode_id); the window
+    # optimizer is keyed by template_id alone (no podcast_id column). The key
+    # column and the podcast-scoping flag are internal constants (never user
+    # input), so they are safe to interpolate into the SQL alongside the table
+    # and payload column.
+
+    def _scan_where(self, key_col: str, has_podcast: bool) -> str:
+        """WHERE clause for the family's primary key (bound params)."""
+        return ('podcast_id = ? AND ' if has_podcast else '') + f'{key_col} = ?'
 
     def _get_scan(self, table: str, payload_col: str,
-                  podcast_id: int, episode_id: str) -> Optional[Dict]:
-        """Return the cached scan row for a feed/episode, or None."""
+                  podcast_id: int, episode_id: str,
+                  key_col: str = 'episode_id',
+                  has_podcast: bool = True) -> Optional[Dict]:
+        """Return the cached scan row for a family's key, or None.
+
+        ``podcast_id``/``episode_id`` are the (scope, key) pair for the row;
+        ``episode_id`` binds ``key_col`` (an episode id, set hash, or template
+        id) and ``podcast_id`` is ignored when ``has_podcast`` is False.
+        """
         conn = self.get_connection()
+        args = (podcast_id, episode_id) if has_podcast else (episode_id,)
         row = conn.execute(
             f"SELECT status, {payload_col}, error, updated_at FROM {table} "
-            "WHERE podcast_id = ? AND episode_id = ?",
-            (podcast_id, episode_id),
+            f"WHERE {self._scan_where(key_col, has_podcast)}",
+            args,
         ).fetchone()
         return dict(row) if row else None
 
     def _claim_scan(
         self, table: str, payload_col: str, podcast_id: int, episode_id: str,
         stale_seconds: float, force: bool = False,
+        key_col: str = 'episode_id', has_podcast: bool = True,
     ) -> str:
         """Decide whether the caller should run the scan now.
 
@@ -251,20 +267,27 @@ class CueTemplateMixin:
         explicit rescan, but never interrupts a live scan.
 
         The claim is a single conditional UPSERT so two concurrent requests for
-        the same episode cannot both start a scan: only the statement that
-        actually writes the 'scanning' row (insert, or an update whose WHERE
-        matched) reports 'started'; the other re-reads and reports the live
-        state.
+        the same key cannot both start a scan: only the statement that actually
+        writes the 'scanning' row (insert, or an update whose WHERE matched)
+        reports 'started'; the other re-reads and reports the live state.
+
+        ``key_col``/``has_podcast`` select the family's primary key: the two
+        (podcast_id, episode_id) families keep the default; single-key families
+        pass their own key_col and, when keyed by template id alone,
+        ``has_podcast=False`` to drop the podcast_id column entirely.
         """
         conn = self.get_connection()
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=stale_seconds)) \
             .strftime('%Y-%m-%dT%H:%M:%SZ')
+        cols = ('podcast_id, ' if has_podcast else '') + key_col
+        vals = (':pid, ' if has_podcast else '') + ':eid'
+        conflict = ('podcast_id, ' if has_podcast else '') + key_col
         before = conn.total_changes
         conn.execute(
             f"""INSERT INTO {table}
-                   (podcast_id, episode_id, status, {payload_col}, error, updated_at)
-               VALUES (:pid, :eid, 'scanning', NULL, NULL, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-               ON CONFLICT(podcast_id, episode_id) DO UPDATE SET
+                   ({cols}, status, {payload_col}, error, updated_at)
+               VALUES ({vals}, 'scanning', NULL, NULL, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT({conflict}) DO UPDATE SET
                    status='scanning', {payload_col}=NULL, error=NULL,
                    updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
                WHERE ({table}.status = 'scanning' AND {table}.updated_at <= :cutoff)
@@ -276,36 +299,42 @@ class CueTemplateMixin:
         if conn.total_changes > before:
             return 'started'
         # Did not claim: report the live state of the row that blocked us.
+        args = (podcast_id, episode_id) if has_podcast else (episode_id,)
         row = conn.execute(
-            f"SELECT status FROM {table} WHERE podcast_id = ? AND episode_id = ?",
-            (podcast_id, episode_id),
+            f"SELECT status FROM {table} WHERE {self._scan_where(key_col, has_podcast)}",
+            args,
         ).fetchone()
         return row['status'] if row else 'scanning'
 
     def _save_scan_result(
         self, table: str, payload_col: str, podcast_id: int, episode_id: str,
-        payload,
+        payload, key_col: str = 'episode_id', has_podcast: bool = True,
     ) -> None:
         """Persist a completed scan's payload and mark it ready."""
         conn = self.get_connection()
+        args = (json.dumps(payload),) + (
+            (podcast_id, episode_id) if has_podcast else (episode_id,))
         conn.execute(
             f"""UPDATE {table} SET status='ready', {payload_col}=?, error=NULL,
                    updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE podcast_id=? AND episode_id=?""",
-            (json.dumps(payload), podcast_id, episode_id),
+               WHERE {self._scan_where(key_col, has_podcast)}""",
+            args,
         )
         conn.commit()
 
     def _save_scan_error(
         self, table: str, podcast_id: int, episode_id: str, error: str,
+        key_col: str = 'episode_id', has_podcast: bool = True,
     ) -> None:
         """Mark a scan as failed with a short error message."""
         conn = self.get_connection()
+        args = (str(error)[:500],) + (
+            (podcast_id, episode_id) if has_podcast else (episode_id,))
         conn.execute(
             f"""UPDATE {table} SET status='error', error=?,
                    updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE podcast_id=? AND episode_id=?""",
-            (str(error)[:500], podcast_id, episode_id),
+               WHERE {self._scan_where(key_col, has_podcast)}""",
+            args,
         )
         conn.commit()
 
@@ -360,187 +389,68 @@ class CueTemplateMixin:
     # Cross-episode body scan family (D1b, #350).  Keyed by
     # (podcast_id, episode_set_hash) -- a sha256 hex of the sorted episode-id
     # list -- so the cache is shared across any identical episode set regardless
-    # of request order.  The second key column is named differently from the
-    # existing families (episode_set_hash vs episode_id), so these methods
-    # inline their SQL rather than routing through the generic helpers.
+    # of request order.  Same two-key shape as the pre-existing families, only
+    # the key column is named differently, so it routes through the generics
+    # with key_col='episode_set_hash'.
 
     def get_cue_cross_episode_scan(
         self, podcast_id: int, episode_set_hash: str,
     ) -> Optional[Dict]:
-        """Return the cached scan row for a (feed, episode-set), or None."""
-        conn = self.get_connection()
-        row = conn.execute(
-            "SELECT status, result_json, error, updated_at "
-            "FROM cue_cross_episode_scans "
-            "WHERE podcast_id = ? AND episode_set_hash = ?",
-            (podcast_id, episode_set_hash),
-        ).fetchone()
-        return dict(row) if row else None
+        return self._get_scan(
+            'cue_cross_episode_scans', 'result_json', podcast_id,
+            episode_set_hash, key_col='episode_set_hash')
 
     def claim_cue_cross_episode_scan(
-        self,
-        podcast_id: int,
-        episode_set_hash: str,
-        stale_seconds: float,
+        self, podcast_id: int, episode_set_hash: str, stale_seconds: float,
         force: bool = False,
     ) -> str:
-        """Claim a cross-episode scan slot.
-
-        Returns one of 'started', 'scanning', 'ready', or 'error'.
-        Semantics identical to _claim_scan but keyed by episode_set_hash.
-        """
-        conn = self.get_connection()
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=stale_seconds)
-        ).strftime('%Y-%m-%dT%H:%M:%SZ')
-        before = conn.total_changes
-        conn.execute(
-            """INSERT INTO cue_cross_episode_scans
-                   (podcast_id, episode_set_hash, status, result_json, error, updated_at)
-               VALUES (:pid, :hash, 'scanning', NULL, NULL,
-                       strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-               ON CONFLICT(podcast_id, episode_set_hash) DO UPDATE SET
-                   status='scanning', result_json=NULL, error=NULL,
-                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE (cue_cross_episode_scans.status = 'scanning'
-                      AND cue_cross_episode_scans.updated_at <= :cutoff)
-                  OR (cue_cross_episode_scans.status = 'error'
-                      AND (:force OR cue_cross_episode_scans.updated_at <= :cutoff))
-                  OR (cue_cross_episode_scans.status = 'ready' AND :force)""",
-            {'pid': podcast_id, 'hash': episode_set_hash,
-             'cutoff': cutoff, 'force': 1 if force else 0},
-        )
-        conn.commit()
-        if conn.total_changes > before:
-            return 'started'
-        row = conn.execute(
-            "SELECT status FROM cue_cross_episode_scans "
-            "WHERE podcast_id = ? AND episode_set_hash = ?",
-            (podcast_id, episode_set_hash),
-        ).fetchone()
-        return row['status'] if row else 'scanning'
+        return self._claim_scan(
+            'cue_cross_episode_scans', 'result_json', podcast_id,
+            episode_set_hash, stale_seconds, force, key_col='episode_set_hash')
 
     def save_cue_cross_episode_scan_result(
-        self,
-        podcast_id: int,
-        episode_set_hash: str,
-        payload: Dict,
+        self, podcast_id: int, episode_set_hash: str, payload: Dict,
     ) -> None:
-        """Persist a completed cross-episode scan payload and mark it ready."""
-        conn = self.get_connection()
-        conn.execute(
-            """UPDATE cue_cross_episode_scans
-               SET status='ready', result_json=?, error=NULL,
-                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE podcast_id=? AND episode_set_hash=?""",
-            (json.dumps(payload), podcast_id, episode_set_hash),
-        )
-        conn.commit()
+        self._save_scan_result(
+            'cue_cross_episode_scans', 'result_json', podcast_id,
+            episode_set_hash, payload, key_col='episode_set_hash')
 
     def save_cue_cross_episode_scan_error(
-        self,
-        podcast_id: int,
-        episode_set_hash: str,
-        error: str,
+        self, podcast_id: int, episode_set_hash: str, error: str,
     ) -> None:
-        """Mark a cross-episode scan as failed."""
-        conn = self.get_connection()
-        conn.execute(
-            """UPDATE cue_cross_episode_scans
-               SET status='error', error=?,
-                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE podcast_id=? AND episode_set_hash=?""",
-            (str(error)[:500], podcast_id, episode_set_hash),
-        )
-        conn.commit()
+        self._save_scan_error(
+            'cue_cross_episode_scans', podcast_id, episode_set_hash, error,
+            key_col='episode_set_hash')
 
     # Window optimizer scan family (D2a, #350).  Keyed by template_id alone
-    # (the optimizer is per-template, not per-episode-set).  The second key
-    # column differs from all prior families (integer PK vs TEXT pair), so
-    # these methods inline their SQL rather than routing through the generic
-    # helpers.
+    # (the optimizer is per-template, not per-episode-set), so it routes through
+    # the generics with has_podcast=False -- there is no podcast_id column.
 
     def get_cue_window_optimize_scan(self, template_id: int) -> Optional[Dict]:
-        """Return the cached optimizer row for a template, or None."""
-        conn = self.get_connection()
-        row = conn.execute(
-            "SELECT status, result_json, error, updated_at "
-            "FROM cue_window_optimize_scans WHERE template_id = ?",
-            (template_id,),
-        ).fetchone()
-        return dict(row) if row else None
+        return self._get_scan(
+            'cue_window_optimize_scans', 'result_json', None, template_id,
+            key_col='template_id', has_podcast=False)
 
     def claim_cue_window_optimize_scan(
-        self,
-        template_id: int,
-        stale_seconds: float,
-        force: bool = False,
+        self, template_id: int, stale_seconds: float, force: bool = False,
     ) -> str:
-        """Claim a window-optimizer scan slot.
-
-        Returns one of 'started', 'scanning', 'ready', or 'error'.
-        Semantics identical to _claim_scan but keyed by template_id.
-        """
-        conn = self.get_connection()
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=stale_seconds)
-        ).strftime('%Y-%m-%dT%H:%M:%SZ')
-        before = conn.total_changes
-        conn.execute(
-            """INSERT INTO cue_window_optimize_scans
-                   (template_id, status, result_json, error, updated_at)
-               VALUES (:tid, 'scanning', NULL, NULL,
-                       strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-               ON CONFLICT(template_id) DO UPDATE SET
-                   status='scanning', result_json=NULL, error=NULL,
-                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE (cue_window_optimize_scans.status = 'scanning'
-                      AND cue_window_optimize_scans.updated_at <= :cutoff)
-                  OR (cue_window_optimize_scans.status = 'error'
-                      AND (:force OR cue_window_optimize_scans.updated_at <= :cutoff))
-                  OR (cue_window_optimize_scans.status = 'ready' AND :force)""",
-            {'tid': template_id, 'cutoff': cutoff, 'force': 1 if force else 0},
-        )
-        conn.commit()
-        if conn.total_changes > before:
-            return 'started'
-        row = conn.execute(
-            "SELECT status FROM cue_window_optimize_scans WHERE template_id = ?",
-            (template_id,),
-        ).fetchone()
-        return row['status'] if row else 'scanning'
+        return self._claim_scan(
+            'cue_window_optimize_scans', 'result_json', None, template_id,
+            stale_seconds, force, key_col='template_id', has_podcast=False)
 
     def save_cue_window_optimize_scan_result(
-        self,
-        template_id: int,
-        payload: Dict,
+        self, template_id: int, payload: Dict,
     ) -> None:
-        """Persist a completed window-optimizer payload and mark it ready."""
-        conn = self.get_connection()
-        conn.execute(
-            """UPDATE cue_window_optimize_scans
-               SET status='ready', result_json=?, error=NULL,
-                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE template_id=?""",
-            (json.dumps(payload), template_id),
-        )
-        conn.commit()
+        self._save_scan_result(
+            'cue_window_optimize_scans', 'result_json', None, template_id,
+            payload, key_col='template_id', has_podcast=False)
 
     def save_cue_window_optimize_scan_error(
-        self,
-        template_id: int,
-        error: str,
+        self, template_id: int, error: str,
     ) -> None:
-        """Mark a window-optimizer scan as failed."""
-        conn = self.get_connection()
-        conn.execute(
-            """UPDATE cue_window_optimize_scans
-               SET status='error', error=?,
-                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE template_id=?""",
-            (str(error)[:500], template_id),
-        )
-        conn.commit()
+        self._save_scan_error(
+            'cue_window_optimize_scans', None, template_id, error,
+            key_col='template_id', has_podcast=False)
 
     def update_cue_template_window(
         self,
