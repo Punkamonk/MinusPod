@@ -162,12 +162,18 @@ def test_worker_produces_correct_payload_shape():
         f.write(b'\x00' * 100)
 
     # Mock out decode and matcher to avoid ffmpeg and real audio processing.
+    # compute_mfcc frames the region once and the worker slices it in frame
+    # space, so the fake must return a frame count consistent with its input
+    # length (16kHz, 25ms/10ms frames) rather than a fixed tiny matrix.
     fake_pcm = _make_pcm(10.0)
-    fake_mfcc = np.zeros((10, 13), dtype=np.float32)
+
+    def fake_compute_mfcc(samples, *args, **kwargs):
+        n = 1 + max(0, (len(samples) - 400) // 160)
+        return np.zeros((n, 13), dtype=np.float32)
 
     with patch('api.cue_templates.get_database', return_value=db), \
          patch('api.cue_templates.decode_pcm_window', return_value=fake_pcm), \
-         patch('api.cue_templates.compute_mfcc', return_value=fake_mfcc), \
+         patch('api.cue_templates.compute_mfcc', side_effect=fake_compute_mfcc), \
          patch('api.cue_templates.peak_zncc', return_value=(0.75, 0)):
         _run_cue_window_optimize_scan(tid, fake_audio_path, [])
 

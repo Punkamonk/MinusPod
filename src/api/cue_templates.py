@@ -29,7 +29,8 @@ from api import (
     _normalize_nullable_finite_float,
 )
 from audio_analysis.cue_features import (
-    SAMPLE_RATE_HZ, N_COEFFS, FRAME_HOP_MS, compute_mfcc, decode_pcm_window,
+    SAMPLE_RATE_HZ, N_COEFFS, FRAME_HOP_MS, FRAME_LENGTH_MS,
+    compute_mfcc, decode_pcm_window,
     serialize_mfcc, pcm_to_int16_bytes, int16_bytes_to_pcm,
     pcm_to_flac, flac_to_wav,
 )
@@ -113,6 +114,26 @@ def _resolve_original_audio(db, storage, slug, episode_id):
     if not audio_path.exists():
         return None, error_response('original audio file missing', 404)
     return audio_path, None
+
+
+class _WindowTooShort(Exception):
+    """Raised by _extract_window_blobs when the window yields < 3 MFCC frames."""
+
+
+def _extract_window_blobs(audio_path, offset_s, duration_s, n_coeffs,
+                          formant_atten_db=0.0):
+    """Decode a window and derive its (mfcc_blob, pcm_blob, sample_rate).
+
+    Shared by the PATCH window-move path. Raises RuntimeError on decode failure
+    and _WindowTooShort when the selection is too short to score; the caller
+    maps both to a 4xx.
+    """
+    pcm = decode_pcm_window(
+        audio_path, offset_s, offset_s + duration_s, SAMPLE_RATE_HZ)
+    mfcc = compute_mfcc(pcm, n_coeffs=n_coeffs, formant_atten_db=formant_atten_db)
+    if mfcc.shape[0] < 3:
+        raise _WindowTooShort()
+    return serialize_mfcc(mfcc), pcm_to_int16_bytes(pcm), SAMPLE_RATE_HZ
 
 
 def _template_to_meta_dict(row: dict) -> dict:
@@ -362,17 +383,16 @@ def update_cue_template_route(template_id):
         if audio_err:
             return error_response(_WIN_SOURCE_AUDIO_GONE_MSG, 409)
         try:
-            pcm = decode_pcm_window(
-                audio_path, new_offset, new_offset + new_duration, SAMPLE_RATE_HZ)
+            mfcc_blob, pcm_blob, sr = _extract_window_blobs(
+                audio_path, new_offset, new_duration, row['n_coeffs'])
         except RuntimeError as e:
             return error_response(f'failed to decode window: {e}', 400)
-        mfcc = compute_mfcc(pcm, n_coeffs=row['n_coeffs'])
-        if mfcc.shape[0] < 3:
+        except _WindowTooShort:
             return error_response(
                 'selection too short; widen it or pick a louder cue', 400)
         if not db.update_cue_template_window(
                 template_id, new_offset, round(new_duration, 3),
-                serialize_mfcc(mfcc), pcm_to_int16_bytes(pcm), SAMPLE_RATE_HZ):
+                mfcc_blob, pcm_blob, sr):
             return error_response('template not found', 404)
 
     db.update_cue_template(template_id, cue_type=new_cue_type, enabled=enabled,
@@ -1462,27 +1482,13 @@ def cue_cross_episode_scan(slug):
             f'episodeIds must contain at most {_CROSS_EPISODE_SCAN_MAX_EPISODES} ids', 400)
     force = bool(data.get('rescan'))
 
-    # Validate: all IDs belong to this feed and have retained original audio.
-    ineligible = []
-    episode_rows = {}
-    for eid in episode_ids:
-        row = db.get_episode(slug, eid)
-        if not row:
-            ineligible.append(eid)
-            continue
-        audio_path = storage.get_original_path(slug, eid)
-        if not row.get('original_file') or not audio_path.exists():
-            ineligible.append(eid)
-        else:
-            episode_rows[eid] = str(audio_path)
-    if ineligible:
-        return error_response(
-            'original audio not retained for episode(s): ' + ', '.join(ineligible), 400)
-
     episode_set_hash = hashlib.sha256(
         ','.join(sorted(episode_ids)).encode()
     ).hexdigest()
 
+    # Claim first: a 3s poll for an already-running or cached set must not re-run
+    # N get_episode + N filesystem exists() checks. Only a fresh claim ('started')
+    # pays for the per-episode validation below.
     state = db.claim_cue_cross_episode_scan(
         podcast_id, episode_set_hash, AUDIO_CUE_CANDIDATE_SCAN_STALE_SECONDS, force=force)
 
@@ -1500,7 +1506,28 @@ def cue_cross_episode_scan(slug):
             'error': (row or {}).get('error') or 'cross-episode scan failed',
         })
 
-    # state == 'started': resolve audio paths and launch the background worker.
+    # state == 'started': validate that all IDs belong to this feed and have
+    # retained original audio. On failure, release the just-claimed slot as an
+    # error row (so no orphaned 'scanning' row survives to block or mislead a
+    # later poll) before returning the 4xx.
+    ineligible = []
+    episode_rows = {}
+    for eid in episode_ids:
+        row = db.get_episode(slug, eid)
+        if not row:
+            ineligible.append(eid)
+            continue
+        audio_path = storage.get_original_path(slug, eid)
+        if not row.get('original_file') or not audio_path.exists():
+            ineligible.append(eid)
+        else:
+            episode_rows[eid] = str(audio_path)
+    if ineligible:
+        msg = 'original audio not retained for episode(s): ' + ', '.join(ineligible)
+        db.save_cue_cross_episode_scan_error(podcast_id, episode_set_hash, msg)
+        return error_response(msg, 400)
+
+    # Resolve audio paths and launch the background worker.
     target_episode_id = episode_ids[0]
     target_path = episode_rows[target_episode_id]
     sibling_paths = [episode_rows[eid] for eid in episode_ids[1:]]
@@ -1538,8 +1565,10 @@ _WIN_PEAK_NEIGHBORHOOD_S = 3.0
 # a multi-hour file transiently costs GBs (the matcher chunks its decoding for
 # the same reason -- see cue_template_matcher.CHUNK_SECONDS).
 _WIN_MFCC_CHUNK_S = 600.0
-# One MFCC frame hop in seconds.
+# One MFCC frame hop in seconds, and the frame length (ms) the slicer uses to
+# reproduce compute_mfcc's frame count over a window's sample span.
 _WIN_FRAME_HOP_S = FRAME_HOP_MS / 1000.0
+_WIN_FRAME_LENGTH_MS = FRAME_LENGTH_MS
 
 _WIN_SOURCE_AUDIO_GONE_MSG = (
     'the source episode original audio is needed to re-decode the window; '
@@ -1678,14 +1707,33 @@ def _run_cue_window_optimize_scan(template_id, source_path, siblings):
         except Exception as e:
             raise RuntimeError(f'failed to decode source episode: {e}') from e
 
+        # Frame the region once and slice candidates in frame space. Every grid
+        # offset is an exact multiple of the frame hop (0.1s vs 10ms), so a
+        # candidate's frames align exactly with the region's; the only delta is
+        # the frame-0 pre-emphasis boundary (one sample), which is negligible.
+        # This replaces the per-candidate compute_mfcc over a PCM slice: the
+        # frame at row f covers samples [f*hop, f*hop+frame_len), so a slice
+        # reproduces the same frames the old PCM-window MFCC produced. `length`
+        # matches compute_mfcc's frame count for the window's sample span so a
+        # slice keeps the same number of rows, not one hop's worth more.
+        region_mfcc = compute_mfcc(region_pcm, n_coeffs=n_coeffs,
+                                   formant_atten_db=formant_atten)
+        _hop = int(round(SAMPLE_RATE_HZ * FRAME_HOP_MS / 1000))
+        _frame_len = int(round(SAMPLE_RATE_HZ * _WIN_FRAME_LENGTH_MS / 1000))
+
         def region_slice_mfcc(start_s, end_s):
-            lo = int((start_s - region_start) * SAMPLE_RATE_HZ)
-            hi = min(int((end_s - region_start) * SAMPLE_RATE_HZ),
-                     len(region_pcm))
+            lo_sample = int((start_s - region_start) * SAMPLE_RATE_HZ)
+            hi_sample = min(int((end_s - region_start) * SAMPLE_RATE_HZ),
+                            len(region_pcm))
+            span = hi_sample - lo_sample
+            if span < _frame_len:
+                return None
+            lo = max(0, round((start_s - region_start) / _WIN_FRAME_HOP_S))
+            length = 1 + (span - _frame_len) // _hop
+            hi = min(lo + length, region_mfcc.shape[0])
             if hi <= lo:
                 return None
-            return compute_mfcc(region_pcm[lo:hi], n_coeffs=n_coeffs,
-                                formant_atten_db=formant_atten)
+            return region_mfcc[lo:hi]
 
         base_mfcc = region_slice_mfcc(base_start, base_end)
         if base_mfcc is None or base_mfcc.shape[0] < 3:
@@ -1695,8 +1743,6 @@ def _run_cue_window_optimize_scan(template_id, source_path, siblings):
         # region itself (the capture location is by definition its best match).
         # This makes the source component optimistic vs full-episode detection,
         # but baseline and proposal share it, so the improvement delta is honest.
-        region_mfcc = compute_mfcc(region_pcm, n_coeffs=n_coeffs,
-                                   formant_atten_db=formant_atten)
         episode_ids = [source_episode_id]
         neighborhoods = [region_mfcc]
         for sibling_id, sibling_path in siblings:
