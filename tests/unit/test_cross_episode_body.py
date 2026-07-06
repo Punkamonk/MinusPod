@@ -308,6 +308,43 @@ def test_overlapping_candidates_from_multiple_siblings_dedupe():
     assert result[0]['episodeMatches'] >= 2
 
 
+def test_near_duplicate_matches_at_shifted_offsets_do_not_overlap():
+    """Two siblings matching the target at OFFSET positions (8 frames apart)
+    must not emit overlapping candidates: claimed_until operates on target
+    frames regardless of which sibling produced the match."""
+    rng = np.random.default_rng(77)
+    seg = _rand(48, rng)
+
+    # Target: seg occupies frames 130..178.
+    t_ints = np.concatenate([_rand(130, rng), seg, _rand(120, rng)])
+    t_dur = len(t_ints) / 8.0
+    # Sibling 1: exact copy -> matches target frames 130..178.
+    s1_ints = np.concatenate([_rand(60, rng), seg, _rand(60, rng)])
+    # Sibling 2: copy of target[138:186] (seg shifted by 8 frames plus 8
+    # frames of trailing target noise) -> matches target frames 138..186.
+    s2_ints = np.concatenate([_rand(60, rng), t_ints[138:186], _rand(60, rng)])
+
+    fp = _fingerprinter()
+    side_effects = [
+        (t_ints.tolist(), t_dur),
+        (s1_ints.tolist(), len(s1_ints) / 8.0),
+        (s2_ints.tolist(), len(s2_ints) / 8.0),
+    ]
+    with patch.object(fp, '_generate_full_fingerprint', side_effect=side_effects):
+        result = fp.discover_cross_episode_body(
+            'target.mp3', ['sib1.mp3', 'sib2.mp3'],
+            min_matches=1,
+        )
+
+    # The planted region collapses to one candidate; nothing overlaps.
+    assert len(result) == 1
+    spans = sorted((r['start'], r['end']) for r in result)
+    for (a_start, a_end), (b_start, b_end) in zip(spans, spans[1:]):
+        assert b_start >= a_end, f"overlapping candidates: {spans}"
+    # Candidate lands on the planted region (frames 130..186 -> 16.25s..23.25s).
+    assert 15.0 <= result[0]['start'] <= 18.0
+
+
 # ---------------------------------------------------------------------------
 # Existing discover_cross_episode_cues tests must remain green.
 # (Verified by running the full suite; this is a cross-check import guard.)
