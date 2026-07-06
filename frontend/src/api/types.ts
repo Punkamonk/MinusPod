@@ -62,6 +62,7 @@ export interface Episode {
   status: 'discovered' | 'pending' | 'processing' | 'completed' | 'failed' | 'permanently_failed';
   ad_count?: number;
   hasOriginalAudio?: boolean;
+  pendingReviewCount?: number;
 }
 
 export interface EpisodeNeighbor {
@@ -84,6 +85,7 @@ export interface EpisodeDetail extends Episode {
   chaptersUrl?: string;
   adMarkers?: AdSegment[];
   rejectedAdMarkers?: AdSegment[];
+  pendingReviewMarkers?: AdSegment[];
   corrections?: EpisodeCorrection[];
   cueDetections?: CueDetection[];
   originalDuration?: number;
@@ -163,6 +165,9 @@ export interface AdSegment {
   reviewer_confidence?: number;
   reviewer_model?: string;
   source?: 'reviewer' | 'validator';
+  // Phase C held-for-review fields.
+  held_for_review?: boolean;
+  hold_reason?: 'max_duration' | 'no_cue_evidence';
 }
 
 export interface SettingValue {
