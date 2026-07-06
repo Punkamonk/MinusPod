@@ -7,7 +7,8 @@ Hits the real Flask app and the real filesystem (tmp dirs), no mocks.
 - PUT 400s with exact messages (bad cron, keepCount bounds/type,
   relative dest, dest == data dir).
 - POST /system/db-backup/run -> 200 + file exists, works with enabled=false.
-- POST failure -> 500 with reason + GET surfaces lastError.
+- POST failure -> 500 flat message + GET surfaces lastError.
+- PUT is all-or-nothing: a bad dest rolls back earlier valid fields.
 - New routes absent from the auth-exempt allowlist.
 """
 import os
@@ -140,6 +141,25 @@ def test_put_dest_is_data_dir(app_client, db):
     assert r.get_json()['error'] == 'destination must not be the data directory itself'
 
 
+def test_put_all_or_nothing_on_bad_dest(app_client, db):
+    # A later validation failure (bad dest) must roll back earlier valid fields:
+    # nothing is persisted and GET reflects no change.
+    r = app_client.put('/api/v1/settings/db-backup', json={
+        'enabled': True,
+        'cron': '0 4 * * *',
+        'keepCount': 9,
+        'dest': 'relative/path',
+    })
+    assert r.status_code == 400
+    assert r.get_json()['error'] == 'destination must be an absolute path'
+    # None of the earlier fields were committed.
+    assert db.get_setting('db_backup_enabled') in (None, '', 'false')
+    got = app_client.get('/api/v1/settings/db-backup').get_json()
+    assert got['enabled'] is False
+    assert got['cron'] == '30 3 * * *'
+    assert got['keepCount'] == 1
+
+
 # -- POST run --
 
 def test_post_run_creates_file_when_disabled(app_client, db):
@@ -156,8 +176,9 @@ def test_post_run_creates_file_when_disabled(app_client, db):
 
 def test_post_run_failure_returns_500_and_sets_last_error(app_client, db):
     # Point dest at a path whose parent is a regular file so the backup dir
-    # cannot be created; snapshot_database's mkdir raises, backup_now stamps
-    # last_error and re-raises, the handler returns 500 with the reason.
+    # cannot be created; the mkdir raises, backup_now stamps last_error and
+    # re-raises, the handler returns 500 with a flat Error-schema message (no
+    # nested reason, no raw str(e)). The operator detail surfaces via GET.
     blocker = tempfile.NamedTemporaryFile(prefix='db-backup-blocker-', delete=False)
     blocker.write(b'x')
     blocker.close()
@@ -166,8 +187,10 @@ def test_post_run_failure_returns_500_and_sets_last_error(app_client, db):
     r = app_client.post('/api/v1/system/db-backup/run')
     assert r.status_code == 500
     body = r.get_json()
-    assert body['error']['message'] == 'Backup failed'
-    assert body['error']['reason']
+    # Flat string per the Error schema; the nested {message, reason} object and
+    # raw exception text no longer ship to the client.
+    assert body['error'] == 'Backup failed'
+    assert 'reason' not in body
     got = app_client.get('/api/v1/settings/db-backup').get_json()
     assert got['lastError']
 

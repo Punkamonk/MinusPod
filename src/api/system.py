@@ -351,7 +351,9 @@ def run_db_backup():
     except BackupInProgressError:
         return error_response('a backup is already in progress', 409)
     except Exception as e:
-        return error_response({'message': 'Backup failed', 'reason': str(e)}, 500)
+        # backup_now already stamped db_backup_last_error (surfaced via GET);
+        # keep the client body a flat Error-schema string with no raw str(e).
+        return error_response('Backup failed', 500, details=str(e))
     return json_response(summary)
 
 

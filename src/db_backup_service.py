@@ -38,7 +38,7 @@ logger = logging.getLogger('podcast.db_backup')
 DEFAULT_CRON = '30 3 * * *'  # daily 03:30 UTC
 FIXED_BACKUP_NAME = 'minuspod-backup.db'
 TEMP_BACKUP_NAME = '.minuspod-backup.db.tmp'
-ROTATED_NAME_RE = re.compile(r'^minuspod-backup-\d{8}-\d{6}\.db$')
+ROTATED_NAME_RE = re.compile(r'^minuspod-backup-auto-\d{8}-\d{6}\.db$')
 KEEP_COUNT_MIN, KEEP_COUNT_MAX = 1, 365
 LOCK_FILENAME = '.db_backup.lock'
 
@@ -88,7 +88,10 @@ def _clamp_keep_count(raw: Optional[str]) -> int:
 
 
 def _rotated_name(stamp: str) -> str:
-    return f'minuspod-backup-{stamp}.db'
+    # 'auto' namespaces scheduler-rotated files apart from operator downloads
+    # (GET /system/backup names those minuspod-backup-<ts>.db). Without it the
+    # prune regex would match and delete a saved download in the dest dir.
+    return f'minuspod-backup-auto-{stamp}.db'
 
 
 def _next_rotated_path(dest: Path, now: datetime) -> Path:
@@ -142,17 +145,58 @@ def _prune_rotated(dest: Path, keep: int, keep_path: Optional[Path] = None) -> i
     return pruned
 
 
+def dest_writable(path: Path) -> bool:
+    """Report whether a backup could be written under `path`.
+
+    Matches mkdir(parents=True) semantics: if `path` exists it must be a
+    writable directory; if it does not, walk up to the nearest existing
+    ancestor and require it to be a writable directory (mkdir would create the
+    missing levels under it).
+    """
+    if path.exists():
+        return path.is_dir() and os.access(path, os.W_OK)
+    ancestor = path.parent
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    return ancestor.is_dir() and os.access(ancestor, os.W_OK)
+
+
+def _ensure_dest_dir(dest: Path) -> None:
+    """Create `dest` if missing, chmod 0o700 ONLY the directories we create.
+
+    A pre-existing destination (e.g. an operator-chosen shared mount) keeps its
+    own permissions untouched; we never chmod ancestors we did not create.
+    """
+    if dest.exists():
+        return
+    # Find the lowest existing ancestor; everything below it we are creating.
+    top_created = dest
+    while not top_created.parent.exists() and top_created.parent != top_created:
+        top_created = top_created.parent
+    dest.mkdir(parents=True, exist_ok=True)
+    # Tighten only the subtree we just created, leaf-first is unnecessary since
+    # 0700 on each created level is sufficient; walk down from top_created.
+    node = top_created
+    while True:
+        try:
+            node.chmod(0o700)
+        except OSError:
+            logger.warning('db_backup: could not tighten permissions on %s', node)
+        if node == dest:
+            break
+        # Descend one level toward dest.
+        rel = dest.relative_to(node)
+        node = node / rel.parts[0]
+
+
 def backup_now(db) -> Dict[str, Any]:
     """Run a backup now regardless of schedule. Returns a summary dict.
 
-    Stamps last_run before doing any work (community-sync convention: a
-    persistently failing backup retries at the next cron fire, not every tick).
-    On failure the settings table records the error and the exception re-raises
-    so the caller can surface it.
+    Stamps last_run immediately after acquiring the lock (community-sync
+    convention: a persistently failing backup retries at the next cron fire, not
+    every tick). On failure the settings table records the error and the
+    exception re-raises so the caller can surface it.
     """
-    started_at = utc_now_iso()
-    db.set_setting('db_backup_last_run', started_at)
-
     lock_path = Path(db.data_dir) / LOCK_FILENAME
     lock_fd = open(lock_path, 'w')
     try:
@@ -161,6 +205,10 @@ def backup_now(db) -> Dict[str, Any]:
         except BlockingIOError:
             raise BackupInProgressError('a backup is already in progress')
 
+        # Stamp last_run only once we hold the lock and a backup genuinely runs;
+        # a contending caller must not consume the retry slot.
+        db.set_setting('db_backup_last_run', utc_now_iso())
+
         start = time.monotonic()
         tmp = None
         try:
@@ -168,10 +216,14 @@ def backup_now(db) -> Dict[str, Any]:
             keep = _clamp_keep_count(db.get_setting('db_backup_keep_count'))
             tmp = dest / TEMP_BACKUP_NAME
 
-            # snapshot_database creates the dest dir; make sure a stale temp
-            # from a crashed run can't leave the rename pointing at old bytes.
+            # Create the dest dir ourselves so we chmod 0700 only directories we
+            # create; a pre-existing user destination keeps its permissions.
+            _ensure_dest_dir(dest)
+
+            # Make sure a stale temp from a crashed run can't leave the rename
+            # pointing at old bytes.
             tmp.unlink(missing_ok=True)
-            snapshot_database(db, tmp)
+            snapshot_database(db, tmp, tighten_dir_perms=False)
 
             if keep == 1:
                 mode = 'overwrite'
@@ -206,7 +258,18 @@ def backup_now(db) -> Dict[str, Any]:
         }
         db.set_setting('db_backup_last_error', '')
         db.set_setting('db_backup_last_summary', json.dumps(summary))
-        logger.info('db_backup: %s', summary)
+        if os.environ.get('MINUSPOD_MASTER_PASSPHRASE'):
+            # Encryption-at-rest is configured for the download/cleanup paths,
+            # but scheduled snapshots are always plain. Surface the mismatch at
+            # WARN so it shows in operator dashboards filtering WARN-and-above.
+            logger.warning(
+                'db_backup: scheduled snapshot at %s is an unencrypted SQLite '
+                'file containing provider secrets (MINUSPOD_MASTER_PASSPHRASE '
+                'does not apply to scheduled backups): %s',
+                final, summary,
+            )
+        else:
+            logger.info('db_backup: %s', summary)
         return summary
     finally:
         lock_fd.close()
@@ -227,6 +290,11 @@ def db_backup_tick(db, force: bool = False) -> Optional[Dict[str, Any]]:
 
     try:
         return backup_now(db)
+    except BackupInProgressError:
+        # Another backup genuinely runs and stamped last_run itself; skip
+        # quietly and do not stamp last_error (nothing failed).
+        logger.info('db_backup: skipped, another backup is in progress')
+        return None
     except Exception:
         # backup_now already logged + stamped settings.
         return None

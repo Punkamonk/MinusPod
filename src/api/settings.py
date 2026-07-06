@@ -44,7 +44,8 @@ from utils.http import safe_url_for_log
 from utils.secret_writes import SecretWriteRejected, set_or_clear_secret
 from webhook_service import render_template_preview, fire_test_event, load_webhooks, VALID_EVENTS
 from db_backup_service import (
-    DEFAULT_CRON, KEEP_COUNT_MAX, KEEP_COUNT_MIN, validate_backup_dest,
+    DEFAULT_CRON, KEEP_COUNT_MAX, KEEP_COUNT_MIN, dest_writable,
+    validate_backup_dest,
 )
 from utils.cron import is_valid_expression
 
@@ -2084,17 +2085,19 @@ def get_db_backup_settings():
     try:
         effective = validate_backup_dest(dest, db.data_dir)
         effective_dest = str(effective)
-        dest_writable = os.access(effective, os.W_OK) if effective.exists() \
-            else os.access(effective.parent, os.W_OK)
+        # dest_writable matches mkdir(parents=True): probe the nearest existing
+        # ancestor, not just the immediate parent, so a multi-level dest under a
+        # writable ancestor is not falsely reported unwritable.
+        writable = dest_writable(effective)
     except ValueError:
         effective_dest = ''
-        dest_writable = False
+        writable = False
     return json_response({
         'enabled': enabled,
         'cron': _val('db_backup_cron') or DEFAULT_CRON,
         'dest': dest,
         'effectiveDest': effective_dest,
-        'destWritable': dest_writable,
+        'destWritable': writable,
         'keepCount': int(_val('db_backup_keep_count') or '1'),
         'lastRun': _val('db_backup_last_run') or None,
         'lastError': _val('db_backup_last_error') or None,
@@ -2112,13 +2115,18 @@ def update_db_backup_settings():
     """
     db = get_database()
     data = request.get_json() or {}
+
+    # Two-phase: validate every present field into a staged dict first, so a
+    # later validation failure (e.g. a bad dest) never leaves earlier fields
+    # persisted while the response is a 400.
+    staged = {}
     if 'enabled' in data:
-        db.set_setting('db_backup_enabled', 'true' if bool(data['enabled']) else 'false')
+        staged['db_backup_enabled'] = 'true' if bool(data['enabled']) else 'false'
     if 'cron' in data:
         cron = (data['cron'] or '').strip()
         if not is_valid_expression(cron):
             return error_response(f'invalid cron expression: {cron}', 400)
-        db.set_setting('db_backup_cron', cron)
+        staged['db_backup_cron'] = cron
     if 'keepCount' in data:
         keep = data['keepCount']
         if (not isinstance(keep, int) or isinstance(keep, bool)
@@ -2127,14 +2135,17 @@ def update_db_backup_settings():
                 f'keepCount must be an integer between {KEEP_COUNT_MIN} and {KEEP_COUNT_MAX}',
                 400,
             )
-        db.set_setting('db_backup_keep_count', str(keep))
+        staged['db_backup_keep_count'] = str(keep)
     if 'dest' in data:
         dest = data['dest']
         try:
             validate_backup_dest(dest, db.data_dir)
         except ValueError as e:
             return error_response(str(e), 400)
-        db.set_setting('db_backup_dest', dest)
+        staged['db_backup_dest'] = dest
+
+    for key, value in staged.items():
+        db.set_setting(key, value)
     return get_db_backup_settings()
 
 
