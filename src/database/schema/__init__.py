@@ -1590,6 +1590,32 @@ class SchemaMixin:
             conn.rollback()
             logger.warning(f"cue_threshold_scans table creation: {e}")
 
+        # cue_cross_episode_scans: cached result of the cross-episode body scan
+        # (D1b, #350). Additive, no data-loss risk. DDL identical to SCHEMA_SQL.
+        try:
+            fresh_ces = not self._table_exists(conn, 'cue_cross_episode_scans')
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cue_cross_episode_scans (
+                    podcast_id INTEGER NOT NULL,
+                    episode_set_hash TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'scanning'
+                        CHECK(status IN ('scanning', 'ready', 'error')),
+                    result_json TEXT,
+                    error TEXT,
+                    updated_at TEXT NOT NULL
+                        DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    PRIMARY KEY (podcast_id, episode_set_hash),
+                    FOREIGN KEY (podcast_id) REFERENCES podcasts(id)
+                        ON DELETE CASCADE
+                )
+            """)
+            conn.commit()
+            if fresh_ces:
+                logger.info("Migration: Created cue_cross_episode_scans table")
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"cue_cross_episode_scans table creation: {e}")
+
     def _run_correct_opus48_token_cost(self, conn):
         """One-time correction of recorded Opus 4.8 (`claudeopus48`) token cost.
 

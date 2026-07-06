@@ -1317,3 +1317,142 @@ def cue_threshold_suggest(slug):
         name=f'cue-threshold-{episode_id}',
     ).start()
     return json_response({'episodeId': episode_id, 'status': 'scanning'})
+
+
+# Cross-episode body scan (D1b, #350).
+# Episode cap: 5, matching AUDIO_CUE_SUGGEST_MAX_EPISODES used by the threshold
+# suggest path. Body scanning (full-duration fingerprint per episode) is at least
+# as expensive as the threshold sweep. Keeping the same cap bounds wall time and
+# mirrors the user's mental model of a "sample set".
+_CROSS_EPISODE_SCAN_MAX_EPISODES = AUDIO_CUE_SUGGEST_MAX_EPISODES  # 5
+
+
+def _run_cue_cross_episode_scan(
+    podcast_id, episode_set_hash,
+    target_episode_id, episode_ids,
+    target_path, sibling_paths,
+):
+    """Background worker: find recurring body segments across the requested episodes.
+
+    target_episode_id is the first element of episode_ids (caller's order) and
+    defines the coordinate frame for all returned start/end times. sibling_paths
+    are the retained original audio files for the remaining episodes.
+
+    Payload saved on success:
+        {candidates, targetEpisodeId, episodeIds}
+    where candidates matches discover_cross_episode_body's result shape
+    ({start, end, kind, episodeMatches}) so D1c can feed them directly into
+    the existing Make-template flow (CueMarkModal expects bounds + episode).
+    """
+    db = get_database()
+    try:
+        fp = AudioFingerprinter()
+        target_fp = None
+        if fp.is_available():
+            target_fp = fp._generate_full_fingerprint(target_path)
+            if target_fp is None:
+                raise RuntimeError(f'fingerprint decode failed for {target_path}')
+        candidates = fp.discover_cross_episode_body(
+            target_path, sibling_paths,
+            target_fingerprint=target_fp,
+        )
+        db.save_cue_cross_episode_scan_result(podcast_id, episode_set_hash, {
+            'candidates': candidates,
+            'targetEpisodeId': target_episode_id,
+            'episodeIds': episode_ids,
+        })
+    except Exception as e:
+        logger.exception(
+            'cross-episode body scan failed for podcast %s hash %s',
+            podcast_id, episode_set_hash,
+        )
+        db.save_cue_cross_episode_scan_error(podcast_id, episode_set_hash, str(e))
+
+
+@api.route('/feeds/<slug>/cue-cross-episode-scan', methods=['POST'])
+@log_request
+def cue_cross_episode_scan(slug):
+    """Find recurring audio segments anywhere in the body across a set of episodes.
+
+    Body: {episodeIds: [...], rescan?: bool}
+
+    Between 2 and 5 episode IDs must be supplied; all must belong to this feed
+    and have retained original audio. The scan runs in a background thread
+    (full-duration fingerprinting is slow); poll this endpoint with the same
+    body to check progress. rescan=true forces a fresh run even when a cached
+    result exists.
+
+    Poll response carries status 'scanning'|'ready'|'error'. When ready,
+    candidates are in the coordinate frame of the first supplied episode
+    (targetEpisodeId).
+    """
+    import hashlib
+
+    db = get_database()
+    storage = get_storage()
+    podcast = db.get_podcast_by_slug(slug)
+    if not podcast:
+        return error_response('feed not found', 404)
+    podcast_id = podcast['id']
+
+    data = request.get_json(silent=True) or {}
+    episode_ids = data.get('episodeIds')
+    if not isinstance(episode_ids, list) or len(episode_ids) < 2:
+        return error_response('episodeIds must be a list of at least 2 episode ids', 400)
+    if len(episode_ids) > _CROSS_EPISODE_SCAN_MAX_EPISODES:
+        return error_response(
+            f'episodeIds must contain at most {_CROSS_EPISODE_SCAN_MAX_EPISODES} ids', 400)
+    force = bool(data.get('rescan'))
+
+    # Validate: all IDs belong to this feed and have retained original audio.
+    ineligible = []
+    episode_rows = {}
+    for eid in episode_ids:
+        row = db.get_episode(slug, eid)
+        if not row:
+            ineligible.append(eid)
+            continue
+        audio_path = storage.get_original_path(slug, eid)
+        if not row.get('original_file') or not audio_path.exists():
+            ineligible.append(eid)
+        else:
+            episode_rows[eid] = str(audio_path)
+    if ineligible:
+        return error_response(
+            'original audio not retained for episode(s): ' + ', '.join(ineligible), 400)
+
+    episode_set_hash = hashlib.sha256(
+        ','.join(sorted(episode_ids)).encode()
+    ).hexdigest()
+
+    state = db.claim_cue_cross_episode_scan(
+        podcast_id, episode_set_hash, AUDIO_CUE_CANDIDATE_SCAN_STALE_SECONDS, force=force)
+
+    if state == 'ready':
+        row = db.get_cue_cross_episode_scan(podcast_id, episode_set_hash)
+        result = json.loads((row or {}).get('result_json') or '{}')
+        return json_response({'status': 'ready', **result})
+    if state == 'scanning':
+        return json_response({'status': 'scanning', 'episodeIds': episode_ids})
+    if state == 'error':
+        row = db.get_cue_cross_episode_scan(podcast_id, episode_set_hash)
+        return json_response({
+            'status': 'error',
+            'episodeIds': episode_ids,
+            'error': (row or {}).get('error') or 'cross-episode scan failed',
+        })
+
+    # state == 'started': resolve audio paths and launch the background worker.
+    target_episode_id = episode_ids[0]
+    target_path = episode_rows[target_episode_id]
+    sibling_paths = [episode_rows[eid] for eid in episode_ids[1:]]
+
+    threading.Thread(
+        target=_run_cue_cross_episode_scan,
+        args=(podcast_id, episode_set_hash,
+              target_episode_id, episode_ids,
+              target_path, sibling_paths),
+        daemon=True,
+        name=f'cue-xep-scan-{episode_set_hash[:12]}',
+    ).start()
+    return json_response({'status': 'scanning', 'episodeIds': episode_ids})

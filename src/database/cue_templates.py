@@ -356,3 +356,100 @@ class CueTemplateMixin:
         self, podcast_id: int, episode_id: str, error: str,
     ) -> None:
         self._save_scan_error('cue_threshold_scans', podcast_id, episode_id, error)
+
+    # Cross-episode body scan family (D1b, #350).  Keyed by
+    # (podcast_id, episode_set_hash) -- a sha256 hex of the sorted episode-id
+    # list -- so the cache is shared across any identical episode set regardless
+    # of request order.  The second key column is named differently from the
+    # existing families (episode_set_hash vs episode_id), so these methods
+    # inline their SQL rather than routing through the generic helpers.
+
+    def get_cue_cross_episode_scan(
+        self, podcast_id: int, episode_set_hash: str,
+    ) -> Optional[Dict]:
+        """Return the cached scan row for a (feed, episode-set), or None."""
+        conn = self.get_connection()
+        row = conn.execute(
+            "SELECT status, result_json, error, updated_at "
+            "FROM cue_cross_episode_scans "
+            "WHERE podcast_id = ? AND episode_set_hash = ?",
+            (podcast_id, episode_set_hash),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def claim_cue_cross_episode_scan(
+        self,
+        podcast_id: int,
+        episode_set_hash: str,
+        stale_seconds: float,
+        force: bool = False,
+    ) -> str:
+        """Claim a cross-episode scan slot.
+
+        Returns one of 'started', 'scanning', 'ready', or 'error'.
+        Semantics identical to _claim_scan but keyed by episode_set_hash.
+        """
+        conn = self.get_connection()
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=stale_seconds)
+        ).strftime('%Y-%m-%dT%H:%M:%SZ')
+        before = conn.total_changes
+        conn.execute(
+            """INSERT INTO cue_cross_episode_scans
+                   (podcast_id, episode_set_hash, status, result_json, error, updated_at)
+               VALUES (:pid, :hash, 'scanning', NULL, NULL,
+                       strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(podcast_id, episode_set_hash) DO UPDATE SET
+                   status='scanning', result_json=NULL, error=NULL,
+                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               WHERE (cue_cross_episode_scans.status = 'scanning'
+                      AND cue_cross_episode_scans.updated_at <= :cutoff)
+                  OR (cue_cross_episode_scans.status = 'error'
+                      AND (:force OR cue_cross_episode_scans.updated_at <= :cutoff))
+                  OR (cue_cross_episode_scans.status = 'ready' AND :force)""",
+            {'pid': podcast_id, 'hash': episode_set_hash,
+             'cutoff': cutoff, 'force': 1 if force else 0},
+        )
+        conn.commit()
+        if conn.total_changes > before:
+            return 'started'
+        row = conn.execute(
+            "SELECT status FROM cue_cross_episode_scans "
+            "WHERE podcast_id = ? AND episode_set_hash = ?",
+            (podcast_id, episode_set_hash),
+        ).fetchone()
+        return row['status'] if row else 'scanning'
+
+    def save_cue_cross_episode_scan_result(
+        self,
+        podcast_id: int,
+        episode_set_hash: str,
+        payload: Dict,
+    ) -> None:
+        """Persist a completed cross-episode scan payload and mark it ready."""
+        conn = self.get_connection()
+        conn.execute(
+            """UPDATE cue_cross_episode_scans
+               SET status='ready', result_json=?, error=NULL,
+                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               WHERE podcast_id=? AND episode_set_hash=?""",
+            (json.dumps(payload), podcast_id, episode_set_hash),
+        )
+        conn.commit()
+
+    def save_cue_cross_episode_scan_error(
+        self,
+        podcast_id: int,
+        episode_set_hash: str,
+        error: str,
+    ) -> None:
+        """Mark a cross-episode scan as failed."""
+        conn = self.get_connection()
+        conn.execute(
+            """UPDATE cue_cross_episode_scans
+               SET status='error', error=?,
+                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               WHERE podcast_id=? AND episode_set_hash=?""",
+            (str(error)[:500], podcast_id, episode_set_hash),
+        )
+        conn.commit()

@@ -5693,6 +5693,101 @@ paths:
         '404':
           description: Feed or episode not found
 
+  /feeds/{slug}/cue-cross-episode-scan:
+    post:
+      tags: [AudioCueTemplates]
+      summary: Find recurring audio segments across a set of episodes
+      description: >
+        Full-body cross-episode fingerprint scan. Finds audio segments that
+        recur anywhere (not just intro/outro) across the supplied episode set.
+        Between 2 and 5 episode IDs must be supplied; all must belong to this
+        feed and have retained original audio. The scan runs in a background
+        thread (full-duration fingerprinting is slow); poll this endpoint with
+        the same body to check progress. rescan=true forces a fresh run even
+        when a cached result exists.
+
+        The result coordinate frame is the first supplied episode
+        (targetEpisodeId). Candidates can be fed directly into the
+        Make-template flow (CueMarkModal expects bounds + episode).
+      operationId: cueCrossEpisodeScan
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [episodeIds]
+              properties:
+                episodeIds:
+                  type: array
+                  minItems: 2
+                  maxItems: 5
+                  items:
+                    type: string
+                  description: >
+                    2 to 5 episode IDs. All must belong to this feed and have
+                    retained original audio. The first entry defines the
+                    coordinate frame for returned candidate times.
+                rescan:
+                  type: boolean
+                  description: Force a fresh scan even if a cached result exists.
+      responses:
+        '200':
+          description: Scan status, with candidates once ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [scanning, ready, error]
+                    description: >
+                      scanning (poll again shortly), ready (candidates
+                      attached), error (scan failed; see error field).
+                  episodeIds:
+                    type: array
+                    items:
+                      type: string
+                    description: Echo of the requested episode IDs.
+                  targetEpisodeId:
+                    type: string
+                    description: >
+                      First episode ID; all candidate times are in this
+                      episode's coordinate frame. Present when status is ready.
+                  candidates:
+                    type: array
+                    description: Present when status is ready.
+                    items:
+                      type: object
+                      properties:
+                        start:
+                          type: number
+                        end:
+                          type: number
+                        kind:
+                          type: string
+                          enum: [recurring]
+                        episodeMatches:
+                          type: integer
+                          description: How many supplied episodes share this segment.
+                  error:
+                    type: string
+                    description: Present when status is error.
+        '400':
+          description: >
+            Fewer than 2 or more than 5 episode IDs; an ID not in this feed;
+            or an episode without retained original audio.
+        '404':
+          description: Feed not found
+
   /cue-detections/aggregate:
     get:
       tags: [AudioCueTemplates]

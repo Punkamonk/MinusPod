@@ -413,6 +413,21 @@ CREATE TABLE IF NOT EXISTS cue_threshold_scans (
     PRIMARY KEY (podcast_id, episode_id),
     FOREIGN KEY (podcast_id) REFERENCES podcasts(id) ON DELETE CASCADE
 );
+
+-- cue_cross_episode_scans: cached result of the cross-episode body scan (D1b, #350).
+-- Keyed by (podcast_id, episode_set_hash) where episode_set_hash is the sha256
+-- of the sorted episode-id list (hex). Stores candidates in target-episode
+-- coordinates plus an echo of the episode set so the UI can seed the template flow.
+CREATE TABLE IF NOT EXISTS cue_cross_episode_scans (
+    podcast_id INTEGER NOT NULL,
+    episode_set_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'scanning' CHECK(status IN ('scanning', 'ready', 'error')),
+    result_json TEXT,
+    error TEXT,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (podcast_id, episode_set_hash),
+    FOREIGN KEY (podcast_id) REFERENCES podcasts(id) ON DELETE CASCADE
+);
 """
 
 # Indexes that depend on columns added by migrations - created separately
