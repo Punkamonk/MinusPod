@@ -100,7 +100,7 @@ If you also run the Cloudflare WAF rule described above, the cover URL still end
 All data is stored in the `./data` directory:
 - `podcast.db` - SQLite database with feeds, episodes, and settings
 - `{slug}/` - Per-feed directories with cached RSS and processed audio
-- `backups/` - Pre-migration SQLite snapshots + periodic cleanup backups
+- `backups/` - Pre-migration SQLite snapshots, periodic cleanup backups, and the default destination for scheduled database backups
 
 ### Container user
 
