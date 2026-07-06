@@ -22,6 +22,7 @@ from db_backup_service import (  # noqa: E402
     db_backup_tick,
     validate_backup_dest,
 )
+from utils.time import ISO_FORMAT  # noqa: E402
 
 
 # chmod-based failure injection is a no-op for root (root bypasses DAC bits),
@@ -41,7 +42,7 @@ def db(tmp_path):
 
 
 def _iso(dt):
-    return dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+    return dt.strftime(ISO_FORMAT)
 
 
 def _read_setting_from_backup(backup_path, key):

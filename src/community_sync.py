@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import requests
@@ -33,7 +32,11 @@ from utils.safe_http import (
     read_response_capped,
     safe_get,
 )
-from utils.time import parse_iso_datetime, utc_now_iso
+from utils.time import (
+    parse_iso_utc as _parse_iso,
+    utc_now as _utc_now,
+    utc_now_iso,
+)
 
 logger = logging.getLogger('podcast.community_sync')
 HTTP_TIMEOUT = 20
@@ -49,22 +52,6 @@ MANIFEST_MAX_BYTES = 1024 * 1024
 # A pattern is a few KB (text_template is gated at 3500 chars); 256 KB is ample.
 PATTERN_FILE_MAX_BYTES = 256 * 1024
 DEFAULT_CRON = '0 3 * * 0'  # Sunday 3am UTC
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _parse_iso(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        dt = parse_iso_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
 
 
 def _fetch_manifest(url: str = COMMUNITY_MANIFEST_URL) -> Dict[str, Any]:

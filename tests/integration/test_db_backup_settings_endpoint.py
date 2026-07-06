@@ -20,24 +20,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 os.environ.setdefault('MINUSPOD_DATA_DIR', tempfile.mkdtemp(prefix='db-backup-test-'))
 
 
+DB_BACKUP_KEYS = (
+    'db_backup_enabled', 'db_backup_cron', 'db_backup_dest',
+    'db_backup_keep_count', 'db_backup_last_run', 'db_backup_last_error',
+    'db_backup_last_summary',
+)
+
+
 @pytest.fixture
 def db(app_client):
     """Fresh, no-password DB so requests skip auth/CSRF (community-sync path)."""
     from api import get_database
     d = get_database()
     d.set_setting('app_password', '')
-    for key in (
-        'db_backup_enabled', 'db_backup_cron', 'db_backup_dest',
-        'db_backup_keep_count', 'db_backup_last_run', 'db_backup_last_error',
-        'db_backup_last_summary',
-    ):
+    for key in DB_BACKUP_KEYS:
         d.set_setting(key, '')
     yield d
-    for key in (
-        'db_backup_enabled', 'db_backup_cron', 'db_backup_dest',
-        'db_backup_keep_count', 'db_backup_last_run', 'db_backup_last_error',
-        'db_backup_last_summary',
-    ):
+    for key in DB_BACKUP_KEYS:
         d.set_setting(key, '')
 
 

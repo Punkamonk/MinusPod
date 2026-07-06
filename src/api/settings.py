@@ -43,7 +43,9 @@ from utils.url import validate_base_url, SSRFError
 from utils.http import safe_url_for_log
 from utils.secret_writes import SecretWriteRejected, set_or_clear_secret
 from webhook_service import render_template_preview, fire_test_event, load_webhooks, VALID_EVENTS
-from db_backup_service import DEFAULT_CRON, validate_backup_dest
+from db_backup_service import (
+    DEFAULT_CRON, KEEP_COUNT_MAX, KEEP_COUNT_MIN, validate_backup_dest,
+)
 from utils.cron import is_valid_expression
 
 logger = logging.getLogger('podcast.api')
@@ -2067,7 +2069,18 @@ def get_db_backup_settings():
     warn before a scheduled run fails.
     """
     db = get_database()
-    dest = db.get_setting('db_backup_dest') or ''
+    settings = db.get_all_settings()
+
+    def _val(key):
+        entry = settings.get(key)
+        return entry.get('value') if entry else None
+
+    enabled_raw = _val('db_backup_enabled')
+    enabled = (
+        False if enabled_raw is None
+        else str(enabled_raw).strip().lower() in ('true', '1', 'yes', 'on')
+    )
+    dest = _val('db_backup_dest') or ''
     try:
         effective = validate_backup_dest(dest, db.data_dir)
         effective_dest = str(effective)
@@ -2077,15 +2090,15 @@ def get_db_backup_settings():
         effective_dest = ''
         dest_writable = False
     return json_response({
-        'enabled': db.get_setting_bool('db_backup_enabled', default=False),
-        'cron': db.get_setting('db_backup_cron') or DEFAULT_CRON,
+        'enabled': enabled,
+        'cron': _val('db_backup_cron') or DEFAULT_CRON,
         'dest': dest,
         'effectiveDest': effective_dest,
         'destWritable': dest_writable,
-        'keepCount': int(db.get_setting('db_backup_keep_count') or '1'),
-        'lastRun': db.get_setting('db_backup_last_run') or None,
-        'lastError': db.get_setting('db_backup_last_error') or None,
-        'lastSummary': db.get_setting('db_backup_last_summary') or None,
+        'keepCount': int(_val('db_backup_keep_count') or '1'),
+        'lastRun': _val('db_backup_last_run') or None,
+        'lastError': _val('db_backup_last_error') or None,
+        'lastSummary': _val('db_backup_last_summary') or None,
     })
 
 
@@ -2108,13 +2121,15 @@ def update_db_backup_settings():
         db.set_setting('db_backup_cron', cron)
     if 'keepCount' in data:
         keep = data['keepCount']
-        if not isinstance(keep, int) or isinstance(keep, bool) or keep < 1 or keep > 365:
-            return error_response('keepCount must be an integer between 1 and 365', 400)
+        if (not isinstance(keep, int) or isinstance(keep, bool)
+                or keep < KEEP_COUNT_MIN or keep > KEEP_COUNT_MAX):
+            return error_response(
+                f'keepCount must be an integer between {KEEP_COUNT_MIN} and {KEEP_COUNT_MAX}',
+                400,
+            )
         db.set_setting('db_backup_keep_count', str(keep))
     if 'dest' in data:
         dest = data['dest']
-        if not isinstance(dest, str):
-            return error_response('destination must be a string', 400)
         try:
             validate_backup_dest(dest, db.data_dir)
         except ValueError as e:

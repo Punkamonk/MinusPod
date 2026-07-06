@@ -21,13 +21,17 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from utils.cron import is_due
 from utils.db_backup import snapshot_database
-from utils.time import parse_iso_datetime, utc_now_iso
+from utils.time import (
+    parse_iso_utc as _parse_iso,
+    utc_now as _utc_now,
+    utc_now_iso,
+)
 
 logger = logging.getLogger('podcast.db_backup')
 
@@ -41,22 +45,6 @@ LOCK_FILENAME = '.db_backup.lock'
 
 class BackupInProgressError(Exception):
     """Raised when another backup already holds the lock."""
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _parse_iso(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        dt = parse_iso_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
 
 
 def validate_backup_dest(raw: Any, data_dir: str | Path) -> Path:
@@ -99,6 +87,10 @@ def _clamp_keep_count(raw: Optional[str]) -> int:
     return max(KEEP_COUNT_MIN, min(KEEP_COUNT_MAX, value))
 
 
+def _rotated_name(stamp: str) -> str:
+    return f'minuspod-backup-{stamp}.db'
+
+
 def _next_rotated_path(dest: Path, now: datetime) -> Path:
     """Return a non-colliding rotated backup path for `now`.
 
@@ -109,12 +101,12 @@ def _next_rotated_path(dest: Path, now: datetime) -> Path:
     """
     for offset in range(60):
         stamp = (now + timedelta(seconds=offset)).strftime('%Y%m%d-%H%M%S')
-        candidate = dest / f'minuspod-backup-{stamp}.db'
+        candidate = dest / _rotated_name(stamp)
         if not candidate.exists():
             return candidate
     # 60 taken names in a row is implausible; fall back to the base name.
     logger.warning('db_backup: rotation name space exhausted; base name will be overwritten')
-    return dest / f'minuspod-backup-{now.strftime("%Y%m%d-%H%M%S")}.db'
+    return dest / _rotated_name(now.strftime('%Y%m%d-%H%M%S'))
 
 
 def _prune_rotated(dest: Path, keep: int, keep_path: Optional[Path] = None) -> int:
