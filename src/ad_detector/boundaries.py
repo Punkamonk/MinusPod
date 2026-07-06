@@ -9,6 +9,7 @@ import re
 from typing import List, Dict, Optional
 
 from utils.text import get_transcript_text_for_range
+from utils.time import ranges_overlap
 from sponsor_service import SponsorService
 from utils.constants import NON_BRAND_WORDS
 
@@ -714,6 +715,43 @@ def get_uncovered_portions(ad: Dict, covered_regions: list,
     return portions
 
 
+def _merge_ad_pair(current_ad: Dict, next_ad: Dict, gap_desc: str = "") -> None:
+    """Fold ``next_ad`` into ``current_ad`` in place. Shared by both merge passes
+    so their bookkeeping (end extension, confidence, reason, sponsor, cue
+    evidence) stays consistent. Pass-specific fields (sponsor_names, gap text)
+    are set by the caller.
+
+    ``gap_desc`` is appended to the merged reason when set (filler-gap pass).
+    """
+    current_ad['end'] = next_ad['end']
+    current_ad['merged_distinct_ads'] = True
+    current_ad['confidence'] = max(current_ad.get('confidence', 0.0),
+                                   next_ad.get('confidence', 0.0))
+
+    # Reason concat: keep both fragments' reasons plus any gap annotation.
+    suffix = f"; {gap_desc}" if gap_desc else ""
+    if current_ad.get('reason') and next_ad.get('reason'):
+        current_ad['reason'] = f"{current_ad['reason']} (merged with: {next_ad['reason']}{suffix})"
+    elif next_ad.get('reason'):
+        tail = f" ({gap_desc})" if gap_desc else ""
+        current_ad['reason'] = f"{next_ad['reason']}{tail}"
+
+    # Sponsor field: do not let None overwrite a real value.
+    if current_ad.get('sponsor') is None and next_ad.get('sponsor') is not None:
+        current_ad['sponsor'] = next_ad['sponsor']
+
+    # end_text comes from the later ad.
+    if next_ad.get('end_text'):
+        current_ad['end_text'] = next_ad['end_text']
+
+    # Preserve cue-backedness so cue-gated feeds still recognize the merged span.
+    # current.end == next.end, so next's cue_snap end-edge record stays meaningful.
+    if next_ad.get('cue_snap') and not current_ad.get('cue_snap'):
+        current_ad['cue_snap'] = next_ad['cue_snap']
+    if next_ad.get('detection_stage') == 'cue_pair' or current_ad.get('detection_stage') == 'cue_pair':
+        current_ad['detection_stage'] = 'cue_pair'
+
+
 def merge_same_sponsor_ads(ads: List[Dict], segments: List[Dict], max_gap: float = 300.0) -> List[Dict]:
     """Merge ads that mention the same sponsor.
 
@@ -808,17 +846,9 @@ def merge_same_sponsor_ads(ads: List[Dict], segments: List[Dict], max_gap: float
                         f"{next_ad['start']:.1f}s-{next_ad['end']:.1f}s "
                         f"(sponsor: {common_sponsors}, reason: {merge_reason})"
                     )
-                    # Extend current ad to include next ad
-                    current_ad['end'] = next_ad['end']
-                    current_ad['merged_distinct_ads'] = True
+                    _merge_ad_pair(current_ad, next_ad)
+                    # Same-sponsor-specific: record the shared sponsors.
                     current_ad['sponsor_names'] = list(common_sponsors)
-                    # Combine reason
-                    if current_ad.get('reason') and next_ad.get('reason'):
-                        current_ad['reason'] = f"{current_ad['reason']} (merged with: {next_ad['reason']})"
-                    # Update end_text from later ad
-                    if next_ad.get('end_text'):
-                        current_ad['end_text'] = next_ad['end_text']
-                    # Add sponsors from merged ad
                     current_sponsors = current_sponsors | next_sponsors
                     j += 1
                     continue
@@ -840,6 +870,7 @@ def merge_ads_across_short_content_gaps(
     segments: List[Dict],
     min_content_seconds: float = MIN_CONTENT_BETWEEN_ADS_SECONDS,
     max_merged_seconds: float = MAX_MERGED_DURATION,
+    false_positive_corrections: Optional[List[Dict]] = None,
 ) -> List[Dict]:
     """Merge consecutive ads whose gap contains less than min_content_seconds of speech.
 
@@ -857,10 +888,18 @@ def merge_ads_across_short_content_gaps(
         min_content_seconds: Gap with less than this much speech -> merge.
             <= 0 disables the pass entirely (no merging).
         max_merged_seconds: Safety cap; skip merge if result would exceed this.
+        false_positive_corrections: User FP ranges ({'start','end'}). Merging
+            dilutes the validator's per-ad overlap ratio, so any merge whose
+            component ad or resulting span intersects an FP range is skipped
+            (conservative: the validator decides those spans un-merged).
 
     Returns:
         Sorted list of ads with filler-gap pairs collapsed.
     """
+    fp_ranges = [(c['start'], c['end']) for c in (false_positive_corrections or [])]
+
+    def _overlaps_fp(start, end):
+        return any(ranges_overlap(start, end, fs, fe) for fs, fe in fp_ranges)
     if not ads or len(ads) < 2:
         return sorted(ads, key=lambda x: x['start']) if ads else ads
     # Disabled, or no transcript to measure content with: never merge.
@@ -902,37 +941,28 @@ def merge_ads_across_short_content_gaps(
                 )
                 break
 
+            # FP-correction guard: never merge if a component ad or the merged
+            # span touches a user FP range -- merging would dilute the
+            # validator's overlap ratio and cut/keep the wrong span.
+            if (_overlaps_fp(current_ad['start'], current_ad['end'])
+                    or _overlaps_fp(next_ad['start'], next_ad['end'])
+                    or _overlaps_fp(current_ad['start'], next_ad['end'])):
+                logger.info(
+                    f"Skipping filler-gap merge near FP correction: "
+                    f"{current_ad['start']:.1f}s-{next_ad['end']:.1f}s"
+                )
+                break
+
             logger.info(
                 f"Merging across filler gap ({content_seconds:.1f}s content): "
                 f"{current_ad['start']:.1f}s-{current_ad['end']:.1f}s + "
                 f"{next_ad['start']:.1f}s-{next_ad['end']:.1f}s"
             )
 
-            # Inner-edge cue_snap/silence_snap records are dropped with next_ad;
-            # current_ad's end-snap record goes stale (advisory-only downstream).
-            current_ad['end'] = next_ad['end']
-            current_ad['merged_distinct_ads'] = True
-            current_ad['confidence'] = max(current_ad.get('confidence', 0.0),
-                                           next_ad.get('confidence', 0.0))
-
-            # Append reason from next ad.
+            # Inner-edge silence_snap records are dropped with next_ad; the
+            # shared helper carries next's cue_snap/cue_pair evidence forward.
             gap_desc = f"merged across {content_seconds:.0f}s filler gap"
-            if current_ad.get('reason') and next_ad.get('reason'):
-                current_ad['reason'] = (
-                    f"{current_ad['reason']} (merged with: {next_ad['reason']}; {gap_desc})"
-                )
-            elif next_ad.get('reason'):
-                current_ad['reason'] = f"{next_ad['reason']} ({gap_desc})"
-
-            # Sponsor field: do not let None overwrite a real value.
-            current_sponsor = current_ad.get('sponsor')
-            next_sponsor = next_ad.get('sponsor')
-            if current_sponsor is None and next_sponsor is not None:
-                current_ad['sponsor'] = next_sponsor
-
-            # end_text from the later ad.
-            if next_ad.get('end_text'):
-                current_ad['end_text'] = next_ad['end_text']
+            _merge_ad_pair(current_ad, next_ad, gap_desc=gap_desc)
 
             j += 1
 

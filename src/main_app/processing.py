@@ -521,8 +521,13 @@ def _setting_float(db, key: str, default: float, allow_zero: bool = False) -> fl
     return default
 
 
-def _refine_boundaries(all_ads, segments, db=None):
-    """Apply the boundary refinement pipeline. Returns updated list."""
+def _refine_boundaries(all_ads, segments, db=None, false_positive_corrections=None):
+    """Apply the boundary refinement pipeline. Returns updated list.
+
+    ``false_positive_corrections`` are threaded to the filler-gap merge so it
+    never collapses a span the user rejected (merging would dilute the
+    validator's overlap ratio).
+    """
     if all_ads and segments:
         all_ads = refine_ad_boundaries(all_ads, segments)
     if all_ads and segments:
@@ -535,8 +540,11 @@ def _refine_boundaries(all_ads, segments, db=None):
         min_content = _setting_float(db, 'min_content_between_ads_seconds',
                                      MIN_CONTENT_BETWEEN_ADS_SECONDS,
                                      allow_zero=True) if db else MIN_CONTENT_BETWEEN_ADS_SECONDS
-        all_ads = merge_ads_across_short_content_gaps(all_ads, segments or [],
-                                                      min_content_seconds=min_content)
+        all_ads = merge_ads_across_short_content_gaps(
+            all_ads, segments or [],
+            min_content_seconds=min_content,
+            false_positive_corrections=false_positive_corrections,
+        )
     return all_ads
 
 
@@ -644,7 +652,6 @@ def _gate_validation_by_confidence(slug, episode_id, validation_ads, min_cut_con
 def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
                           episode_description, episode_duration, min_cut_confidence,
                           podcast_name, skip_patterns=False, positional_prior=None,
-                          podcast_id=None,
                           max_ad_duration_override=None, cue_gate_enabled=False):
     """Pipeline stage: Refine ad boundaries, detect rolls, validate, gate by confidence.
 
@@ -652,8 +659,15 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
     """
     from ad_validator import AdValidator
 
+    # Load corrections first: the filler-gap merge needs the FP ranges so it
+    # does not collapse a span the user rejected.
+    false_positive_corrections, confirmed_corrections = _load_user_corrections(
+        slug, episode_id, db
+    )
+
     # Boundary refinement
-    all_ads = _refine_boundaries(all_ads, segments, db=db)
+    all_ads = _refine_boundaries(all_ads, segments, db=db,
+                                 false_positive_corrections=false_positive_corrections)
 
     # Heuristic pre/post-roll detection
     _apply_heuristic_rolls(slug, episode_id, all_ads, segments, podcast_name,
@@ -662,10 +676,6 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
     # Validation
     if not all_ads:
         return [], []
-
-    false_positive_corrections, confirmed_corrections = _load_user_corrections(
-        slug, episode_id, db
-    )
 
     validator = AdValidator(
         episode_duration, segments, episode_description,
@@ -1862,9 +1872,13 @@ def _recut_episode(slug, episode_id, episode_title, podcast_name,
                              or (segments[-1]['end'] if segments else 0))
         min_cut_confidence = get_min_cut_confidence()
 
+        # Resolve podcast_id once from the episode row so _build_recut_ad_list's
+        # per-feed override lookup uses it instead of the slug fallback.
+        recut_podcast_id = (episode_data or {}).get('podcast_id')
         ads_to_remove, all_ads_with_validation = _build_recut_ad_list(
             slug, episode_id, segments, original_duration,
             episode_description, min_cut_confidence,
+            podcast_id=recut_podcast_id,
         )
         audio_logger.info(
             f"[{slug}:{episode_id}] Recut: {len(ads_to_remove)} ad(s) to remove "
@@ -2148,7 +2162,6 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                 slug, episode_id, all_ads, segments, audio_path,
                 episode_description, episode_duration, min_cut_confidence, podcast_name,
                 skip_patterns=skip_patterns, positional_prior=positional_prior,
-                podcast_id=podcast_id,
                 max_ad_duration_override=max_ad_duration_override,
                 cue_gate_enabled=cue_gate_enabled,
             )

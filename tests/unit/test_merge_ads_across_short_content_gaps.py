@@ -169,6 +169,47 @@ class TestMergeAcrossShortContentGaps:
         result = merge_ads_across_short_content_gaps(ads, [], min_content_seconds=12.0, max_merged_seconds=300.0)
         assert len(result) == 2
 
+    def test_merge_preserves_next_ad_cue_snap(self):
+        """A non-cue ad merged with a cue_snap ad must keep the cue evidence so
+        cue-gated feeds still recognize the merged span as cue-backed."""
+        cue = {'start': 48.0, 'end': 82.0}
+        ads = [_ad(10, 40), {**_ad(50, 80), 'cue_snap': cue}]
+        segments = [_seg(0, 5, 'Intro.')]
+        result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
+        assert len(result) == 1
+        assert result[0].get('cue_snap') == cue
+
+    def test_merge_preserves_cue_pair_stage(self):
+        """If either component is detection_stage=cue_pair, the merged ad stays
+        cue_pair."""
+        ads = [_ad(10, 40), {**_ad(50, 80), 'detection_stage': 'cue_pair'}]
+        segments = [_seg(0, 5, 'Intro.')]
+        result = merge_ads_across_short_content_gaps(ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0)
+        assert len(result) == 1
+        assert result[0].get('detection_stage') == 'cue_pair'
+
+    def test_fp_corrected_component_blocks_merge(self):
+        """A merge whose component ad overlaps an FP-corrected range is skipped:
+        the validator's per-ad overlap ratio must not be diluted by merging."""
+        ads = [_ad(100, 160), _ad(170, 230)]
+        segments = [_seg(0, 5, 'Intro.')]  # filler gap 160-170
+        fp = [{'start': 100, 'end': 160}]
+        result = merge_ads_across_short_content_gaps(
+            ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0,
+            false_positive_corrections=fp,
+        )
+        assert len(result) == 2, "FP-overlapping component must not be merged"
+
+    def test_no_fp_still_merges(self):
+        """With no FP corrections the filler-gap merge behaves as before."""
+        ads = [_ad(100, 160), _ad(170, 230)]
+        segments = [_seg(0, 5, 'Intro.')]
+        result = merge_ads_across_short_content_gaps(
+            ads, segments, min_content_seconds=12.0, max_merged_seconds=300.0,
+            false_positive_corrections=[],
+        )
+        assert len(result) == 1
+
 
 # --- plumbing: setting reaches the pass from _refine_boundaries ---
 
@@ -187,9 +228,11 @@ class TestMergeGapSettingPlumbing:
         captured = {}
         original = _proc.merge_ads_across_short_content_gaps
 
-        def spy(ads, segs, min_content_seconds, max_merged_seconds=300.0):
+        def spy(ads, segs, min_content_seconds, max_merged_seconds=300.0,
+                false_positive_corrections=None):
             captured['min_content_seconds'] = min_content_seconds
-            return original(ads, segs, min_content_seconds, max_merged_seconds)
+            return original(ads, segs, min_content_seconds, max_merged_seconds,
+                            false_positive_corrections=false_positive_corrections)
 
         with patch.object(_proc, 'merge_ads_across_short_content_gaps', spy):
             _proc._refine_boundaries(ads_in, segments, db=mock_db)
@@ -209,9 +252,11 @@ class TestMergeGapSettingPlumbing:
         captured = {}
         original = _proc.merge_ads_across_short_content_gaps
 
-        def spy(ads, segs, min_content_seconds, max_merged_seconds=300.0):
+        def spy(ads, segs, min_content_seconds, max_merged_seconds=300.0,
+                false_positive_corrections=None):
             captured['min_content_seconds'] = min_content_seconds
-            return original(ads, segs, min_content_seconds, max_merged_seconds)
+            return original(ads, segs, min_content_seconds, max_merged_seconds,
+                            false_positive_corrections=false_positive_corrections)
 
         with patch.object(_proc, 'merge_ads_across_short_content_gaps', spy):
             result = _proc._refine_boundaries(ads_in, segments, db=mock_db)
