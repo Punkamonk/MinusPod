@@ -21,6 +21,7 @@ from secrets_crypto import (
     is_available as crypto_available,
     encrypt_bytes as _encrypt_bytes,
 )
+from db_backup_service import backup_now, BackupInProgressError
 
 logger = logging.getLogger('podcast.api')
 
@@ -344,7 +345,6 @@ def run_db_backup():
     Distinct from GET /system/backup (which streams a one-off download);
     this writes to the configured backup destination with rotation.
     """
-    from db_backup_service import backup_now, BackupInProgressError
     db = get_database()
     try:
         summary = backup_now(db)

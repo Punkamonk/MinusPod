@@ -320,3 +320,5 @@ def test_lock_held_raises_backup_in_progress(db, tmp_path):
             backup_now(db)
     # last_run is still stamped (stamp happens before the lock attempt).
     assert db.get_setting('db_backup_last_run')
+    # lock contention is not an error-stamping failure.
+    assert db.get_setting('db_backup_last_error') is None

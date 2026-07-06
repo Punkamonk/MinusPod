@@ -123,6 +123,12 @@ def test_put_keep_count_string(app_client, db):
     assert r.get_json()['error'] == 'keepCount must be an integer between 1 and 365'
 
 
+def test_put_keep_count_bool(app_client, db):
+    r = app_client.put('/api/v1/settings/db-backup', json={'keepCount': True})
+    assert r.status_code == 400
+    assert r.get_json()['error'] == 'keepCount must be an integer between 1 and 365'
+
+
 def test_put_dest_relative(app_client, db):
     r = app_client.put('/api/v1/settings/db-backup', json={'dest': 'relative/path'})
     assert r.status_code == 400

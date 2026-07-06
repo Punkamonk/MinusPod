@@ -43,6 +43,8 @@ from utils.url import validate_base_url, SSRFError
 from utils.http import safe_url_for_log
 from utils.secret_writes import SecretWriteRejected, set_or_clear_secret
 from webhook_service import render_template_preview, fire_test_event, load_webhooks, VALID_EVENTS
+from db_backup_service import DEFAULT_CRON, validate_backup_dest
+from utils.cron import is_valid_expression
 
 logger = logging.getLogger('podcast.api')
 
@@ -2064,7 +2066,6 @@ def get_db_backup_settings():
     destWritable is a live probe of that resolved directory so the UI can
     warn before a scheduled run fails.
     """
-    from db_backup_service import DEFAULT_CRON, validate_backup_dest
     db = get_database()
     dest = db.get_setting('db_backup_dest') or ''
     try:
@@ -2096,8 +2097,6 @@ def update_db_backup_settings():
     Body: {enabled?, cron?, dest?, keepCount?}. dest '' resets to default;
     validation errors from validate_backup_dest are surfaced verbatim.
     """
-    from utils.cron import is_valid_expression
-    from db_backup_service import validate_backup_dest
     db = get_database()
     data = request.get_json() or {}
     if 'enabled' in data:

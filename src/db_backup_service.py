@@ -113,6 +113,7 @@ def _next_rotated_path(dest: Path, now: datetime) -> Path:
         if not candidate.exists():
             return candidate
     # 60 taken names in a row is implausible; fall back to the base name.
+    logger.warning('db_backup: rotation name space exhausted; base name will be overwritten')
     return dest / f'minuspod-backup-{now.strftime("%Y%m%d-%H%M%S")}.db'
 
 
