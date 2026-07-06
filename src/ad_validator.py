@@ -12,6 +12,7 @@ from config import (
     POST_ROLL, MAX_AD_PERCENTAGE, MAX_ADS_PER_5MIN,
     MERGE_GAP_THRESHOLD, MAX_SILENT_GAP,
     HOLD_REASON_MAX_DURATION, HOLD_REASON_NO_CUE,
+    is_cue_backed,
 )
 from utils.text import extract_text_from_segments
 from utils.time import overlap_ratio
@@ -585,11 +586,9 @@ class AdValidator:
                     return Decision.REVIEW
 
         # Rule 2: cue-gated approval. Only applies to ACCEPT after rule 1.
+        # is_cue_backed treats manual markers as exempt (human decision).
         if self.cue_gate_enabled and decision == Decision.ACCEPT:
-            if ad.get('detection_stage') == 'manual':
-                return decision
-            cue_backed = bool(ad.get('cue_snap')) or ad.get('detection_stage') == 'cue_pair'
-            if not cue_backed:
+            if not is_cue_backed(ad):
                 self._mark_held(ad, flags, HOLD_REASON_NO_CUE)
                 return Decision.REVIEW
 

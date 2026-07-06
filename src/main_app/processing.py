@@ -29,6 +29,7 @@ from config import (
     MIN_CONTENT_BETWEEN_ADS_SECONDS,
     AUDIO_CUE_PAIR_CONFIDENCE, AUDIO_CUE_PAIR_ORIENT_WINDOW_SECONDS,
     HOLD_REASON_NO_CUE, HOLD_REASON_PASS1_HELD_OVERLAP,
+    is_cue_backed, is_pending_review,
     resolve_feed_cue_settings,
     resolve_silence_snap_tunables,
     resolve_max_ad_duration_override,
@@ -594,12 +595,6 @@ def _load_user_corrections(slug, episode_id, db):
     return false_positive_corrections, confirmed_corrections
 
 
-def _is_cue_backed(ad):
-    """True when the ad carries cue evidence exempting it from cue gating."""
-    return (bool(ad.get('cue_snap'))
-            or ad.get('detection_stage') in ('cue_pair', 'manual'))
-
-
 def _gate_validation_by_confidence(slug, episode_id, validation_ads, min_cut_confidence,
                                     cue_gate_enabled=False):
     """Apply ACCEPT/REJECT/REVIEW confidence gating. Returns (ads_to_remove, low_confidence_count)."""
@@ -633,9 +628,11 @@ def _gate_validation_by_confidence(slug, episode_id, validation_ads, min_cut_con
                 f"{ad['start']:.1f}s-{ad['end']:.1f}s ({confidence:.0%} < {min_cut_confidence:.0%})"
             )
             continue
-        # REVIEW fall-through: a rounded-up REVIEW ad on a cue-gated feed with no
-        # cue evidence must be held, not cut (mirrors the validator's cue gate).
-        if cue_gate_enabled and not _is_cue_backed(ad):
+        # REVIEW fall-through guard: the validator's rounding keeps a REVIEW ad
+        # below threshold here, so this is belt-and-suspenders for any REVIEW ad
+        # that reaches the gate at/above threshold (e.g. non-validator inputs) --
+        # on a cue-gated feed hold it instead of cutting when it has no cue.
+        if cue_gate_enabled and not is_cue_backed(ad):
             ad['was_cut'] = False
             ad['held_for_review'] = True
             ad['hold_reason'] = HOLD_REASON_NO_CUE
@@ -1267,7 +1264,6 @@ def _gate_verification_ads_by_confidence(verification_ads_processed,
             orig_ad['held_for_review'] = True
             orig_ad['hold_reason'] = HOLD_REASON_PASS1_HELD_OVERLAP
             v_ads_held.append(orig_ad)
-            ad['was_cut'] = False
             continue
         confidence = ad.get('validation', {}).get('adjusted_confidence', ad.get('confidence', 1.0))
         if confidence >= min_cut_confidence:
@@ -2236,7 +2232,7 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
             # them or it destroys the audio the hold protects.
             pass1_held_spans = [
                 (m['start'], m['end']) for m in all_ads_with_validation
-                if m.get('held_for_review') and not m.get('was_cut')
+                if is_pending_review(m)
             ]
             verification_count, v_ads_for_ui, v_ads_held, processed_path, verification_cue_count = _run_verification_pass(
                 ctx, processed_path, applied_cuts,

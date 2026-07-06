@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
 
+from config import count_pending_review, is_pending_review
 from utils.time import utc_now_iso, parse_iso_datetime
 from sponsor_normalize import get_or_create_known_sponsor
 from pattern_variants import derive_intro_outro, merge_variants
@@ -802,7 +803,7 @@ def _clear_held_marker_on_reject(db, slug, episode_id, start, end, tol=0.5):
 
     changed = False
     for m in markers:
-        if (m.get('held_for_review') and not m.get('was_cut')
+        if (is_pending_review(m)
                 and abs(m.get('start', 0) - start) <= tol
                 and abs(m.get('end', 0) - end) <= tol):
             m['held_for_review'] = False
@@ -814,10 +815,8 @@ def _clear_held_marker_on_reject(db, slug, episode_id, start, end, tol=0.5):
     if not changed:
         return
 
-    pending_count = sum(1 for m in markers
-                        if m.get('held_for_review') and not m.get('was_cut'))
     db.save_episode_details(slug, episode_id, ad_markers=markers,
-                            pending_review_count=pending_count)
+                            pending_review_count=count_pending_review(markers))
 
 
 def _maybe_rewrite_pattern_from_adjustment(

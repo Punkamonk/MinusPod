@@ -729,12 +729,12 @@ def _merge_ad_pair(current_ad: Dict, next_ad: Dict, gap_desc: str = "") -> None:
                                    next_ad.get('confidence', 0.0))
 
     # Reason concat: keep both fragments' reasons plus any gap annotation.
-    suffix = f"; {gap_desc}" if gap_desc else ""
+    gap_note = f" ({gap_desc})" if gap_desc else ""
     if current_ad.get('reason') and next_ad.get('reason'):
-        current_ad['reason'] = f"{current_ad['reason']} (merged with: {next_ad['reason']}{suffix})"
+        inner = f"; {gap_desc}" if gap_desc else ""
+        current_ad['reason'] = f"{current_ad['reason']} (merged with: {next_ad['reason']}{inner})"
     elif next_ad.get('reason'):
-        tail = f" ({gap_desc})" if gap_desc else ""
-        current_ad['reason'] = f"{next_ad['reason']}{tail}"
+        current_ad['reason'] = f"{next_ad['reason']}{gap_note}"
 
     # Sponsor field: do not let None overwrite a real value.
     if current_ad.get('sponsor') is None and next_ad.get('sponsor') is not None:

@@ -45,6 +45,26 @@ HOLD_REASON_NO_CUE = 'no_cue_evidence'
 # held instead of cutting so the protected region survives.
 HOLD_REASON_PASS1_HELD_OVERLAP = 'pass1_held_overlap'
 
+
+def is_cue_backed(ad) -> bool:
+    """Single source of truth for the cue gate: an ad is exempt from cue-gated
+    holding when it has an audio-cue snap, came from a cue pair, or is a manual
+    (human) marker. Used by the validator hold rules and the pass-1 gate.
+    """
+    return (bool(ad.get('cue_snap'))
+            or ad.get('detection_stage') in ('cue_pair', 'manual'))
+
+
+def is_pending_review(marker) -> bool:
+    """A marker awaiting a human decision: held for review and not cut. Single
+    source of truth for the pending-review bucket and count."""
+    return bool(marker.get('held_for_review')) and not marker.get('was_cut')
+
+
+def count_pending_review(markers) -> int:
+    """Number of markers awaiting review; persisted as pending_review_count."""
+    return sum(1 for m in markers if is_pending_review(m))
+
 # Ad evidence thresholds
 CONTENT_DURATION_THRESHOLD = 120.0  # Segments >= this without evidence are likely content
 LOW_EVIDENCE_WARN_THRESHOLD = 60.0  # Warn for segments >= this without evidence
