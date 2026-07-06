@@ -135,7 +135,7 @@ have retained original audio. The first episode in the list sets the coordinate
 frame: returned candidate timestamps are in that episode's timeline.
 
 The scan fingerprints every episode in the background. Full-duration decoding is
-slow; a long episode takes about a minute. Once done, it reports segments that
+slow, so expect a wait for long episodes. Once done, it reports segments that
 recur across the supplied episodes. Each candidate shows its start/end in the
 target episode and how many supplied episodes share it. A **Make template**
 button opens the mark dialog seeded with those bounds, the same as the

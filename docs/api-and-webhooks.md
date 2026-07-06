@@ -30,7 +30,7 @@ Key endpoints:
 - `POST /api/v1/feeds/{slug}/episodes/{id}/retry-ad-detection` - Retry ad detection only
 - `POST /api/v1/feeds/{slug}/episodes/{id}/corrections` - Submit ad corrections
 - `GET/POST /api/v1/feeds/{slug}/cue-templates` - List a feed's audio-cue templates, or mark a new one from a window of an episode's original audio (`episodeId`, `startS`, `endS`, `cueType`; 0.2 to 10 seconds, up to 60 for show intro/outro)
-- `PATCH/DELETE /api/v1/cue-templates/{id}` - Rename, enable/disable, change scope (`podcast` or `network`), set a per-template match threshold (`scoreThreshold`, 0.30-0.99, null clears), move the capture window (`sourceOffsetS`/`durationS`; re-extracts the audio blobs from the retained original, 409 when it has aged out), or delete a template
+- `PATCH/DELETE /api/v1/cue-templates/{id}` - Enable/disable, change scope (`podcast` or `network`), set a per-template match threshold (`scoreThreshold`, 0.30-0.99, null clears), move the capture window (`sourceOffsetS`/`durationS`; re-extracts the audio blobs from the retained original, 409 when it has aged out), or delete a template
 - `GET /api/v1/cue-templates/{id}/export` - Download a template as a portable zip (lossless WAV plus JSON manifest)
 - `POST /api/v1/feeds/{slug}/cue-templates/import` - Import a template zip into a feed (multipart `file`); the MFCC is recomputed from the WAV, sample-rate or channel mismatches are rejected. The manifest carries a `schemaVersion` field that is reserved for a future breaking change; this release only checks that it parses and does not gate or migrate on it.
 - `GET /api/v1/feeds/{slug}/episodes/{id}/cue-loud-spots` - Template-free energy pass over an episode's original audio; returns candidate "loud spots" the capture UI marks as jump points
