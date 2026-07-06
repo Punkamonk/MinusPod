@@ -2053,6 +2053,77 @@ def update_community_sync_settings():
 
 # ========== Community-pattern sync triggers ==========
 
+# ========== Scheduled DB backup settings ==========
+
+@api.route('/settings/db-backup', methods=['GET'])
+@log_request
+def get_db_backup_settings():
+    """Return scheduled DB backup settings plus derived dest state.
+
+    effectiveDest resolves the configured dest ('' -> <data_dir>/backups);
+    destWritable is a live probe of that resolved directory so the UI can
+    warn before a scheduled run fails.
+    """
+    from db_backup_service import DEFAULT_CRON, validate_backup_dest
+    db = get_database()
+    dest = db.get_setting('db_backup_dest') or ''
+    try:
+        effective = validate_backup_dest(dest, db.data_dir)
+        effective_dest = str(effective)
+        dest_writable = os.access(effective, os.W_OK) if effective.exists() \
+            else os.access(effective.parent, os.W_OK)
+    except ValueError:
+        effective_dest = ''
+        dest_writable = False
+    return json_response({
+        'enabled': db.get_setting_bool('db_backup_enabled', default=False),
+        'cron': db.get_setting('db_backup_cron') or DEFAULT_CRON,
+        'dest': dest,
+        'effectiveDest': effective_dest,
+        'destWritable': dest_writable,
+        'keepCount': int(db.get_setting('db_backup_keep_count') or '1'),
+        'lastRun': db.get_setting('db_backup_last_run') or None,
+        'lastError': db.get_setting('db_backup_last_error') or None,
+        'lastSummary': db.get_setting('db_backup_last_summary') or None,
+    })
+
+
+@api.route('/settings/db-backup', methods=['PUT'])
+@log_request
+def update_db_backup_settings():
+    """Update scheduled DB backup settings.
+
+    Body: {enabled?, cron?, dest?, keepCount?}. dest '' resets to default;
+    validation errors from validate_backup_dest are surfaced verbatim.
+    """
+    from utils.cron import is_valid_expression
+    from db_backup_service import validate_backup_dest
+    db = get_database()
+    data = request.get_json() or {}
+    if 'enabled' in data:
+        db.set_setting('db_backup_enabled', 'true' if bool(data['enabled']) else 'false')
+    if 'cron' in data:
+        cron = (data['cron'] or '').strip()
+        if not is_valid_expression(cron):
+            return error_response(f'invalid cron expression: {cron}', 400)
+        db.set_setting('db_backup_cron', cron)
+    if 'keepCount' in data:
+        keep = data['keepCount']
+        if not isinstance(keep, int) or isinstance(keep, bool) or keep < 1 or keep > 365:
+            return error_response('keepCount must be an integer between 1 and 365', 400)
+        db.set_setting('db_backup_keep_count', str(keep))
+    if 'dest' in data:
+        dest = data['dest']
+        if not isinstance(dest, str):
+            return error_response('destination must be a string', 400)
+        try:
+            validate_backup_dest(dest, db.data_dir)
+        except ValueError as e:
+            return error_response(str(e), 400)
+        db.set_setting('db_backup_dest', dest)
+    return get_db_backup_settings()
+
+
 @api.route('/community-patterns/sync', methods=['POST'])
 @limiter.limit('6/hour')
 @log_request

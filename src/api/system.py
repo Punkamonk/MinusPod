@@ -335,6 +335,26 @@ def backup_database():
                 pass
 
 
+@api.route('/system/db-backup/run', methods=['POST'])
+@limiter.limit('6/hour')
+@log_request
+def run_db_backup():
+    """Force a scheduled-style DB backup now, ignoring the enabled flag.
+
+    Distinct from GET /system/backup (which streams a one-off download);
+    this writes to the configured backup destination with rotation.
+    """
+    from db_backup_service import backup_now, BackupInProgressError
+    db = get_database()
+    try:
+        summary = backup_now(db)
+    except BackupInProgressError:
+        return error_response('a backup is already in progress', 409)
+    except Exception as e:
+        return error_response({'message': 'Backup failed', 'reason': str(e)}, 500)
+    return json_response(summary)
+
+
 # ========== API Documentation ==========
 #
 # Registered on the blueprint so the same ``check_auth`` gate that guards

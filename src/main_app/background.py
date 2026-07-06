@@ -59,6 +59,7 @@ def background_rss_refresh():
     from main_app.feeds import refresh_all_feeds
     from pricing_fetcher import refresh_pricing_if_stale
     from community_sync import community_pattern_sync_tick
+    from db_backup_service import db_backup_tick
     while not shutdown_event.is_set():
         refresh_all_feeds()
         run_cleanup()
@@ -69,6 +70,12 @@ def background_rss_refresh():
             community_pattern_sync_tick(db)
         except Exception as e:
             refresh_logger.warning(f"community_pattern_sync_tick failed: {e}")
+        # Scheduled DB backup -- gated by settings.db_backup_enabled and the
+        # cron schedule; safe to call every tick.
+        try:
+            db_backup_tick(db)
+        except Exception as e:
+            refresh_logger.warning(f"db_backup_tick failed: {e}")
         # Wait 15 minutes, but allow early exit on shutdown
         shutdown_event.wait(timeout=900)
 
