@@ -5801,7 +5801,10 @@ paths:
                           enum: [recurring]
                         episodeMatches:
                           type: integer
-                          description: How many supplied episodes share this segment.
+                          description: >
+                            How many SIBLING episodes share this segment (the
+                            target episode always matches, so the total number of
+                            episodes containing it is episodeMatches + 1).
                   error:
                     type: string
                     description: Present when status is error.

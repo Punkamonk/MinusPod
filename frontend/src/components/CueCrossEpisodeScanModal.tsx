@@ -10,7 +10,7 @@ import {
   type CrossEpisodeCandidate,
   type CrossEpisodeScanResponse,
 } from '../api/cueTemplates';
-import { getEpisodes } from '../api/feeds';
+import { getEpisode, getEpisodes } from '../api/feeds';
 import type { Episode } from '../api/types';
 import { formatTimestamp } from '../utils/format';
 
@@ -38,7 +38,6 @@ export default function CueCrossEpisodeScanModal({
   onClose,
   onSaved,
 }: CueCrossEpisodeScanModalProps) {
-  useEscape(onClose);
   const [pickerPage, setPickerPage] = useState(0);
   // Selected episodes in click order (first = target). Full objects, not ids,
   // so title/duration survive paging away from the page they were picked on.
@@ -47,6 +46,10 @@ export default function CueCrossEpisodeScanModal({
   const [phase, setPhase] = useState<'picker' | 'results'>('picker');
   // Seed for CueMarkModal when a candidate's "Make template" is clicked.
   const [seed, setSeed] = useState<CrossEpisodeCandidate | null>(null);
+
+  // Escape closes this modal, but only when no stacked CueMarkModal is open --
+  // the seed modal owns Escape while it is up, so the parent must stand down.
+  useEscape(seed ? () => {} : onClose);
 
   const pickerQuery = useQuery({
     queryKey: ['cue-template-picker', slug, pickerPage],
@@ -67,7 +70,6 @@ export default function CueCrossEpisodeScanModal({
   const pickerTotalPages = Math.max(1, Math.ceil(pickerTotal / PICKER_PAGE_SIZE));
 
   const selectedIds = selected.map((ep) => ep.id);
-  const targetEp = selected[0];
 
   // React Query scan: enabled once user advances to results phase.
   // Polling stops when status is no longer 'scanning'.
@@ -83,6 +85,29 @@ export default function CueCrossEpisodeScanModal({
     });
 
   const candidates: CrossEpisodeCandidate[] = scanData?.candidates ?? [];
+  // Total episodes the badge denominator refers to (M); prefer the response's
+  // set, fall back to the current selection while no response has arrived.
+  const episodeCount = scanData?.episodeIds?.length ?? selectedIds.length;
+
+  // Candidate times live in the response's targetEpisodeId frame. The server
+  // cache is keyed on the SORTED id set, so a cached scan queued in a different
+  // order returns candidates in a DIFFERENT episode's timeline than selected[0].
+  // Resolve the display/seed episode from the response; fall back to selected[0]
+  // only until a response arrives.
+  const targetEpId = scanData?.targetEpisodeId ?? selected[0]?.id;
+  const knownTargetEp =
+    selected.find((ep) => ep.id === targetEpId) ??
+    pickerEpisodes.find((ep) => ep.id === targetEpId);
+
+  // If the response names an episode we do not hold metadata for (cached scan
+  // from another order/page), fetch the minimal metadata it needs.
+  const fetchedTargetQuery = useQuery({
+    queryKey: ['cue-xep-target-episode', slug, targetEpId],
+    queryFn: () => getEpisode(slug, targetEpId as string),
+    enabled: !!slug && !!targetEpId && !knownTargetEp,
+  });
+  const targetEp: Episode | undefined =
+    knownTargetEp ?? fetchedTargetQuery.data ?? undefined;
 
   const toggleEpisode = (ep: Episode) => {
     setSelected((prev) => {
@@ -283,7 +308,8 @@ export default function CueCrossEpisodeScanModal({
                     </span>
                     {c.episodeMatches != null && (
                       <span className="ml-2 px-1.5 py-0.5 text-xs rounded font-medium bg-blue-500/20 text-blue-600 dark:text-blue-400">
-                        matched in {c.episodeMatches} ep{c.episodeMatches === 1 ? '' : 's'}
+                        {/* episodeMatches counts SIBLINGS; the target is always a match too, so +1. */}
+                        in {c.episodeMatches + 1} of {episodeCount} eps
                       </span>
                     )}
                   </div>

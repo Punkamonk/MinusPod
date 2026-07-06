@@ -355,7 +355,9 @@ describe('Scan trigger and polling', () => {
   });
 
   it('stops polling on status=ready and shows candidates', async () => {
-    const candidate = { start: 30, end: 60, kind: 'recurring' as const, episodeMatches: 3 };
+    // Two episodes selected -> at most one sibling match; the badge shows the
+    // total (sibling + target) over the episode-set size: "in 2 of 2 eps".
+    const candidate = { start: 30, end: 60, kind: 'recurring' as const, episodeMatches: 1 };
     // First response scanning, then ready: exercises one poll cycle end-to-end.
     mockCrossEpisodeScan
       .mockResolvedValueOnce({ status: 'scanning' })
@@ -377,7 +379,7 @@ describe('Scan trigger and polling', () => {
 
     // Poll at 3s returns ready; badge appears.
     await waitFor(() => {
-      expect(screen.getByText(/matched in 3 eps/i)).toBeDefined();
+      expect(screen.getByText(/in 2 of 2 eps/i)).toBeDefined();
     }, { timeout: 5000 });
     expect(mockCrossEpisodeScan).toHaveBeenCalledTimes(2);
 
@@ -432,7 +434,7 @@ describe('Candidate results', () => {
   });
 
   it('Make template opens CueMarkModal with candidate bounds and target episode', async () => {
-    const candidate = { start: 45.5, end: 90.2, kind: 'recurring' as const, episodeMatches: 2 };
+    const candidate = { start: 45.5, end: 90.2, kind: 'recurring' as const, episodeMatches: 1 };
     mockCrossEpisodeScan.mockResolvedValue({
       status: 'ready',
       targetEpisodeId: 'ep-1',
@@ -450,7 +452,7 @@ describe('Candidate results', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Scan$/ }));
 
     await waitFor(() => {
-      expect(screen.getByText(/matched in 2 ep/i)).toBeDefined();
+      expect(screen.getByText(/in 2 of 2 eps/i)).toBeDefined();
     });
 
     // Click "Make template" on the candidate row
@@ -462,6 +464,34 @@ describe('Candidate results', () => {
     expect(screen.getByTestId('modal-episode-id').textContent).toBe('ep-1');
     expect(screen.getByTestId('modal-start').textContent).toBe('45.5');
     expect(screen.getByTestId('modal-end').textContent).toBe('90.2');
+  });
+
+  it('seeds CueMarkModal with the response target id, not selected[0], when a cached scan returns a different order', async () => {
+    // User selects ep-1 first (selected[0]), but the server cache -- keyed on the
+    // SORTED id set -- returns candidates in ep-3's timeline. The Make-template
+    // seed must follow the response's targetEpisodeId (ep-3), not selected[0].
+    const candidate = { start: 12.0, end: 15.0, kind: 'recurring' as const, episodeMatches: 1 };
+    mockCrossEpisodeScan.mockResolvedValue({
+      status: 'ready',
+      targetEpisodeId: 'ep-3',
+      episodeIds: ['ep-1', 'ep-3'],
+      candidates: [candidate],
+    });
+
+    renderPanel();
+    await waitFor(() => expect(screen.getByRole('button', { name: /Find across episodes/i })).toBeDefined());
+    await userEvent.click(screen.getByRole('button', { name: /Find across episodes/i }));
+    await waitFor(() => expect(screen.getByText('Episode 1')).toBeDefined());
+
+    await userEvent.click(screen.getByLabelText('Select episode Episode 1'));
+    await userEvent.click(screen.getByLabelText('Select episode Episode 3'));
+    await userEvent.click(screen.getByRole('button', { name: /^Scan$/ }));
+
+    await waitFor(() => expect(screen.getByText(/in 2 of 2 eps/i)).toBeDefined());
+    await userEvent.click(screen.getByRole('button', { name: /Make template/i }));
+
+    await waitFor(() => expect(screen.getByTestId('cue-mark-modal')).toBeDefined());
+    expect(screen.getByTestId('modal-episode-id').textContent).toBe('ep-3');
   });
 });
 
