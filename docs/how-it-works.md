@@ -90,9 +90,9 @@ Rejected ads appear in a separate "Rejected Detections" section in the UI so you
 A fourth outcome is **held for review**. An ad is held when a per-feed rule blocks the automatic cut (both rules are off by default, set on the feed settings page):
 
 - **Max ad duration** - the detection exceeds the feed's cap, even if the model was highly confident.
-- **Cue gating** - the feed has cue-gated approval on and the detection has no audio-cue evidence. Manual markers are never held. On cue-gated feeds, verification-pass (pass 2) proposals are always held because they cannot carry cue evidence.
+- **Cue gating** - the feed has cue-gated approval on and the detection has no audio-cue evidence. Manual markers are exempt from cue gating (the duration cap still applies to them). On cue-gated feeds, verification-pass (pass 2) proposals are always held because they cannot carry cue evidence.
 
-Held ads stay in the audio. The episode publishes with them intact. The episode page shows held ads in an amber "Held for Review" section with Approve & Recut and Dismiss buttons. Approve & Recut stores a confirm correction and immediately re-cuts via the Recut Audio mode (no LLM re-run) if the original audio is still retained; without it, the button reads Approve and the cut applies on the next reprocess. Dismiss records a rejection and leaves the audio unchanged. The episode list shows an "N held" chip on any episode with held ads.
+Held ads stay in the audio. The episode publishes with them intact. The episode page shows held ads in an amber "Held for Review (N)" section with Approve & Recut and Dismiss buttons. Approve & Recut stores a confirm correction and immediately re-cuts via the Recut Audio mode (no LLM re-run) if the original audio is still retained; without it, the button reads Approve and the cut applies on the next reprocess. Dismiss records a rejection and leaves the audio unchanged. The episode list shows an "N held" chip on any episode with held ads.
 
 The API returns held ads as `pendingReviewMarkers` on the episode detail response; episode entries carry a `pendingReviewCount` (see `openapi.yaml`).
 
