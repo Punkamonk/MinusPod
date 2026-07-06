@@ -211,8 +211,6 @@ describe('Held for Review: Approve & Recut (hasOriginalAudio=true)', () => {
 
     await waitFor(() => {
       expect(callOrder).toContain('correction');
-    });
-    await waitFor(() => {
       expect(callOrder).toContain('recut');
     });
     // Correction must come before recut.
@@ -315,6 +313,42 @@ describe('Held for Review: Dismiss', () => {
     });
     const [, , payload] = mockSubmitCorrection.mock.calls[0] as [string, string, { type: string }];
     expect(payload.type).toBe('reject');
+    expect(mockReprocessEpisode).not.toHaveBeenCalled();
+  });
+});
+
+describe('Held for Review: failed Approve & Recut does not arm pendingRecutRef', () => {
+  beforeEach(() => {
+    mockSubmitCorrection.mockReset();
+    mockReprocessEpisode.mockReset();
+  });
+
+  it('does not call recut after correction fails, and a subsequent Dismiss does not trigger recut', async () => {
+    const user = userEvent.setup();
+    renderDetail(makeEpisode({ hasOriginalAudio: true }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('approve-recut-0')).toBeDefined();
+    });
+
+    // First click: Approve & Recut - correction call fails.
+    mockSubmitCorrection.mockRejectedValueOnce(new Error('network error'));
+    await user.click(screen.getByTestId('approve-recut-0'));
+
+    // Wait for error state to settle (saveStatus resets after error).
+    await waitFor(() => {
+      expect(mockSubmitCorrection).toHaveBeenCalledTimes(1);
+    });
+    // Recut must NOT have been called after the failed correction.
+    expect(mockReprocessEpisode).not.toHaveBeenCalled();
+
+    // Second action: Dismiss - correction succeeds, but recut must still not be called.
+    mockSubmitCorrection.mockResolvedValue({});
+    await user.click(screen.getByTestId('dismiss-0'));
+
+    await waitFor(() => {
+      expect(mockSubmitCorrection).toHaveBeenCalledTimes(2);
+    });
     expect(mockReprocessEpisode).not.toHaveBeenCalled();
   });
 });

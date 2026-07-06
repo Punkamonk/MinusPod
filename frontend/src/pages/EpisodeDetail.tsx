@@ -136,6 +136,7 @@ function EpisodeDetail() {
     onError: (error) => {
       console.error('Failed to save correction:', error);
       setSaveStatus('error');
+      pendingRecutRef.current = false;
       setTimeout(() => setSaveStatus('idle'), 3000);
     },
   });
