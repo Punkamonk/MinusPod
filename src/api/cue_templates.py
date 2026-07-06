@@ -11,6 +11,7 @@ Routes mounted under the ``/api/v1`` blueprint:
 - ``POST   /feeds/<slug>/episodes/<episode_id>/cue-template-preview``
                                                    - run one template
 """
+import hashlib
 import io
 import json
 import logging
@@ -1386,7 +1387,6 @@ def cue_cross_episode_scan(slug):
     candidates are in the coordinate frame of the first supplied episode
     (targetEpisodeId).
     """
-    import hashlib
 
     db = get_database()
     storage = get_storage()
