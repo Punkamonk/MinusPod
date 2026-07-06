@@ -1483,6 +1483,13 @@ def cue_cross_episode_scan(slug):
     episode_ids = data.get('episodeIds')
     if not isinstance(episode_ids, list) or len(episode_ids) < 2:
         return error_response('episodeIds must be a list of at least 2 episode ids', 400)
+    # Every entry must be a valid episode id before it reaches sorted()/join and
+    # the hash. A non-string entry would raise inside sorted() (500), and a
+    # duplicated id would self-match, so the 2-5 bound is enforced over UNIQUE ids.
+    if not all(isinstance(eid, str) and is_valid_episode_id(eid) for eid in episode_ids):
+        return error_response('episodeIds must all be valid episode ids', 400)
+    if len(set(episode_ids)) != len(episode_ids):
+        return error_response('episodeIds must not contain duplicates', 400)
     if len(episode_ids) > _CROSS_EPISODE_SCAN_MAX_EPISODES:
         return error_response(
             f'episodeIds must contain at most {_CROSS_EPISODE_SCAN_MAX_EPISODES} ids', 400)

@@ -93,9 +93,35 @@ def test_empty_id_list_returns_400(app_client, xep_seeded):
 def test_too_many_ids_returns_400(app_client, xep_seeded):
     hdr = _csrf(app_client)
     slug = xep_seeded['slug']
-    r = _post(app_client, slug, {'episodeIds': ['a', 'b', 'c', 'd', 'e', 'f']}, hdr)
+    # Six valid, distinct episode ids so the count check (not the id-shape or
+    # duplicate check) is what rejects the request.
+    ids = [f'aabbcc00000{i}' for i in range(1, 7)]
+    r = _post(app_client, slug, {'episodeIds': ids}, hdr)
     assert r.status_code == 400
     assert 'at most' in r.get_json().get('error', '').lower()
+
+
+def test_non_string_ids_returns_400(app_client, xep_seeded):
+    hdr = _csrf(app_client)
+    slug = xep_seeded['slug']
+    r = _post(app_client, slug, {'episodeIds': [123, 456]}, hdr)
+    assert r.status_code == 400
+
+
+def test_mixed_valid_and_invalid_ids_returns_400(app_client, xep_seeded):
+    hdr = _csrf(app_client)
+    slug = xep_seeded['slug']
+    r = _post(app_client, slug, {'episodeIds': [xep_seeded['ep1'], 999]}, hdr)
+    assert r.status_code == 400
+
+
+def test_duplicate_ids_returns_400(app_client, xep_seeded):
+    hdr = _csrf(app_client)
+    slug = xep_seeded['slug']
+    ep1 = xep_seeded['ep1']
+    r = _post(app_client, slug, {'episodeIds': [ep1, ep1]}, hdr)
+    assert r.status_code == 400
+    assert 'duplicate' in r.get_json().get('error', '').lower()
 
 
 def test_foreign_episode_id_returns_400(app_client, xep_seeded):
