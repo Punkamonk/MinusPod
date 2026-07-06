@@ -77,6 +77,70 @@ def test_finds_mid_body_segment_in_two_siblings():
 
 
 # ---------------------------------------------------------------------------
+# Two-episode set (one sibling, min_matches=1) returns a candidate. Regression
+# guard for finding 1: the worker caps min_matches at the sibling count, so a
+# 2-episode scan reaches the real function with min_matches=1 and is not empty.
+# ---------------------------------------------------------------------------
+
+def test_two_episode_set_single_sibling_returns_candidate():
+    rng = np.random.default_rng(41)
+    seg = _rand(40, rng)  # ~5s shared sting
+
+    t_ints = np.concatenate([_rand(130, rng), seg, _rand(130, rng)])
+    t_dur = len(t_ints) / 8.0
+    s1_ints = np.concatenate([_rand(80, rng), seg, _rand(100, rng)])
+
+    fp = _fingerprinter()
+    side_effects = [
+        (t_ints.tolist(), t_dur),
+        (s1_ints.tolist(), len(s1_ints) / 8.0),
+    ]
+    with patch.object(fp, '_generate_full_fingerprint', side_effect=side_effects):
+        result = fp.discover_cross_episode_body(
+            'target.mp3', ['sib1.mp3'],
+            min_matches=1,
+        )
+
+    assert len(result) >= 1
+    assert result[0]['kind'] == 'recurring'
+    assert result[0]['episodeMatches'] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: a recurring 2.0-2.4s sting is returned by the REAL function using
+# the default min_duration (AUDIO_CUE_XEP_BODY_MIN_DURATION=2.0), not the 3s
+# intro/outro floor that used to discard sub-3s stings.
+# ---------------------------------------------------------------------------
+
+def test_short_recurring_sting_survives_default_min_duration():
+    rng = np.random.default_rng(53)
+    seg = _rand(19, rng)  # 19 ints / 8 fps = 2.375s, in the 2.0-2.4s band
+
+    t_ints = np.concatenate([_rand(120, rng), seg, _rand(120, rng)])
+    t_dur = len(t_ints) / 8.0
+    s1_ints = np.concatenate([_rand(70, rng), seg, _rand(70, rng)])
+    s2_ints = np.concatenate([_rand(90, rng), seg, _rand(90, rng)])
+
+    fp = _fingerprinter()
+    side_effects = [
+        (t_ints.tolist(), t_dur),
+        (s1_ints.tolist(), len(s1_ints) / 8.0),
+        (s2_ints.tolist(), len(s2_ints) / 8.0),
+    ]
+    # No min_duration override: exercise the body-scan default.
+    with patch.object(fp, '_generate_full_fingerprint', side_effect=side_effects):
+        result = fp.discover_cross_episode_body(
+            'target.mp3', ['sib1.mp3', 'sib2.mp3'],
+            min_matches=2,
+        )
+
+    assert len(result) >= 1
+    r = result[0]
+    assert r['kind'] == 'recurring'
+    assert (r['end'] - r['start']) < 3.0  # below the old 3s floor
+
+
+# ---------------------------------------------------------------------------
 # min_matches gate: only one sibling shares -> not returned
 # ---------------------------------------------------------------------------
 

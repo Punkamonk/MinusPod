@@ -42,6 +42,7 @@ from config import (
     AUDIO_CUE_XEP_SIMILARITY,
     AUDIO_CUE_XEP_MIN_MATCHES,
     AUDIO_CUE_XEP_MIN_DURATION,
+    AUDIO_CUE_XEP_BODY_MIN_DURATION,
     FINGERPRINT_MATCH_THRESHOLD as MATCH_THRESHOLD,
 )
 
@@ -756,7 +757,7 @@ class AudioFingerprinter:
                                     window_seconds=AUDIO_CUE_FP_WINDOW_SECONDS,
                                     similarity=AUDIO_CUE_XEP_SIMILARITY,
                                     min_matches=AUDIO_CUE_XEP_MIN_MATCHES,
-                                    min_duration=AUDIO_CUE_XEP_MIN_DURATION,
+                                    min_duration=AUDIO_CUE_XEP_BODY_MIN_DURATION,
                                     max_len_s=AUDIO_CUE_FP_MAX_LEN_SECONDS,
                                     target_fingerprint=None):
         """Find recurring audio segments ANYWHERE in the episode body across siblings.
@@ -776,6 +777,8 @@ class AudioFingerprinter:
         Default max_len_s is AUDIO_CUE_FP_MAX_LEN_SECONDS (30s): mid-episode
         stings are short; a 30s cap keeps false-positive body content from being
         surfaced as candidates while still covering realistic sting lengths.
+        Default min_duration is AUDIO_CUE_XEP_BODY_MIN_DURATION (2s), not the 3s
+        intro/outro floor, so recurring 1.5-2.5s ad stings survive the length gate.
         Duplicate candidates across sibling pairs are prevented natively: all
         sibling arrays are passed in a single _find_shared_segments call, whose
         claimed_until mechanism ensures non-overlapping, left-to-right results.

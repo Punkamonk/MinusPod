@@ -1431,8 +1431,12 @@ def _run_cue_cross_episode_scan(
             target_fp = fp._generate_full_fingerprint(target_path)
             if target_fp is None:
                 raise RuntimeError(f'fingerprint decode failed for {target_path}')
+        # A 2-episode set has a single sibling; the default min_matches=2 would
+        # short-circuit to []. Cap it at the sibling count so 2-episode scans work.
+        min_matches = min(AUDIO_CUE_XEP_MIN_MATCHES, len(sibling_paths))
         candidates = fp.discover_cross_episode_body(
             target_path, sibling_paths,
+            min_matches=min_matches,
             target_fingerprint=target_fp,
         )
         db.save_cue_cross_episode_scan_result(podcast_id, episode_set_hash, {

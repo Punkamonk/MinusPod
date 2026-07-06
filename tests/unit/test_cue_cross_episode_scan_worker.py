@@ -91,6 +91,33 @@ def test_error_path_saves_error(tmp_path):
     db.save_cue_cross_episode_scan_result.assert_not_called()
 
 
+def test_min_matches_capped_at_sibling_count(tmp_path):
+    """With a single sibling (a 2-episode set) the worker must reach the
+    discovery call with min_matches=1, not the default 2 (which short-circuits
+    to []). Regression guard for the always-empty 2-episode scan."""
+    import audio_fingerprinter as afp_module
+    from api.cue_templates import _run_cue_cross_episode_scan
+
+    db = _make_db()
+    captured = {}
+
+    def _spy(self, target_path, sibling_paths, **kwargs):
+        captured['min_matches'] = kwargs.get('min_matches')
+        return []
+
+    with patch('api.cue_templates.get_database', return_value=db):
+        with patch.object(afp_module.AudioFingerprinter, 'discover_cross_episode_body', _spy):
+            with patch.object(afp_module.AudioFingerprinter, '_generate_full_fingerprint',
+                              return_value=([0] * 400, 60.0)):
+                with patch.object(afp_module.AudioFingerprinter, 'is_available',
+                                  return_value=True):
+                    _run_cue_cross_episode_scan(
+                        1, 'ee' * 32, 'ep-a', ['ep-a', 'ep-b'],
+                        '/audio/target.mp3', ['/audio/sib.mp3'])
+
+    assert captured['min_matches'] == 1
+
+
 def test_target_is_first_episode(tmp_path):
     """First episode in the sorted-then-passed list is used as target frame."""
     import audio_fingerprinter as afp_module
