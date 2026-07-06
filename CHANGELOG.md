@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.37.1] - 2026-07-06
+
+### Fixed
+
+- Held-for-review cut safety across passes: the verification pass no longer re-detects and cuts inside a first-pass held region, which would destroy the exact audio the hold protects; a recut no longer resurrects a previously-cut ad when a feed later enables cue gating or a duration cap; dismissing a held marker now clears its held state and the pending-review count so the review chip updates; and a rounded-up review ad on a cue-gated feed is held instead of cut when it has no cue evidence.
+- Ad-break merge correctness: the filler-gap merge preserves the merged span's audio-cue evidence so cue-gated feeds still recognize a break containing a cue-backed ad, and skips any merge overlapping a user false-positive correction so a rejected span is never merged back in. Same-sponsor and filler-gap merges now share one bookkeeping path and both keep the higher confidence of the two fragments.
+- The `minContentBetweenAdsSeconds` setting rejects non-finite values (NaN or infinity) instead of persisting them.
+
 ## [2.37.0] - 2026-07-05
 
 ### Added
