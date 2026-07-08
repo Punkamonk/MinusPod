@@ -45,6 +45,7 @@ from llm_capabilities import (
 )
 from llm_client import is_retryable_error, is_llm_api_error, is_rate_limit_error, start_episode_token_tracking, get_episode_token_totals
 from positional_prior import format_prior_hint, load_positional_prior
+from splice_calibration import compute_splice_calibration
 from transcriber import extract_audio_chunk
 from utils.constants import EpisodeStatus
 from utils.episode_paths import episode_relative_path
@@ -430,6 +431,12 @@ def _run_audio_analysis(slug, episode_id, audio_path, segments):
             for err in result.errors:
                 audio_logger.warning(f"[{slug}:{episode_id}] Audio analysis warning: {err}")
 
+        # Attach per-feed calibration (spec 2.2) before persisting so the
+        # stored payload and all downstream consumers see the same dict.
+        # The detector stamps a cold_start placeholder; this replaces it.
+        if result.splice_evidence is not None:
+            result.splice_evidence['calibration'] = compute_splice_calibration(
+                db, slug, exclude_episode_id=episode_id)
         db.save_episode_audio_analysis(slug, episode_id, json.dumps(result.to_dict()))
         return result
     except Exception as e:

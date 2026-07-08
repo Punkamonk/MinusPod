@@ -664,6 +664,31 @@ class EpisodeMixin:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_recent_audio_analyses(self, slug: str,
+                                  exclude_episode_id: Optional[str] = None,
+                                  limit: int = 5,
+                                  min_duration: float = 60) -> List[Dict]:
+        """Get recent processed episodes' audio analysis for splice calibration.
+
+        Returns newest-first rows with episode_id, original_duration and the
+        raw audio_analysis_json. Mirrors get_recent_episode_ad_history.
+        """
+        conn = self.get_connection()
+        cursor = conn.execute(
+            """SELECT e.episode_id, e.original_duration, ed.audio_analysis_json
+               FROM episodes e
+               JOIN podcasts p ON e.podcast_id = p.id
+               JOIN episode_details ed ON ed.episode_id = e.id
+               WHERE p.slug = ? AND e.status = 'processed'
+                     AND e.episode_id != COALESCE(?, '')
+                     AND e.original_duration > ?
+                     AND ed.audio_analysis_json IS NOT NULL
+               ORDER BY COALESCE(e.published_at, e.created_at) DESC
+               LIMIT ?""",
+            (slug, exclude_episode_id, min_duration, limit)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_episodes_by_ids(self, slug: str, episode_ids: List[str]) -> List[Dict]:
         """Get multiple episodes by slug and episode_ids in a single query."""
         if not episode_ids:
