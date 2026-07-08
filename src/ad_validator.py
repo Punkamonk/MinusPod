@@ -571,21 +571,6 @@ class AdValidator:
         payload = (self._audio_analysis or {}).get('splice_evidence') or {}
         return payload.get('calibration', {}).get('status') == 'calibrated'
 
-    def _has_splice_evidence_near(self, ad: Dict) -> bool:
-        """Any splice event inside the span or within the corroboration
-        window of either edge (spec 2.3c)."""
-        lo = ad['start'] - SPLICE_CORROBORATION_WINDOW_SECONDS
-        hi = ad['end'] + SPLICE_CORROBORATION_WINDOW_SECONDS
-        for event in self._splice_events():
-            time = event.get('time')
-            if time is None:
-                continue
-            end_time = event.get('end_time')
-            end_time = end_time if end_time is not None else time
-            if time <= hi and end_time >= lo:
-                return True
-        return False
-
     def _audio_corroboration_source(self, ad: Dict) -> Optional[str]:
         """Return the strongest stored-audio evidence source near the ad's
         boundaries, or None.
