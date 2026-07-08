@@ -291,6 +291,44 @@ def _format_cue_section(*, audio_analysis, ad_start: float, ad_end: float,
                 "supports it, but a marker never forces a cut."
             )
 
+        splice = getattr(audio_analysis, 'splice_evidence', None) or {}
+        near_splice = []
+        for event in splice.get('events', []):
+            time = event.get('time')
+            if time is None:
+                continue
+            end_time = event.get('end_time')
+            end_time = end_time if end_time is not None else time
+            near = any(
+                abs(edge_time - edge) <= bucket_radius
+                for edge in (ad_start, ad_end)
+                for edge_time in (time, end_time)
+            )
+            if near:
+                near_splice.append((event, time, end_time))
+        if near_splice:
+            lines.append("SPLICE EVIDENCE NEAR BOUNDARIES:")
+            for event, time, end_time in near_splice:
+                parts = [f"{event.get('duration_s', 0.0):.1f}s"]
+                if event.get('depth_dbfs') is not None:
+                    parts.append(f"depth {event['depth_dbfs']} dBFS")
+                if event.get('loudness_step_lu') is not None:
+                    parts.append(f"loudness step {event['loudness_step_lu']:+.1f} LU")
+                if event.get('centroid_step_hz') is not None:
+                    parts.append(f"centroid step {event['centroid_step_hz']:+.0f} Hz")
+                if event.get('flatness_step') is not None:
+                    parts.append(f"flatness step {event['flatness_step']:+.2f}")
+                lines.append(
+                    f"  - {event.get('type')} at {time:.1f}s-{end_time:.1f}s "
+                    f"({', '.join(parts)})"
+                )
+            lines.append(
+                "These are encoding artifacts typical of dynamic ad insertion. "
+                "An untranscribed span next to one is likely inserted ad audio, "
+                "not the show going quiet -- weigh that when the transcript "
+                "inside the candidate is sparse or empty."
+            )
+
         # Pre/post-roll position bias: an ad wholly outside the content span
         # (before the first intro or after the last outro) is expected to be
         # promotional, so lean toward keeping it.
