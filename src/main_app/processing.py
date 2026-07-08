@@ -32,6 +32,7 @@ from config import (
     is_cue_backed, is_pending_review,
     resolve_feed_cue_settings,
     resolve_silence_snap_tunables,
+    resolve_tail_retranscribe_tunables,
     resolve_max_ad_duration_override,
     resolve_cue_gated_approval,
 )
@@ -42,6 +43,7 @@ from llm_capabilities import (
 )
 from llm_client import is_retryable_error, is_llm_api_error, is_rate_limit_error, start_episode_token_tracking, get_episode_token_totals
 from positional_prior import format_prior_hint, load_positional_prior
+from transcriber import extract_audio_chunk
 from utils.constants import EpisodeStatus
 from utils.episode_paths import episode_relative_path
 from utils.gpu import get_available_memory_gb, clear_gpu_memory
@@ -229,6 +231,69 @@ def start_background_processing(slug, episode_id, original_url, title, podcast_n
     return True, "started"
 
 
+def _retranscribe_tail_no_vad(slug, episode_id, audio_path, segments,
+                              podcast_name, language_override):
+    """Re-transcribe the untranscribed episode tail without VAD (spec 1.2).
+
+    Whisper's VAD drops quiet DAI post-rolls, so the transcript can end well
+    before the audio does and no LLM window ever sees the tail. When the gap
+    is inside the configured window, re-run just the tail with
+    vad_filter=False and append the segments flagged novad_tail=True.
+    On the API whisper backend the tail is sent as its own upload (no remote
+    VAD switch exists); that is the intended behavior. Returns
+    (segments, tail_added).
+    """
+    if not segments:
+        return segments, False
+    duration = transcriber.get_audio_duration(audio_path)
+    if not duration:
+        return segments, False
+    last_end = segments[-1]['end']
+    gap = duration - last_end
+    tunables = resolve_tail_retranscribe_tunables(db)
+    if gap < tunables['min_seconds'] or gap > tunables['max_seconds']:
+        return segments, False
+
+    audio_logger.info(
+        f"[{slug}:{episode_id}] Untranscribed tail {gap:.1f}s "
+        f"({last_end:.1f}s-{duration:.1f}s); re-transcribing without VAD")
+    chunk_path = extract_audio_chunk(audio_path, last_end, duration)
+    if not chunk_path:
+        audio_logger.warning(
+            f"[{slug}:{episode_id}] Tail chunk extraction failed; skipping")
+        return segments, False
+    try:
+        tail_segments = transcriber.transcribe(
+            chunk_path, podcast_name=podcast_name,
+            language_override=language_override, vad_filter=False)
+    finally:
+        if os.path.exists(chunk_path):
+            try:
+                os.unlink(chunk_path)
+            except OSError:
+                pass
+    if not tail_segments:
+        audio_logger.info(
+            f"[{slug}:{episode_id}] Tail re-transcription produced no segments")
+        return segments, False
+
+    for seg in tail_segments:
+        seg['start'] += last_end
+        seg['end'] += last_end
+        for word in seg.get('words') or []:
+            word['start'] += last_end
+            word['end'] += last_end
+        seg['novad_tail'] = True
+    tail_segments = transcriber.filter_hallucinations(tail_segments)
+    if not tail_segments:
+        return segments, False
+    audio_logger.info(
+        f"[{slug}:{episode_id}] Tail re-transcription added "
+        f"{len(tail_segments)} segment(s) ({tail_segments[0]['start']:.1f}s-"
+        f"{tail_segments[-1]['end']:.1f}s)")
+    return segments + tail_segments, True
+
+
 def _download_and_transcribe(slug, episode_id, episode_url, podcast_name):
     """Pipeline stage: Download audio and get/create transcript segments.
 
@@ -275,6 +340,17 @@ def _download_and_transcribe(slug, episode_id, episode_url, podcast_name):
             audio_path = transcriber.download_audio(episode_url)
             if not audio_path:
                 raise Exception("Failed to download audio")
+        language_override = get_feed_language_override(db, slug)
+        segments, tail_added = _retranscribe_tail_no_vad(
+            slug, episode_id, audio_path, segments, podcast_name,
+            language_override)
+        if tail_added:
+            # save_original_* stores are write-once records of the first
+            # pre-cut transcription (database/episodes.py:410-431 COALESCE);
+            # only the live transcript is refreshed here. The tail is
+            # re-derived on each reprocess, which is idempotent.
+            storage.save_transcript(
+                slug, episode_id, transcriber.segments_to_text(segments))
     else:
         available, cdn_error = transcriber.check_audio_availability(episode_url)
         if not available:
@@ -309,6 +385,10 @@ def _download_and_transcribe(slug, episode_id, episode_url, podcast_name):
 
         duration_min = segments[-1]['end'] / 60 if segments else 0
         audio_logger.info(f"[{slug}:{episode_id}] Transcription complete: {len(segments)} segments, {duration_min:.1f} min")
+
+        segments, _tail_added = _retranscribe_tail_no_vad(
+            slug, episode_id, audio_path, segments, podcast_name,
+            language_override)
 
         transcript_text = transcriber.segments_to_text(segments)
         storage.save_transcript(slug, episode_id, transcript_text)
