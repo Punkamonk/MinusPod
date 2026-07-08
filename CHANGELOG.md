@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   having "no ad signals in transcript" when audio evidence corroborates them
   (for untranscribed audio, Whisper never produced transcript signals, so the
   condition was always true); uncorroborated tail markers are held for review
-  instead of cut silently.
+  instead of being cut silently.
 - Reviewer verdicts that contradict their own reasoning (verdict confirmed or
   adjust with reasoning like "no advertisement content") hold the marker for
   review instead of auto-cutting. Reviewer LLM failures keep the documented
