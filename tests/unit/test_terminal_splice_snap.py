@@ -84,6 +84,23 @@ def test_marker_coverage_allows_span_without_promo_text():
     assert out[0]['start'] == 4160.9
 
 
+def test_reason_derived_sponsor_allows_brand_only_span():
+    # The extension span is a bare brand-name read (no promo phrase / URL) and
+    # is NOT covered by any other marker. The marker range itself is
+    # untranscribed, so the sponsor set is harvested solely from the marker's
+    # reason ("Vention sponsor read" -> {"vention"}). extract_sponsor_names
+    # reads that reason arg, so the brand match allows the snap.
+    segments = [{'start': 4161.0, 'end': 4171.5,
+                 'text': 'Vention is the platform we love for your team'}]
+    marker = {'start': 4172.0, 'end': _EOF, 'confidence': 0.9,
+              'reason': 'Vention sponsor read',
+              'detection_stage': 'text_pattern'}
+    events = [_event(4160.9, -88.0)]
+    out = snap_terminal_ad_to_splice([marker], segments, events, _EOF, _WINDOW)
+    assert out[0]['start'] == 4160.9
+    assert out[0]['terminal_snap']['original_start'] == 4172.0
+
+
 def test_only_silence_event_types_considered():
     segments, marker, _ = _fixture()
     step_only = [{'time': 4160.9, 'end_time': 4162.3, 'type': 'loudness_step',
