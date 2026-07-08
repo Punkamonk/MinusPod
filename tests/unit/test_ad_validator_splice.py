@@ -155,3 +155,41 @@ class TestSpliceVeto:
         validator = AdValidator(episode_duration=3600.0)
         result = validator.validate([dict(self._AD)])
         assert result.ads[0]['validation']['decision'] == Decision.ACCEPT.value
+
+    def test_dai_transition_pair_near_edge_exempts_from_veto(self):
+        # Finding 1: Rule 3 must gate on full corroboration (not just splice events).
+        # A long claude cut with a DAI transition pair near an edge is corroborated
+        # and must not be vetoed, even when splice_evidence.events is empty.
+        analysis = {
+            'signals': [{
+                'start': 1798.0, 'end': 1892.0,
+                'signal_type': 'dai_transition_pair',
+                'confidence': 0.95, 'duration': 94.0,
+                'details': {'avg_delta_db': 14.0, 'start_direction': 'down',
+                            'start_delta_db': 14.2, 'end_delta_db': 13.8,
+                            'start_from_lufs': -16.0, 'start_to_lufs': -30.2,
+                            'end_from_lufs': -30.0, 'end_to_lufs': -16.2},
+            }],
+            'splice_evidence': {'version': 1, 'events': [],
+                                'calibration': {'status': 'calibrated'}},
+        }
+        result = self._validate(analysis)
+        ad = result.ads[0]
+        assert ad['validation']['decision'] == Decision.ACCEPT.value
+        assert 'held_for_review' not in ad
+
+    def test_dai_differential_region_overlap_exempts_from_veto(self):
+        # Finding 1: a dai_differential region overlapping the ad is corroboration
+        # and must also exempt it from the splice veto.
+        analysis = {
+            'splice_evidence': {'version': 1, 'events': [],
+                                'calibration': {'status': 'calibrated'}},
+            'dai_differential': {'status': 'ok', 'regions': [
+                {'start_s': 1790.0, 'end_s': 1900.0,
+                 'kind': 'differential', 'corr': 0.0}
+            ]},
+        }
+        result = self._validate(analysis)
+        ad = result.ads[0]
+        assert ad['validation']['decision'] == Decision.ACCEPT.value
+        assert 'held_for_review' not in ad

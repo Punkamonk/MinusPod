@@ -16,7 +16,7 @@ os.environ.setdefault('MINUSPOD_DATA_DIR', _test_data_dir)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 import ad_validator
-from ad_validator import AdValidator, ValidationResult
+from ad_validator import AdValidator, Decision, ValidationResult
 from config import (
     HOLD_REASON_UNCORROBORATED_TAIL, count_pending_review, is_pending_review,
 )
@@ -162,3 +162,38 @@ def test_corroborated_tail_marker_is_cut_not_pending():
     assert ad['corroborated_by'] == 'transition_pair'
     assert is_pending_review(ad) is False
     assert count_pending_review(result.ads) == 0
+
+
+# Segments that end BEFORE the marker start so ad_text is empty.
+# _verify_in_transcript returns early (no clamp), confidence stays 0.80
+# (0.75 + 0.05 POST_ROLL boost), and _make_decision returns ACCEPT.
+# Finding 2: Rule 4 must also hold ACCEPT-decision uncorroborated tails.
+_EARLY_SEGMENTS = [
+    {'start': 10400.0, 'end': 10500.0,
+     'text': 'That is our show for today everyone.'},
+]
+
+
+def test_uncorroborated_accept_tail_held_for_review():
+    """Finding 2 runtime repro: segments end before marker start, empty ad_text,
+    no clamping -> confidence 0.80 -> ACCEPT. Without the fix, Rule 4 only fired
+    on REVIEW; the marker shipped silently (TWiT-class DAI post-roll)."""
+    validator = AdValidator(episode_duration=10600.0, segments=_EARLY_SEGMENTS)
+    result = validator.validate([_tail_marker()])
+    ad = result.ads[0]
+    assert ad['validation']['adjusted_confidence'] == pytest.approx(0.80)
+    assert ad['validation']['decision'] == Decision.REVIEW.value
+    assert ad.get('held_for_review') is True
+    assert ad.get('hold_reason') == HOLD_REASON_UNCORROBORATED_TAIL
+
+
+def test_corroborated_accept_tail_still_cut():
+    """Finding 2: a corroborated tail (transition pair) must cut even when
+    the empty-text path skips setting corroborated_by. Rule 4 calls
+    _audio_corroboration_source directly so it catches stored evidence."""
+    validator = AdValidator(episode_duration=10600.0, segments=_EARLY_SEGMENTS)
+    result = validator.validate([_tail_marker()],
+                                audio_analysis=_tail_transition_analysis())
+    ad = result.ads[0]
+    assert ad['validation']['decision'] == Decision.ACCEPT.value
+    assert ad.get('held_for_review') is not True

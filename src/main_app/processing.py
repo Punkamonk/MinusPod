@@ -449,6 +449,21 @@ def _run_audio_analysis(slug, episode_id, audio_path, segments):
         return None
 
 
+def _make_validator_audio_analysis(audio_analysis_result, dai_differential):
+    """Build the audio_analysis dict passed to AdValidator.
+
+    Carries dai_differential even when Layer 2 (audio analysis) returned None
+    so that a Layer 2 failure does not suppress Layer 3 (cross-fetch
+    differential) corroboration. Mirrors the recut path which manually merges
+    dai_differential into the stored audio_analysis dict.
+    """
+    if audio_analysis_result is not None:
+        return audio_analysis_result.to_dict()
+    if dai_differential is not None:
+        return {'dai_differential': dai_differential}
+    return None
+
+
 def _run_differential_fetch(slug, episode_id, episode_url, audio_path, podcast_id):
     """Pipeline stage: cross-fetch differential (Layer 3, per-feed opt-in).
 
@@ -465,9 +480,6 @@ def _run_differential_fetch(slug, episode_id, episode_url, audio_path, podcast_i
         work_dir = tempfile.mkdtemp(prefix='dai_diff_')
         try:
             result = fetch_and_diff(episode_url, audio_path, work_dir)
-        except ProcessingCancelled:
-            # Cooperative cancellation must propagate, never degrade to 'error'.
-            raise
         except Exception as e:
             # fetch_and_diff traps expected failures itself; this guards the rest.
             audio_logger.warning(f"[{slug}:{episode_id}] Differential fetch failed: {e}")
@@ -485,8 +497,6 @@ def _run_differential_fetch(slug, episode_id, episode_url, audio_path, podcast_i
             f"[{slug}:{episode_id}] Differential fetch: status={result.get('status')} "
             f"differential_regions={diff_count}")
         return result
-    except ProcessingCancelled:
-        raise
     except Exception as e:
         # Outer non-fatal boundary: the flag read, status update, or mkdtemp
         # can raise outside the inner guards; the episode must not fail here.
@@ -497,7 +507,7 @@ def _run_differential_fetch(slug, episode_id, episode_url, audio_path, podcast_i
 def _detect_ads_first_pass(ctx, segments, audio_path,
                             skip_patterns, audio_analysis_result,
                             progress_callback, cancel_event=None,
-                            positional_prior_hint=""):
+                            positional_prior_hint="", dai_differential=None):
     """Pipeline stage: Run first-pass Claude ad detection.
 
     Returns (first_pass_ads, first_pass_count, ad_result).
@@ -513,7 +523,7 @@ def _detect_ads_first_pass(ctx, segments, audio_path,
         skip_patterns=skip_patterns,
         progress_callback=progress_callback,
         audio_analysis=audio_analysis_result,
-        dai_differential=getattr(audio_analysis_result, 'dai_differential', None),
+        dai_differential=dai_differential,
         cancel_event=cancel_event,
         ctx=ctx,
         positional_prior_hint=positional_prior_hint,
@@ -2048,6 +2058,9 @@ def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
         min_cut_confidence=min_cut_confidence,
         max_ad_duration_override=max_ad_duration_override,
         cue_gate_enabled=cue_gate_enabled,
+        splice_veto_enabled=db.get_setting_bool('splice_veto_enabled', default=True),
+        veto_min_cut_seconds=db.get_setting_float('veto_min_cut_seconds',
+                                                  VETO_MIN_CUT_SECONDS),
     )
     validation_result = validator.validate(all_ads, audio_analysis=audio_analysis)
 
@@ -2343,6 +2356,11 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                 # Ride along on the analysis result so the detector prompt and
                 # the validator's audio_analysis dict see the differential.
                 audio_analysis_result.dai_differential = dai_differential
+            # Build the dict the validator receives; carry dai_differential even
+            # when Layer 2 (audio analysis) failed so Layer 3 is decoupled from
+            # Layer 2 success.
+            _val_audio_analysis = _make_validator_audio_analysis(
+                audio_analysis_result, dai_differential)
             # Count audio-cue signals (issue #350) for the stats dashboard.
             audio_cue_count = (len(audio_analysis_result.get_signals_by_type('audio_cue'))
                                if audio_analysis_result else 0)
@@ -2392,6 +2410,7 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                 cancel_event=cancel_event,
                 positional_prior_hint=format_prior_hint(positional_prior,
                                                         episode_duration),
+                dai_differential=dai_differential,
             )
             _check_cancel(cancel_event, slug, episode_id)
 
@@ -2409,8 +2428,7 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                 skip_patterns=skip_patterns, positional_prior=positional_prior,
                 max_ad_duration_override=max_ad_duration_override,
                 cue_gate_enabled=cue_gate_enabled,
-                audio_analysis=(audio_analysis_result.to_dict()
-                                if audio_analysis_result else None),
+                audio_analysis=_val_audio_analysis,
             )
             _check_cancel(cancel_event, slug, episode_id)
 

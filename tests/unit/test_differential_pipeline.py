@@ -96,3 +96,31 @@ def test_result_rides_on_analysis_to_dict():
     assert 'dai_differential' not in r.to_dict()
     r.dai_differential = _RESULT
     assert r.to_dict()['dai_differential'] == _RESULT
+
+
+class TestMakeValidatorAudioAnalysis:
+    """Finding 3: Layer 3 differential must reach the validator and detection
+    even when Layer 2 (audio analysis) returns None."""
+
+    def test_none_result_with_diff_returns_dict_carrying_diff(self):
+        diff = {'status': 'ok', 'regions': [
+            {'start_s': 10.0, 'end_s': 20.0, 'kind': 'differential', 'corr': 0.0}
+        ]}
+        result = processing._make_validator_audio_analysis(None, diff)
+        assert result == {'dai_differential': diff}
+
+    def test_none_result_none_diff_returns_none(self):
+        assert processing._make_validator_audio_analysis(None, None) is None
+
+    def test_non_none_result_returns_to_dict(self):
+        r = AudioAnalysisResult()
+        r.dai_differential = _RESULT
+        out = processing._make_validator_audio_analysis(r, _RESULT)
+        assert out['dai_differential'] == _RESULT
+
+    def test_detect_first_pass_accepts_dai_differential_kwarg(self):
+        # After the fix, _detect_ads_first_pass has a dai_differential= param
+        # so the outer pipeline can pass Layer 3 data when Layer 2 is None.
+        import inspect
+        sig = inspect.signature(processing._detect_ads_first_pass)
+        assert 'dai_differential' in sig.parameters

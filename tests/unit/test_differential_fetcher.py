@@ -1,8 +1,9 @@
 """Unit tests for differential_fetcher UA pool and DAI-likelihood heuristic (Layer 3)."""
 import os
 import sys
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import numpy as np
 import requests
 import requests.exceptions
 
@@ -155,3 +156,30 @@ def test_fetch_and_diff_runtime_error_is_nonfatal(tmp_path):
     assert result['status'] == 'error'
     assert 'SVD did not converge' in result['error']
     assert not os.path.exists(os.path.join(str(tmp_path), 'refetch_audio'))
+
+
+def test_decode_pcm_uses_tracked_run(tmp_path):
+    """Finding 7: _decode_pcm must use tracked_run so worker SIGTERM propagates
+    to the in-flight ffmpeg child via terminate_all(), preventing orphaned procs."""
+    import differential_fetcher as df
+
+    # Before the fix, tracked_run is not imported in the module.
+    assert hasattr(df, 'tracked_run'), (
+        "_decode_pcm must import tracked_run from utils.subprocess_registry"
+    )
+
+    def _fake_tracked_run(cmd, **kw):
+        # Write one s16le zero-sample so np.fromfile succeeds.
+        pcm_path = cmd[-1]
+        with open(pcm_path, 'wb') as fh:
+            fh.write(b'\x00\x00')
+        return MagicMock(returncode=0)
+
+    with patch.object(df, 'tracked_run', side_effect=_fake_tracked_run) as mock_tr:
+        data = df._decode_pcm(str(tmp_path / 'audio.mp3'), str(tmp_path), 'test')
+
+    mock_tr.assert_called_once()
+    cmd = mock_tr.call_args.args[0]
+    assert cmd[0] == 'ffmpeg'
+    assert 'pcm_s16le' in cmd
+    assert isinstance(data, np.ndarray)

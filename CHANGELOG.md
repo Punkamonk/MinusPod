@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The cut renderer kept several seconds more audio than the markers
   specified; processed duration now matches original minus applied cuts
   within 1 second.
+- Per-feed splice threshold filtering (digital_silence_min_s,
+  deep_silence_min_s) is not wired: the calibration module computes and
+  stores these values per episode, but nothing reads them at detection
+  time. Consumers check calibration.status only. Threshold-based event
+  filtering is left for a later change.
 
 ## [2.39.0] - 2026-07-06
 

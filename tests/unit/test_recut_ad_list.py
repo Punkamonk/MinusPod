@@ -203,6 +203,41 @@ def test_build_recut_held_fp_is_uncut_reject(monkeypatch):
     assert not all_ads[0].get('held_for_review'), "FP path must clear stale held flag"
 
 
+def test_build_recut_respects_splice_veto_disabled(monkeypatch):
+    """Finding 6: recut must read splice_veto_enabled from DB settings, not
+    silently use the code default (True). When the operator disabled the veto,
+    an evidence-less long claude cut must be cut on recut, not held."""
+    # 90s claude cut: calibrated feed, no splice events -> would be vetoed if
+    # splice_veto_enabled defaults to True (the bug). With the setting read as
+    # False it must not be held.
+    ads = [{'start': 1800.0, 'end': 1890.0, 'confidence': 0.92,
+            'detection_stage': 'claude',
+            'reason': 'Vrbo vacation rental read with booking details'}]
+    analysis = {'splice_evidence': {'version': 1, 'events': [],
+                                    'calibration': {'status': 'calibrated'}}}
+    _stub_recut_db(monkeypatch, ads)
+    monkeypatch.setattr(processing.db, 'get_episode_audio_analysis',
+                        lambda s, e: json.dumps(analysis))
+    monkeypatch.setattr(processing.db, 'get_setting_bool',
+                        lambda k, **kw: (False if k == 'splice_veto_enabled'
+                                         else kw.get('default', False)))
+    monkeypatch.setattr(processing.db, 'get_setting_float',
+                        lambda k, default=None: default)
+    try:
+        monkeypatch.setattr(processing.db, 'get_episode_dai_differential',
+                            lambda s, e: None)
+    except AttributeError:
+        pass
+    segments = [{'start': 1800.0, 'end': 1890.0, 'text': 'vacation rental'}]
+    ads_to_remove, all_ads = processing._build_recut_ad_list(
+        'slug', 'ep', segments, 3600.0, '', 0.80
+    )
+    assert len(ads_to_remove) == 1, (
+        "splice_veto_enabled=False must not veto the cut on recut"
+    )
+    assert all_ads[0].get('hold_reason') != 'no_splice_evidence'
+
+
 def test_build_recut_held_nothing_stays_held_uncut(monkeypatch):
     # held ad + no correction -> re-held by validator -> gate keeps it
     ads = [{'start': 100.0, 'end': 400.0, 'confidence': 0.95,

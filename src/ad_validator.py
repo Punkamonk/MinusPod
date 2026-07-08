@@ -721,22 +721,25 @@ class AdValidator:
                 and duration >= self.veto_min_cut_seconds
                 and ad.get('detection_stage') in ('claude', 'text_pattern')
                 and self._splice_calibrated()
-                and not self._has_splice_evidence_near(ad)):
+                and self._audio_corroboration_source(ad) is None):
             self._mark_held(ad, flags, HOLD_REASON_NO_SPLICE)
             return Decision.REVIEW
 
-        # Rule 4: an uncorroborated vad_gap marker at the episode tail that
-        # stays REVIEW must surface in the pending-review queue instead of
-        # shipping silently (TWiT 1091: untranscribed DAI post-roll ended
-        # REVIEW with pendingReviewCount=0). Calls the corroboration helper
-        # directly so tails with no transcript text in range (where the
-        # clamp branch never runs) still count stored evidence.
-        if (decision == Decision.REVIEW
+        # Rule 4: an uncorroborated vad_gap marker at the episode tail must
+        # surface in the pending-review queue instead of shipping silently.
+        # Fires on REVIEW (clamp already routed it there) AND on ACCEPT (the
+        # empty-text early-return left confidence unclamped; 0.80 >= threshold
+        # = ACCEPT but there is no stored evidence to justify the cut). A
+        # corroborated tail (source not None) cuts regardless of decision.
+        # Calls the corroboration helper directly so tails with no transcript
+        # text in range still count stored audio evidence.
+        if (decision in (Decision.REVIEW, Decision.ACCEPT)
                 and ad.get('detection_stage') == 'vad_gap'
                 and self.episode_duration > 0
                 and self.episode_duration - ad['end'] <= self.TAIL_EOF_WINDOW_S
                 and self._audio_corroboration_source(ad) is None):
             self._mark_held(ad, flags, HOLD_REASON_UNCORROBORATED_TAIL)
+            return Decision.REVIEW
 
         return decision
 

@@ -48,6 +48,12 @@ def build_calibration(rows) -> Dict:
 
     rows: dicts with original_duration and audio_analysis_json (newest-first,
     from db.get_recent_audio_analyses).
+
+    The returned thresholds (digital_silence_min_s, deep_silence_min_s) are
+    stored in the audio analysis payload as observability data and are visible
+    via the API. They are NOT currently applied to event filtering: consumers
+    gate on calibration.status only (spec 2.3c). Per-feed duration threshold
+    suppression is deferred to a future reviewed change.
     """
     total_hours = 0.0
     durations_by_type = {t: [] for t in _SILENCE_TYPES}

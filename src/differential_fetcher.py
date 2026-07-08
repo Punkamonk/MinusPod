@@ -14,16 +14,15 @@ fingerprint and UA + natural time spacing is the only variation available.
 import logging
 import os
 import random
-import subprocess
 
 import numpy as np
 
 from audio_analysis.silence_detector import SilenceDetector
-from cancel import ProcessingCancelled
 from config import BROWSER_USER_AGENT, HTTP_MAX_REDIRECTS_FEED
 from utils.audio import get_audio_duration
 from utils.http import safe_url_for_log
 from utils.safe_http import URLTrust, safe_get, stream_to_file_capped
+from utils.subprocess_registry import tracked_run
 
 # Realistic podcast-client UA strings for the refetch pool.
 REFETCH_USER_AGENTS = (
@@ -100,7 +99,7 @@ def _decode_pcm(audio_path: str, work_dir: str, tag: str) -> np.ndarray:
     """Decode audio to 8kHz mono float32 in [-1, 1]."""
     pcm_path = os.path.join(work_dir, f'diff_{tag}.pcm')
     try:
-        subprocess.run(
+        tracked_run(
             ['ffmpeg', '-y', '-i', audio_path, '-ac', '1', '-ar', str(PCM_RATE),
              '-f', 's16le', '-acodec', 'pcm_s16le', pcm_path],
             check=True, capture_output=True, timeout=DECODE_TIMEOUT_S)
@@ -283,12 +282,13 @@ REFETCH_SIZE_FACTOR = 1.5
 
 
 def fetch_and_diff(enclosure_url: str, run_file_path: str, work_dir: str,
-                   timeout_s: int = 900) -> dict:
+                   timeout_s: int = 300) -> dict:
     """Refetch the enclosure with a rotated podcast-client UA and diff it
     against the run file.
 
     Never raises: every failure returns status 'error' so the pipeline can
-    record it and continue.
+    record it and continue. timeout_s is the per-read timeout passed to
+    safe_get; matched to the primary download's 300s cap.
     """
     ua = pick_refetch_user_agent(BROWSER_USER_AGENT)
     meta = {'ua': ua, 'size': None, 'duration': None}
@@ -315,9 +315,6 @@ def fetch_and_diff(enclosure_url: str, run_file_path: str, work_dir: str,
         aligned = align_and_diff(run_file_path, refetch_path, work_dir)
         return {'status': aligned['status'], 'regions': aligned['regions'],
                 'refetch_meta': meta, 'error': None}
-    except ProcessingCancelled:
-        # Cooperative cancellation must propagate, never degrade to 'error'.
-        raise
     except Exception as e:
         # Never-raises boundary: any failure (network, decode, numpy internals)
         # degrades to 'error' so the pipeline records it and continues.
