@@ -91,6 +91,9 @@ class AudioAnalysisResult:
     # Resolved silence-snap tunables from the analyzer pass; set when silence
     # detection ran so processing.py can reuse them without a second DB read.
     silence_tunables: Optional[Dict[str, Any]] = None
+    # Splice-evidence payload (spec 2.1): {'version', 'events', 'calibration'}.
+    # None when the detector did not run. Evidence only -- never cuts alone.
+    splice_evidence: Optional[Dict[str, Any]] = None
 
     def get_signals_by_type(self, signal_type: str) -> List[AudioSegmentSignal]:
         """Get all signals of a specific type."""
@@ -111,4 +114,6 @@ class AudioAnalysisResult:
         # Only emit silence_spans when present (same rationale as cue_near_misses).
         if self.silence_spans:
             out['silence_spans'] = self.silence_spans
+        if self.splice_evidence is not None:
+            out['splice_evidence'] = self.splice_evidence
         return out
