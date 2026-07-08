@@ -45,3 +45,27 @@ def test_merge_prefers_differential_stage_and_confidence():
     assert merged[0]['detection_stage'] == 'dai_differential'
     assert merged[0]['confidence'] == 0.95
     assert merged[0]['end'] == 160.0
+
+
+def test_merge_nulls_claude_sponsor_when_dai_reason_is_longer():
+    # PIN current behavior: the merge keeps reason+sponsor as a consistent pair
+    # from the member with the LONGER reason (fingerprint-mirror heuristic). The
+    # DAI fixed reason is 50 chars, so a shorter Claude reason loses -- and the
+    # Claude ad's real sponsor is dropped with it (sponsor becomes None). This
+    # is the spec-mandated pattern; the test exists to make the loss visible.
+    detector = AdDetector(api_key='test-key')
+    merged = detector._merge_detection_results([
+        {'start': 100.0, 'end': 150.0, 'confidence': 0.70,
+         'reason': 'BetterHelp sponsor read', 'sponsor': 'BetterHelp',
+         'detection_stage': 'claude'},
+        {'start': 102.0, 'end': 160.0, 'confidence': 0.95,
+         'reason': 'Dynamically inserted: audio differs across fetches',
+         'sponsor': None, 'detection_stage': 'dai_differential'},
+    ])
+    assert len(merged) == 1
+    assert merged[0]['detection_stage'] == 'dai_differential'
+    assert merged[0]['confidence'] == 0.95
+    # The real Claude sponsor is nulled because the DAI reason (50 chars) wins
+    # the length heuristic and carries its own sponsor (None) with it.
+    assert merged[0]['sponsor'] is None
+    assert merged[0]['reason'] == 'Dynamically inserted: audio differs across fetches'

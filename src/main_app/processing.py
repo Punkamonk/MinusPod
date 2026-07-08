@@ -2038,6 +2038,7 @@ def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
                     audio_analysis = {}
                 audio_analysis['dai_differential'] = dd_parsed
     except (TypeError, ValueError, AttributeError):
+        # AttributeError: db is None or method absent on older db
         pass
 
     validator = AdValidator(

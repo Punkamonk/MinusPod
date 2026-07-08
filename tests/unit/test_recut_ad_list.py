@@ -381,6 +381,92 @@ def test_gate_review_fallthrough_no_cue_cut_when_gate_off():
     assert not ad.get('held_for_review')
 
 
+def _spy_validate(monkeypatch, captured):
+    """Wrap AdValidator.validate to record the audio_analysis it receives,
+    then delegate to the real implementation so downstream code is unchanged."""
+    import ad_validator
+    orig = ad_validator.AdValidator.validate
+
+    def spy(self, ads_arg, audio_analysis=None):
+        captured['called'] = True
+        captured['audio_analysis'] = audio_analysis
+        return orig(self, ads_arg, audio_analysis=audio_analysis)
+
+    monkeypatch.setattr(ad_validator.AdValidator, 'validate', spy)
+
+
+def test_build_recut_merges_dai_differential_into_audio_analysis(monkeypatch):
+    # Happy path: db returns valid dai_differential_json -> the dict passed to
+    # validate carries audio_analysis['dai_differential'] with the regions.
+    ads = [{'start': 100.0, 'end': 160.0, 'confidence': 0.95,
+            'reason': 'promotional read', 'sponsor': 'X'}]
+    _stub_recut_db(monkeypatch, ads)
+    dd = {'status': 'ok', 'regions': [
+        {'start_s': 100.0, 'end_s': 160.0, 'kind': 'differential', 'corr': 0.0}]}
+    monkeypatch.setattr(processing.db, 'get_episode_audio_analysis', lambda s, e: None)
+    monkeypatch.setattr(processing.db, 'get_episode_dai_differential',
+                        lambda s, e: json.dumps(dd))
+    captured = {}
+    _spy_validate(monkeypatch, captured)
+    processing._build_recut_ad_list('slug', 'ep', [], 3600.0, '', 0.80)
+    assert captured['called']
+    assert captured['audio_analysis'] is not None
+    assert 'dai_differential' in captured['audio_analysis']
+    regions = captured['audio_analysis']['dai_differential']['regions']
+    assert regions[0]['kind'] == 'differential'
+    assert regions[0]['start_s'] == 100.0
+
+
+def test_build_recut_dai_differential_none_does_not_crash(monkeypatch):
+    # db.get_episode_dai_differential returns None -> recut proceeds, validate
+    # still called, no dai_differential key on the merged dict.
+    ads = [{'start': 100.0, 'end': 160.0, 'confidence': 0.95,
+            'reason': 'promotional read', 'sponsor': 'X'}]
+    _stub_recut_db(monkeypatch, ads)
+    monkeypatch.setattr(processing.db, 'get_episode_audio_analysis', lambda s, e: None)
+    monkeypatch.setattr(processing.db, 'get_episode_dai_differential', lambda s, e: None)
+    captured = {}
+    _spy_validate(monkeypatch, captured)
+    processing._build_recut_ad_list('slug', 'ep', [], 3600.0, '', 0.80)
+    assert captured['called']
+    assert captured['audio_analysis'] is None
+
+
+def test_build_recut_dai_differential_attribute_error_does_not_crash(monkeypatch):
+    # db is None or the method is absent on an older db -> AttributeError is
+    # swallowed, recut proceeds, validate still called.
+    ads = [{'start': 100.0, 'end': 160.0, 'confidence': 0.95,
+            'reason': 'promotional read', 'sponsor': 'X'}]
+    _stub_recut_db(monkeypatch, ads)
+    monkeypatch.setattr(processing.db, 'get_episode_audio_analysis', lambda s, e: None)
+
+    def _raise(s, e):
+        raise AttributeError("'NoneType' object has no attribute 'get_episode_dai_differential'")
+
+    monkeypatch.setattr(processing.db, 'get_episode_dai_differential', _raise)
+    captured = {}
+    _spy_validate(monkeypatch, captured)
+    processing._build_recut_ad_list('slug', 'ep', [], 3600.0, '', 0.80)
+    assert captured['called']
+    assert captured['audio_analysis'] is None
+
+
+def test_build_recut_dai_differential_malformed_json_does_not_crash(monkeypatch):
+    # Malformed JSON string -> ValueError swallowed, recut proceeds, validate
+    # still called, no dai_differential key.
+    ads = [{'start': 100.0, 'end': 160.0, 'confidence': 0.95,
+            'reason': 'promotional read', 'sponsor': 'X'}]
+    _stub_recut_db(monkeypatch, ads)
+    monkeypatch.setattr(processing.db, 'get_episode_audio_analysis', lambda s, e: None)
+    monkeypatch.setattr(processing.db, 'get_episode_dai_differential',
+                        lambda s, e: '{not valid json')
+    captured = {}
+    _spy_validate(monkeypatch, captured)
+    processing._build_recut_ad_list('slug', 'ep', [], 3600.0, '', 0.80)
+    assert captured['called']
+    assert captured['audio_analysis'] is None
+
+
 def test_generate_assets_skips_chapters_when_disabled(monkeypatch):
     # Recut path: no AI chapter call, no chapter write.
     counters = {}
