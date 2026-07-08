@@ -49,6 +49,14 @@ def test_window_renders_steps_with_magnitudes():
     assert '+440 Hz' in out
 
 
+def test_window_silence_event_missing_depth_omits_none_literal():
+    result = _result([_event(30.0, depth=None)])
+    out = AudioEnforcer().format_for_window(result, 0.0, 60.0)
+    assert 'digital silence at 30.0s-31.0s' in out
+    assert 'None' not in out
+    assert 'depth unknown' in out
+
+
 def test_window_without_events_or_signals_is_empty():
     out = AudioEnforcer().format_for_window(_result([]), 0.0, 60.0)
     assert out == ''

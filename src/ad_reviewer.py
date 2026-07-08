@@ -300,9 +300,9 @@ def _format_cue_section(*, audio_analysis, ad_start: float, ad_end: float,
             end_time = event.get('end_time')
             end_time = end_time if end_time is not None else time
             near = any(
-                abs(edge_time - edge) <= bucket_radius
-                for edge in (ad_start, ad_end)
-                for edge_time in (time, end_time)
+                abs(event_time - ad_edge) <= bucket_radius
+                for ad_edge in (ad_start, ad_end)
+                for event_time in (time, end_time)
             )
             if near:
                 near_splice.append((event, time, end_time))

@@ -96,10 +96,11 @@ def _splice_lines(audio_analysis, window_start, window_end):
         etype = event.get('type')
         if etype in ('digital_silence', 'deep_silence'):
             label = etype.replace('_', ' ')
+            depth = event.get('depth_dbfs')
+            depth_str = f"depth {depth} dBFS" if depth is not None else "depth unknown"
             lines.append(
                 f"- Splice evidence: {label} at {start:.1f}s-{end:.1f}s "
-                f"({event.get('duration_s', 0.0):.1f}s, "
-                f"depth {event.get('depth_dbfs')} dBFS)"
+                f"({event.get('duration_s', 0.0):.1f}s, {depth_str})"
             )
         elif etype == 'loudness_step' and event.get('loudness_step_lu') is not None:
             lines.append(
