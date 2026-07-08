@@ -103,6 +103,25 @@ def test_hallucination_filter_can_drop_whole_tail(tmp_path):
     assert len(merged) == 1
 
 
+def test_transcribe_failure_is_non_fatal_and_cleans_up_chunk(tmp_path):
+    chunk = tmp_path / 'tail.wav'
+    chunk.write_bytes(b'wav')
+    segments = [_seg(0.0, 100.0, 'show content')]
+    mock_t = MagicMock()
+    mock_t.get_audio_duration.return_value = 142.4
+    mock_t.transcribe.side_effect = RuntimeError('model OOM')
+    with patch.object(processing, 'transcriber', mock_t), \
+         patch.object(processing, 'extract_audio_chunk',
+                      return_value=str(chunk)), \
+         patch.object(processing, 'resolve_tail_retranscribe_tunables',
+                      return_value=_TUNABLES):
+        merged, added = processing._retranscribe_tail_no_vad(
+            'show', 'ep1', '/audio.mp3', segments, 'Show', None)
+    assert added is False
+    assert merged == segments
+    assert not chunk.exists()  # cleanup still runs on failure
+
+
 def test_fresh_transcription_appends_tail_before_persist():
     base = [_seg(0.0, 100.0, 'show content')]
     extended = base + [dict(_seg(100.5, 120.0, 'post-roll'), novad_tail=True)]

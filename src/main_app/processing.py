@@ -266,6 +266,12 @@ def _retranscribe_tail_no_vad(slug, episode_id, audio_path, segments,
         tail_segments = transcriber.transcribe(
             chunk_path, podcast_name=podcast_name,
             language_override=language_override, vad_filter=False)
+    except Exception as e:
+        # Tail pass is best-effort: a failure here must not kill the episode.
+        audio_logger.warning(
+            f"[{slug}:{episode_id}] Tail re-transcription failed; "
+            f"proceeding without tail: {e}")
+        return segments, False
     finally:
         if os.path.exists(chunk_path):
             try:
