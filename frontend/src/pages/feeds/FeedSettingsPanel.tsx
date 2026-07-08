@@ -547,6 +547,38 @@ function FeedSettingsPanel({ feed, slug }: Props) {
             </div>
           </div>
 
+          {/* Cross-fetch differential opt-in (Layer 3) */}
+          <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
+            <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-0.5">Cross-fetch diff:</span>
+            <div className="flex flex-col gap-1 flex-1 min-w-0">
+              <label className="flex items-center gap-2 cursor-pointer flex-wrap">
+                <ToggleSwitch
+                  checked={feed.differentialFetchEnabled === true}
+                  onChange={(v) => updateMutation.mutate({ differentialFetchEnabled: v })}
+                  disabled={updateMutation.isPending}
+                  ariaLabel="Fetch each episode twice to find inserted ads"
+                />
+                <span>Fetch each episode twice to find inserted ads</span>
+                {feed.daiLikely && (
+                  <span
+                    className="px-2 py-0.5 rounded text-xs font-medium bg-rose-500/20 text-rose-600 dark:text-rose-400"
+                    title="This feed's audio URLs route through a known dynamic ad insertion service."
+                  >
+                    DAI likely
+                  </span>
+                )}
+              </label>
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Downloads a second copy of each new episode with a different client signature and compares them. Audio that differs between fetches was inserted dynamically. Doubles this feed's download count in the publisher's stats.
+              </p>
+              {feed.daiLikely && feed.differentialFetchEnabled !== true && (
+                <p className="text-xs text-muted-foreground">
+                  Looks like this feed uses dynamic ad insertion. Cross-fetch diff can help confirm it.
+                </p>
+              )}
+            </div>
+          </div>
+
           {/* Per-feed transcription language override */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 text-sm">
             <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0">Language:</span>

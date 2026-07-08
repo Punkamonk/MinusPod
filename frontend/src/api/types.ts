@@ -31,6 +31,10 @@ export interface Feed {
   transitionSnapEnabled?: boolean | null;
   maxAdDurationOverride?: number | null;
   cueGatedApproval?: boolean | null;
+  // Layer 3 cross-fetch differential (nullable bool: NULL/false read as off).
+  differentialFetchEnabled?: boolean | null;
+  // Server-side heuristic: enclosure URL chain passes through a known DAI prefix domain.
+  daiLikely?: boolean;
   maxEpisodes?: number | null;
   onlyExposeProcessedEpisodes?: boolean | null;
 }

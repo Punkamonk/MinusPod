@@ -197,6 +197,7 @@ export interface UpdateFeedPayload {
   transitionSnapEnabled?: boolean | null;
   maxAdDurationOverride?: number | null;
   cueGatedApproval?: boolean | null;
+  differentialFetchEnabled?: boolean | null;
   maxEpisodes?: number | null;
   onlyExposeProcessedEpisodes?: boolean | null;
 }
