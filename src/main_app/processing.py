@@ -20,7 +20,8 @@ from ad_detector.cue_pair_ads import synthesize_ads_from_cue_pairs
 from ad_detector.cue_telemetry import build_cue_detection_records
 from ad_detector.silence_boundary_snap import snap_ad_boundaries_to_silence
 from ad_reviewer import (
-    AdReviewer, ReviewVerdict, split_resurrection_pool,
+    AdReviewer, ReviewVerdict, reasoning_contradicts_cut,
+    split_resurrection_pool,
 )
 from cancel import ProcessingCancelled, _check_cancel, _cancel_events, _cancel_events_lock
 from utils.time import ranges_overlap, utc_now_iso
@@ -29,6 +30,7 @@ from config import (
     MIN_CONTENT_BETWEEN_ADS_SECONDS,
     AUDIO_CUE_PAIR_CONFIDENCE, AUDIO_CUE_PAIR_ORIENT_WINDOW_SECONDS,
     HOLD_REASON_NO_CUE,
+    HOLD_REASON_REVIEWER_CONTRADICTION,
     is_cue_backed, is_pending_review,
     resolve_feed_cue_settings,
     resolve_silence_snap_tunables,
@@ -1011,6 +1013,16 @@ def _apply_reviewer_verdict_to_ad(ad, v):
         ad['reviewer_confidence'] = v.confidence
     if v.model_used:
         ad['reviewer_model'] = v.model_used
+    if (v.verdict in ('confirmed', 'adjust')
+            and reasoning_contradicts_cut(v.reasoning)):
+        # Contradiction guard (spec 1.4): hold for a human, never auto-reject.
+        # Boundaries stay at the pass-1 values; an "adjust" whose reasoning
+        # denies the ad exists is not a boundary correction to trust.
+        ad['was_cut'] = False
+        ad['held_for_review'] = True
+        ad['hold_reason'] = HOLD_REASON_REVIEWER_CONTRADICTION
+        ad['source'] = 'reviewer'
+        return
     if v.verdict == 'adjust':
         ad['reviewer_original_start'] = v.original_start
         ad['reviewer_original_end'] = v.original_end

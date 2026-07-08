@@ -12,6 +12,7 @@ from config import (
     AD_REVIEWER_PARALLEL_ADS_MIN,
     AD_REVIEWER_PARALLEL_ADS_MAX,
     resolve_env_backed_default,
+    HOLD_REASON_REVIEWER_CONTRADICTION,
     AUDIO_CUE_ROLE_DEFAULT,
     AUDIO_CUE_ROLE_NON_AD,
     AUDIO_CUE_TYPE_CONTENT_TRANSITION,
@@ -48,6 +49,28 @@ def _review_failure_reason(error: Exception) -> str:
     if is_rate_limit_error(error):
         return "Review unavailable: LLM rate limit reached"
     return "Review unavailable: LLM call failed"
+
+
+# Verdict/reasoning contradiction guard (spec 1.4). Verdicts are derived
+# from boundary arithmetic, so a model that returns the ad unchanged while
+# its reason text says the span is not an ad ships as "confirmed". Reasoning
+# matching one of these substrings (case-insensitive) gets held for human
+# review instead of auto-cut. Never auto-reject: the reasoning could be the
+# wrong half of the contradiction.
+REVIEWER_CONTRADICTION_PATTERNS = (
+    'no advertisement',
+    'not an ad',
+    'no ad content',
+    'contains no ad',
+)
+
+
+def reasoning_contradicts_cut(reasoning: Optional[str]) -> bool:
+    """True when reviewer reasoning asserts the span is not an ad."""
+    if not reasoning:
+        return False
+    lowered = reasoning.lower()
+    return any(p in lowered for p in REVIEWER_CONTRADICTION_PATTERNS)
 
 
 def _resolve_reviewer_parallel_ads() -> int:
@@ -134,6 +157,7 @@ class ReviewResult:
     rejected_by_reviewer: List[Dict] = field(default_factory=list)
     resurrected: List[Dict] = field(default_factory=list)
     verdicts: List[ReviewVerdict] = field(default_factory=list)
+    held_by_contradiction: List[Dict] = field(default_factory=list)
 
 
 def _format_cue_section(*, audio_analysis, ad_start: float, ad_end: float,
@@ -458,6 +482,24 @@ class AdReviewer:
                 marked["reviewer_model"] = verdict.model_used
                 marked["source"] = "reviewer"
                 result.rejected_by_reviewer.append(marked)
+            elif (verdict.verdict in ("confirmed", "adjust")
+                    and reasoning_contradicts_cut(verdict.reasoning)):
+                held = dict(updated_ad)
+                held["was_cut"] = False
+                held["held_for_review"] = True
+                held["hold_reason"] = HOLD_REASON_REVIEWER_CONTRADICTION
+                held["reviewer_verdict"] = verdict.verdict
+                held["reviewer_reasoning"] = verdict.reasoning
+                held["reviewer_confidence"] = verdict.confidence
+                held["reviewer_model"] = verdict.model_used
+                held["source"] = "reviewer"
+                logger.warning(
+                    f"[{episode_meta.get('slug')}:{episode_meta.get('episode_id')}] "
+                    f"Reviewer contradiction hold @ "
+                    f"{verdict.original_start:.1f}-{verdict.original_end:.1f}s: "
+                    f"verdict={verdict.verdict} but reasoning says not an ad"
+                )
+                result.held_by_contradiction.append(held)
             else:
                 result.accepted_after_review.append(updated_ad)
 
