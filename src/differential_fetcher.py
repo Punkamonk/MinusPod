@@ -94,12 +94,18 @@ logger = logging.getLogger('podcast.differential_fetcher')
 def _decode_pcm(audio_path: str, work_dir: str, tag: str) -> np.ndarray:
     """Decode audio to 8kHz mono float32 in [-1, 1]."""
     pcm_path = os.path.join(work_dir, f'diff_{tag}.pcm')
-    subprocess.run(
-        ['ffmpeg', '-y', '-i', audio_path, '-ac', '1', '-ar', str(PCM_RATE),
-         '-f', 's16le', '-acodec', 'pcm_s16le', pcm_path],
-        check=True, capture_output=True, timeout=DECODE_TIMEOUT_S)
-    data = np.fromfile(pcm_path, dtype=np.int16).astype(np.float32) / 32768.0
-    os.unlink(pcm_path)
+    try:
+        subprocess.run(
+            ['ffmpeg', '-y', '-i', audio_path, '-ac', '1', '-ar', str(PCM_RATE),
+             '-f', 's16le', '-acodec', 'pcm_s16le', pcm_path],
+            check=True, capture_output=True, timeout=DECODE_TIMEOUT_S)
+        data = np.fromfile(pcm_path, dtype=np.int16).astype(np.float32) / 32768.0
+    except Exception:
+        logger.error('PCM decode/read failed for %s (tag=%s)', audio_path, tag)
+        raise
+    finally:
+        if os.path.exists(pcm_path):
+            os.unlink(pcm_path)
     return data
 
 
@@ -148,32 +154,37 @@ def _chain_marks(run_marks: list, ref_marks: list) -> list:
     return pairs
 
 
-def _refine_offset(run_pcm: np.ndarray, ref_pcm: np.ndarray, run_t: float,
-                   coarse_offset: float):
-    """Refine one block offset by windowed normalized cross-correlation.
+def _block_correlation(run_pcm: np.ndarray, ref_pcm: np.ndarray, run_t: float,
+                       coarse_offset: float):
+    """Peak normalized cross-correlation of one run block against the refetch.
 
     Correlates a XCORR_REF_S reference from the run file at run_t against
-    the refetch file within +-XCORR_SEARCH_S of the coarse offset. FFT-based
-    so a 4s reference over an 8s search span stays cheap. Returns
-    (refined_offset_s, peak_corr) or (None, 0.0) when a window falls outside
+    the refetch file within +-XCORR_SEARCH_S of the coarse silence-chain
+    offset. FFT-based so a 4s reference over an 8s search span stays cheap.
+    Returns the peak NCC in [-1, 1], or None when a window falls outside
     either file or the reference is silent.
+
+    Only the correlation confidence is consumed: the coarse silence-midpoint
+    boundaries already meet the 0.5s region tolerance and the +-3s downstream
+    corroboration, so the sub-sample peak lag is not fed back into region
+    boundaries and is not returned.
     """
     ref_len = int(XCORR_REF_S * PCM_RATE)
     a0 = int(run_t * PCM_RATE)
     template = run_pcm[a0:a0 + ref_len].astype(np.float64)
     if len(template) < ref_len:
-        return None, 0.0
+        return None
     b0 = max(0, int((run_t + coarse_offset - XCORR_SEARCH_S) * PCM_RATE))
     b1 = int((run_t + coarse_offset + XCORR_SEARCH_S) * PCM_RATE) + ref_len
     haystack = ref_pcm[b0:b1].astype(np.float64)
     if len(haystack) < ref_len:
-        return None, 0.0
+        return None
 
     template = template - template.mean()
     haystack = haystack - haystack.mean()
     t_norm = np.sqrt(np.sum(template ** 2))
     if t_norm < 1e-9:
-        return None, 0.0
+        return None
 
     n_lags = len(haystack) - ref_len + 1
     nfft = 1
@@ -182,13 +193,13 @@ def _refine_offset(run_pcm: np.ndarray, ref_pcm: np.ndarray, run_t: float,
     corr = np.fft.irfft(
         np.fft.rfft(haystack, nfft) * np.conj(np.fft.rfft(template, nfft)),
         nfft)[:n_lags]
-    # Sliding L2 norm of every haystack window, for true normalization.
+    # Sliding L2 norm of every haystack window. The haystack mean is removed
+    # once globally rather than per-window: an approximation that holds for
+    # AC-coupled audio and keeps normalization O(n).
     sq = np.concatenate(([0.0], np.cumsum(haystack ** 2)))
     win_norm = np.sqrt(np.maximum(sq[ref_len:] - sq[:-ref_len], 1e-12))
     ncc = corr / (t_norm * win_norm)
-    best = int(np.argmax(ncc))
-    refined = (b0 + best) / PCM_RATE - run_t
-    return refined, float(ncc[best])
+    return float(np.max(ncc))
 
 
 def align_and_diff(run_file: str, refetch_file: str, work_dir: str) -> dict:
@@ -223,15 +234,15 @@ def align_and_diff(run_file: str, refetch_file: str, work_dir: str) -> dict:
             groups.append({'start': start, 'end': end, 'offset': offset,
                            'blocks': [(start, end)]})
 
-    # One refinement probe per group, inside its longest block.
+    # One correlation probe per group, inside its longest block.
     identical = []
     for group in groups:
         longest = max(group['blocks'], key=lambda b: b[1] - b[0])
         if longest[1] - longest[0] < XCORR_REF_S + 1.0:
             continue
-        refined, corr = _refine_offset(
+        corr = _block_correlation(
             run_pcm, ref_pcm, longest[0] + 0.5, group['offset'])
-        if refined is None or corr < XCORR_MIN_CORR:
+        if corr is None or corr < XCORR_MIN_CORR:
             continue
         identical.append({
             'start_s': round(group['start'], 2),

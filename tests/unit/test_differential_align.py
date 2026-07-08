@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
+import differential_fetcher as df
 from differential_fetcher import align_and_diff
 
 pytestmark = pytest.mark.skipif(
@@ -100,3 +101,20 @@ def test_identical_files_report_no_differential(episode_pair):
 
     assert result['status'] == 'no_differential'
     assert all(r['kind'] == 'identical' for r in result['regions'])
+
+
+def test_decode_pcm_cleans_temp_on_read_failure(tmp_path, monkeypatch):
+    work = str(tmp_path)
+    wav = os.path.join(work, 'tiny.wav')
+    _noise(wav, 1, 555)
+
+    def boom(*a, **k):
+        raise ValueError('simulated PCM read failure')
+
+    monkeypatch.setattr(df.np, 'fromfile', boom)
+
+    with pytest.raises(ValueError):
+        df._decode_pcm(wav, work, 'run')
+
+    leftover = [f for f in os.listdir(work) if f.endswith('.pcm')]
+    assert leftover == []
