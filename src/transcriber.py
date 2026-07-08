@@ -1192,6 +1192,7 @@ class Transcriber:
         audio_path: str,
         podcast_name: str = None,
         language_override: Optional[str] = None,
+        vad_filter: bool = True,
     ) -> List[Dict]:
         """Transcribe audio file using Faster Whisper with batched pipeline.
 
@@ -1201,10 +1202,18 @@ class Transcriber:
         `language_override` (when non-empty) takes precedence over the global
         whisper_language setting for this call only -- used to honor per-feed
         language overrides without mutating shared settings.
+
+        ``vad_filter=False`` disables Whisper's VAD (tail re-transcription,
+        spec 1.2). Local backend only; API backends have no VAD switch.
         """
         # Check whisper backend setting
         whisper_settings = _get_whisper_settings()
         if whisper_settings['backend'] == WHISPER_BACKEND_API:
+            if not vad_filter:
+                # OpenAI-compatible endpoints expose no VAD switch; any VAD
+                # is server-side config. The tail still gets transcribed as
+                # its own upload, which is the intended effect (spec 1.2).
+                logger.info("vad_filter=False not forwardable to API backend; sending audio as-is")
             return self._transcribe_via_api(
                 audio_path, podcast_name, whisper_settings,
                 language_override=language_override,
@@ -1268,12 +1277,12 @@ class Transcriber:
                         beam_size=5,
                         batch_size=batch_size,
                         word_timestamps=True,  # Enable word-level timestamps for boundary refinement
-                        vad_filter=True,  # Enable VAD filter to skip silent parts
+                        vad_filter=vad_filter,
                         vad_parameters=dict(
                             min_silence_duration_ms=1000,  # Increased from 500 - less aggressive skipping
                             speech_pad_ms=600,  # Increased from 400 - more padding for ad segments
                             threshold=0.3  # Lower threshold = more sensitive to speech in ads
-                        )
+                        ) if vad_filter else None,
                     )
 
                     # Log detected language

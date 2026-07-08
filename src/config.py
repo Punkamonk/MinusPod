@@ -263,6 +263,12 @@ AUDIO_CUE_CAPTURE_WARN_AD_SECONDS = 5.0
 SILENCE_SNAP_NOISE_DB = -50.0               # Amplitude (dBFS) below which audio counts as silence
 SILENCE_SNAP_MIN_DURATION_SECONDS = 0.3     # Shortest sub-threshold span that counts as a silence
 SILENCE_SNAP_MAX_DISTANCE_SECONDS = 2.0     # Farthest an ad edge may move to reach a silence
+# Tail no-VAD re-transcription window (spec 1.2). An untranscribed tail whose
+# length falls between min and max is re-run with vad_filter=False so quiet
+# DAI post-rolls reach the LLM windows. DB-tunable via the
+# tail_retranscribe_min_seconds / tail_retranscribe_max_seconds settings.
+TAIL_RETRANSCRIBE_MIN_SECONDS = 10.0
+TAIL_RETRANSCRIBE_MAX_SECONDS = 600.0
 AUDIO_CUE_PAIR_CONFIDENCE = 0.85        # Min cue confidence to synthesize an ad from a pair
 AUDIO_CUE_PAIR_MIN_BREAK_SECONDS = 30.0   # Shortest plausible cue-pair break
 AUDIO_CUE_PAIR_MAX_BREAK_SECONDS = 480.0  # Longest plausible cue-pair break
@@ -554,6 +560,32 @@ def resolve_silence_snap_tunables(db):
     except Exception:
         _tunable_logger.warning('resolve_silence_snap_tunables: read failed; using defaults')
         return dict(_SILENCE_SNAP_DEFAULTS)
+
+
+_TAIL_RETRANSCRIBE_DEFAULTS = {
+    'min_seconds': TAIL_RETRANSCRIBE_MIN_SECONDS,
+    'max_seconds': TAIL_RETRANSCRIBE_MAX_SECONDS,
+}
+
+
+def resolve_tail_retranscribe_tunables(db):
+    """Tail no-VAD re-transcription window: min/max untranscribed-tail length.
+
+    Falls back to code defaults when db is None or a read fails.
+    """
+    if not db:
+        return dict(_TAIL_RETRANSCRIBE_DEFAULTS)
+    try:
+        return {
+            'min_seconds': db.get_setting_float(
+                'tail_retranscribe_min_seconds', TAIL_RETRANSCRIBE_MIN_SECONDS),
+            'max_seconds': db.get_setting_float(
+                'tail_retranscribe_max_seconds', TAIL_RETRANSCRIBE_MAX_SECONDS),
+        }
+    except Exception:
+        _tunable_logger.warning(
+            'resolve_tail_retranscribe_tunables: read failed; using defaults')
+        return dict(_TAIL_RETRANSCRIBE_DEFAULTS)
 
 
 # Cue template types (#350). A cue is one of a fixed set of types chosen from a
