@@ -546,6 +546,11 @@ def resolve_transition_snap_enabled(db, podcast_id):
     return _resolve_snap_flag(db, podcast_id, 'transition_snap_enabled')
 
 
+def resolve_differential_fetch_enabled(db, podcast_id):
+    """Per-feed cross-fetch differential opt-in (Layer 3). Default False."""
+    return _resolve_snap_flag(db, podcast_id, 'differential_fetch_enabled')
+
+
 def resolve_max_ad_duration_override(db, podcast_id) -> Optional[float]:
     """Per-feed max ad duration cap in seconds (Phase C held-for-review).
 

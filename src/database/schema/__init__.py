@@ -434,6 +434,8 @@ class SchemaMixin:
             ('cue_snap_lag_override', 'REAL'),
             ('silence_snap_enabled', 'INTEGER'),
             ('transition_snap_enabled', 'INTEGER'),
+            # Layer 3 cross-fetch differential opt-in
+            ('differential_fetch_enabled', 'INTEGER'),
             # Phase C held-for-review per-feed settings
             ('max_ad_duration_override', 'REAL'),
             ('cue_gated_approval', 'INTEGER DEFAULT 0'),

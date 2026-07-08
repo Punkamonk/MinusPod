@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS podcasts (
     -- Boundary-snap opt-in flags (NULL/0 = off, 1 = on; no global to inherit)
     silence_snap_enabled INTEGER,
     transition_snap_enabled INTEGER,
+    -- Layer 3 cross-fetch differential opt-in (NULL/0 = off, 1 = on)
+    differential_fetch_enabled INTEGER,
     -- Phase C held-for-review per-feed settings
     max_ad_duration_override REAL,
     cue_gated_approval INTEGER DEFAULT 0,
