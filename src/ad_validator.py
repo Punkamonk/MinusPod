@@ -566,6 +566,8 @@ class AdValidator:
         return payload.get('events') or []
 
     def _splice_calibrated(self) -> bool:
+        """True when this feed's splice calibration status is 'calibrated'
+        (spec 2.3c); cold-start feeds corroborate but never veto."""
         payload = (self._audio_analysis or {}).get('splice_evidence') or {}
         return payload.get('calibration', {}).get('status') == 'calibrated'
 

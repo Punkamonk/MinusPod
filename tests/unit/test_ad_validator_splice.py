@@ -137,11 +137,19 @@ class TestSpliceVeto:
         result = validator.validate([short], audio_analysis=_analysis([]))
         assert result.ads[0]['validation']['decision'] == Decision.ACCEPT.value
 
-    def test_other_stages_not_vetoed(self):
+    @pytest.mark.parametrize('stage', ['manual', 'vad_gap', 'fingerprint',
+                                       'dai_differential', 'cue'])
+    def test_other_stages_not_vetoed(self, stage):
+        """Only claude/text_pattern are subject to the splice veto; every
+        other stage is exempt (they carry their own evidence). vad_gap can
+        still route to REVIEW via its own Task 14 confidence clamp, but never
+        with the no_splice_evidence hold -- so assert the veto did not fire."""
         validator = AdValidator(episode_duration=3600.0)
-        manual = dict(self._AD, detection_stage='manual')
-        result = validator.validate([manual], audio_analysis=_analysis([]))
-        assert result.ads[0]['validation']['decision'] == Decision.ACCEPT.value
+        ad = dict(self._AD, detection_stage=stage)
+        result = validator.validate([ad], audio_analysis=_analysis([]))
+        result_ad = result.ads[0]
+        assert result_ad.get('hold_reason') != 'no_splice_evidence'
+        assert not result_ad.get('held_for_review')
 
     def test_no_audio_analysis_never_vetoes(self):
         validator = AdValidator(episode_duration=3600.0)
