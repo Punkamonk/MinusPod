@@ -66,6 +66,29 @@ def test_unparseable_rows_skipped():
     assert build_calibration(rows)['status'] == 'cold_start'
 
 
+def test_three_valid_episodes_cold_start_preserves_count():
+    # Below the 5-episode gate: cold_start, but the real count survives so the
+    # payload stays diagnosable instead of reporting a flat 0.
+    rows = [_row([_event(100.0)]) for _ in range(3)]
+    cal = build_calibration(rows)
+    assert cal['status'] == 'cold_start'
+    assert cal['episodes_considered'] == 3
+
+
+def test_short_episodes_floor_keeps_detection():
+    # 5 episodes of 600s (0.83h total) -> int(0.83 * 1.0) = 0; the max(1, ...)
+    # floor keeps allowed=1. A single deep_silence event across the feed is
+    # <= allowed, so the default 1.4 floor is kept, not zeroed to 1.6.
+    rows = [_row([]) for _ in range(4)]
+    rows.append(_row([_event(100.0)]))
+    for row in rows:
+        row['original_duration'] = 600.0
+    cal = build_calibration(rows)
+    assert cal['status'] == 'calibrated'
+    assert cal['episodes_considered'] == 5
+    assert cal['thresholds']['deep_silence_min_s'] == 1.4
+
+
 def test_compute_never_raises():
     class _BoomDB:
         def get_recent_audio_analyses(self, *a, **k):

@@ -28,11 +28,16 @@ _DEFAULT_MIN_S = {
 }
 
 
-def cold_start_calibration() -> Dict:
-    """Conservative defaults used before a feed has enough history."""
+def cold_start_calibration(episodes_considered: int = 0) -> Dict:
+    """Conservative defaults used before a feed has enough history.
+
+    episodes_considered carries the count of valid payloads found so a
+    below-gate cold_start payload stays diagnosable (e.g. 3 of 5). No-history
+    and exception paths keep the default 0.
+    """
     return {
         'status': 'cold_start',
-        'episodes_considered': 0,
+        'episodes_considered': episodes_considered,
         'events_per_hour': {},
         'thresholds': {f'{t}_min_s': v for t, v in _DEFAULT_MIN_S.items()},
     }
@@ -68,7 +73,7 @@ def build_calibration(rows) -> Dict:
                 durations_by_type[etype].append(float(event['duration_s']))
 
     if considered < SPLICE_CALIBRATION_MIN_EPISODES or total_hours <= 0:
-        return cold_start_calibration()
+        return cold_start_calibration(considered)
 
     rates = {}
     thresholds = {}
