@@ -4,6 +4,8 @@ Assets and the verification timestamp map consume this list, so it must match
 what ffmpeg actually cut, not the requested segments.
 """
 
+import logging
+
 import pytest
 
 from audio_processor import AudioProcessor
@@ -133,3 +135,19 @@ def test_merge_carries_strongest_trust_signal(processor):
     assert len(cuts) == 1
     assert cuts[0]['confidence'] == 0.95
     assert cuts[0]['detection_stage'] == 'fingerprint'
+
+
+def test_applied_totals_logged(processor, caplog):
+    """Requested-vs-applied totals are logged so production marker-vs-cut
+    deltas are attributable (spec 1.5 instrumentation)."""
+    with caplog.at_level(logging.INFO, logger='audio_processor'):
+        processor.compute_applied_cuts(
+            [{'start': 100.0, 'end': 130.0}, {'start': 130.5, 'end': 160.0},
+             {'start': 500.0, 'end': 505.0}],
+            600.0,
+        )
+    msg = next(r.message for r in caplog.records
+               if r.message.startswith('Applied cuts:'))
+    # First two merge (0.5s gap absorbed), the 5s cut drops as short.
+    assert '1 cut(s) totaling 60.0s' in msg
+    assert 'requested 3 totaling 64.5s' in msg

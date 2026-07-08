@@ -684,6 +684,7 @@ SHORT_CUT_KEEP_CONFIDENCE = 0.9      # Keep a shorter cut anyway at/above this c
 POST_ROLL_TRIM_THRESHOLD = 30.0      # Threshold for trimming post-roll content
 MERGE_GAP_SECONDS = 1.0              # Cuts separated by less than this merge into one
                                      # (distinct from the validator's MERGE_GAP_THRESHOLD)
+RENDER_DRIFT_WARN_SECONDS = 1.0      # Warn when rendered duration diverges from marker arithmetic
 SEGMENT_AD_COVERAGE_THRESHOLD = 0.8  # Drop a transcript segment when removed ads
                                      # cover more than this fraction of it
 
