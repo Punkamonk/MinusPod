@@ -93,7 +93,8 @@ class EpisodeMixin:
                       ed.transcript_vtt,
                       ed.chapters_json, ed.ad_markers_json,
                       ed.first_pass_response, ed.first_pass_prompt,
-                      ed.second_pass_prompt, ed.second_pass_response
+                      ed.second_pass_prompt, ed.second_pass_response,
+                      ed.dai_differential_json
                FROM episodes e
                JOIN podcasts p ON e.podcast_id = p.id
                LEFT JOIN episode_details ed ON e.id = ed.episode_id
@@ -545,6 +546,49 @@ class EpisodeMixin:
             (db_episode_id,),
         ).fetchone()
         return row['audio_analysis_json'] if row else None
+
+    def save_episode_dai_differential(self, slug: str, episode_id: str,
+                                      dai_differential_json: str):
+        """Save the cross-fetch differential result for an episode."""
+        conn = self.get_connection()
+
+        db_episode_id = self._get_episode_db_id(slug, episode_id)
+        if not db_episode_id:
+            logger.warning(f"Episode not found for dai differential: {slug}/{episode_id}")
+            return
+
+        cursor = conn.execute(
+            "SELECT id FROM episode_details WHERE episode_id = ?",
+            (db_episode_id,)
+        )
+        row = cursor.fetchone()
+
+        if row:
+            conn.execute(
+                "UPDATE episode_details SET dai_differential_json = ? WHERE id = ?",
+                (dai_differential_json, row['id'])
+            )
+        else:
+            conn.execute(
+                """INSERT INTO episode_details (episode_id, dai_differential_json)
+                   VALUES (?, ?)""",
+                (db_episode_id, dai_differential_json)
+            )
+
+        conn.commit()
+        logger.debug(f"[{slug}:{episode_id}] Saved dai differential to database")
+
+    def get_episode_dai_differential(self, slug: str, episode_id: str):
+        """Return the raw dai_differential_json for an episode, or None."""
+        conn = self.get_connection()
+        db_episode_id = self._get_episode_db_id(slug, episode_id)
+        if not db_episode_id:
+            return None
+        row = conn.execute(
+            "SELECT dai_differential_json FROM episode_details WHERE episode_id = ?",
+            (db_episode_id,),
+        ).fetchone()
+        return row['dai_differential_json'] if row else None
 
     def clear_episode_details(self, slug: str, episode_id: str):
         """Clear transcript and ad markers for an episode."""

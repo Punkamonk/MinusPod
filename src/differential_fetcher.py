@@ -17,8 +17,16 @@ import random
 import subprocess
 
 import numpy as np
+import requests
 
 from audio_analysis.silence_detector import SilenceDetector
+from config import BROWSER_USER_AGENT, HTTP_MAX_REDIRECTS_FEED
+from utils.audio import get_audio_duration
+from utils.http import safe_url_for_log
+from utils.safe_http import (
+    ResponseTooLargeError, URLTrust, safe_get, stream_to_file_capped,
+)
+from utils.url import SSRFError
 
 # Realistic podcast-client UA strings for the refetch pool.
 REFETCH_USER_AGENTS = (
@@ -269,3 +277,57 @@ def align_and_diff(run_file: str, refetch_file: str, work_dir: str) -> dict:
     has_diff = any(r['kind'] == 'differential' for r in regions)
     return {'status': 'ok' if has_diff else 'no_differential',
             'regions': regions}
+
+
+# --- Refetch ---------------------------------------------------------------
+
+# Refetch may not exceed this multiple of the primary file's size.
+REFETCH_SIZE_FACTOR = 1.5
+
+
+def fetch_and_diff(enclosure_url: str, run_file_path: str, work_dir: str,
+                   timeout_s: int = 900) -> dict:
+    """Refetch the enclosure with a rotated podcast-client UA and diff it
+    against the run file.
+
+    Never raises: every failure returns status 'error' so the pipeline can
+    record it and continue.
+    """
+    ua = pick_refetch_user_agent(BROWSER_USER_AGENT)
+    meta = {'ua': ua, 'size': None, 'duration': None}
+    refetch_path = os.path.join(work_dir, 'refetch_audio')
+    try:
+        run_size = os.path.getsize(run_file_path)
+        max_bytes = int(run_size * REFETCH_SIZE_FACTOR)
+        response = safe_get(
+            enclosure_url,
+            trust=URLTrust.FEED_CONTENT,
+            timeout=(10, timeout_s),
+            max_redirects=HTTP_MAX_REDIRECTS_FEED,
+            stream=True,
+            headers={'User-Agent': ua, 'Accept': '*/*'},
+        )
+        try:
+            response.raise_for_status()
+            with open(refetch_path, 'wb') as fh:
+                stream_to_file_capped(response, fh, max_bytes)
+        finally:
+            response.close()
+        meta['size'] = os.path.getsize(refetch_path)
+        meta['duration'] = get_audio_duration(refetch_path)
+        aligned = align_and_diff(run_file_path, refetch_path, work_dir)
+        return {'status': aligned['status'], 'regions': aligned['regions'],
+                'refetch_meta': meta, 'error': None}
+    except (SSRFError, ResponseTooLargeError, requests.RequestException,
+            subprocess.SubprocessError, OSError, ValueError) as e:
+        logger.warning(
+            f"Differential refetch failed for "
+            f"{safe_url_for_log(enclosure_url)}: {e}")
+        return {'status': 'error', 'regions': [], 'refetch_meta': meta,
+                'error': str(e)}
+    finally:
+        try:
+            if os.path.exists(refetch_path):
+                os.unlink(refetch_path)
+        except OSError:
+            pass

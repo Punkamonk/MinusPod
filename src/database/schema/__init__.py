@@ -406,6 +406,8 @@ class SchemaMixin:
             ('original_transcript_text', 'TEXT'),
             ('original_segments_json', 'TEXT'),
             ('final_segments_json', 'TEXT'),
+            # Layer 3 cross-fetch differential result (additive; never dropped)
+            ('dai_differential_json', 'TEXT'),
         ]
         for col, definition in details_migrations:
             self._add_column_if_missing(conn, 'episode_details', col, definition, det_cols)

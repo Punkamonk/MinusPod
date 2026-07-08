@@ -1,12 +1,17 @@
 """Unit tests for differential_fetcher UA pool and DAI-likelihood heuristic (Layer 3)."""
 import os
 import sys
+from unittest.mock import patch
+
+import requests
+import requests.exceptions
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from config import BROWSER_USER_AGENT
 from differential_fetcher import (
     REFETCH_USER_AGENTS,
+    fetch_and_diff,
     is_likely_dai_feed,
     pick_refetch_user_agent,
 )
@@ -52,3 +57,84 @@ def test_empty_and_none_inputs():
     assert is_likely_dai_feed([]) is False
     assert is_likely_dai_feed(None) is False
     assert is_likely_dai_feed([None, '']) is False
+
+
+class _FakeResponse:
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.closed = False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size=8192):
+        yield from self._chunks
+
+    def close(self):
+        self.closed = True
+
+
+def _run_file(tmp_path, size=1000):
+    path = tmp_path / 'run.mp3'
+    path.write_bytes(b'\x00' * size)
+    return str(path)
+
+
+def test_fetch_and_diff_uses_rotated_ua(tmp_path):
+    run_file = _run_file(tmp_path)
+    aligned = {'status': 'ok', 'regions': [
+        {'start_s': 1.0, 'end_s': 5.0, 'kind': 'differential', 'corr': 0.0}]}
+    with patch('differential_fetcher.safe_get',
+               return_value=_FakeResponse([b'x' * 100])) as mock_get, \
+         patch('differential_fetcher.get_audio_duration', return_value=42.0), \
+         patch('differential_fetcher.align_and_diff',
+               return_value=aligned) as mock_align:
+        result = fetch_and_diff('https://traffic.megaphone.fm/e.mp3',
+                                run_file, str(tmp_path))
+
+    ua = mock_get.call_args.kwargs['headers']['User-Agent']
+    assert ua in REFETCH_USER_AGENTS
+    assert ua != BROWSER_USER_AGENT
+    assert result['status'] == 'ok'
+    assert result['regions'] == aligned['regions']
+    assert result['error'] is None
+    assert result['refetch_meta']['ua'] == ua
+    assert result['refetch_meta']['size'] == 100
+    assert result['refetch_meta']['duration'] == 42.0
+    run_arg, _, work_arg = mock_align.call_args.args
+    assert run_arg == run_file
+    assert work_arg == str(tmp_path)
+
+
+def test_fetch_and_diff_enforces_1_5x_size_cap(tmp_path):
+    run_file = _run_file(tmp_path, size=1000)
+    # 1600 bytes streamed exceeds the 1500-byte cap (1.5x the 1000-byte run file).
+    with patch('differential_fetcher.safe_get',
+               return_value=_FakeResponse([b'x' * 800, b'x' * 800])):
+        result = fetch_and_diff('https://traffic.megaphone.fm/e.mp3',
+                                run_file, str(tmp_path))
+    assert result['status'] == 'error'
+    assert result['regions'] == []
+    assert result['error'] is not None
+
+
+def test_fetch_and_diff_network_error_is_nonfatal(tmp_path):
+    run_file = _run_file(tmp_path)
+    with patch('differential_fetcher.safe_get',
+               side_effect=requests.exceptions.ConnectionError('boom')):
+        result = fetch_and_diff('https://traffic.megaphone.fm/e.mp3',
+                                run_file, str(tmp_path))
+    assert result['status'] == 'error'
+    assert 'boom' in result['error']
+
+
+def test_fetch_and_diff_cleans_up_refetch_file(tmp_path):
+    run_file = _run_file(tmp_path)
+    with patch('differential_fetcher.safe_get',
+               return_value=_FakeResponse([b'x' * 100])), \
+         patch('differential_fetcher.get_audio_duration', return_value=1.0), \
+         patch('differential_fetcher.align_and_diff',
+               return_value={'status': 'no_differential', 'regions': []}):
+        fetch_and_diff('https://traffic.megaphone.fm/e.mp3',
+                       run_file, str(tmp_path))
+    assert not os.path.exists(os.path.join(str(tmp_path), 'refetch_audio'))
