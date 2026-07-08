@@ -264,6 +264,22 @@ AUDIO_CUE_CAPTURE_WARN_AD_SECONDS = 5.0
 SILENCE_SNAP_NOISE_DB = -50.0               # Amplitude (dBFS) below which audio counts as silence
 SILENCE_SNAP_MIN_DURATION_SECONDS = 0.3     # Shortest sub-threshold span that counts as a silence
 SILENCE_SNAP_MAX_DISTANCE_SECONDS = 2.0     # Farthest an ad edge may move to reach a silence
+# ============================================================
+# Splice-evidence detection (spec 2.1)
+# ============================================================
+# Encoding artifacts that mark DAI splice points. Evidence only: consumers
+# corroborate, snap, veto, and annotate prompts -- nothing cuts on these
+# alone. Numeric defaults are the cold-start values; per-feed calibration
+# raises effective thresholds on splice-noisy feeds.
+SPLICE_DIGITAL_SILENCE_DBFS = -80.0       # RMS below this is encoded digital silence
+SPLICE_DIGITAL_SILENCE_MIN_SECONDS = 0.5  # Min run length for a digital_silence event
+SPLICE_DEEP_SILENCE_DBFS = -70.0          # RMS below this is a deep silence
+SPLICE_DEEP_SILENCE_MIN_SECONDS = 1.4     # Min run length for a deep_silence event
+SPLICE_LOUDNESS_GATE_LUFS = -70.0         # Ignore momentary frames at/below this
+SPLICE_LOUDNESS_STEP_MIN_LU = 5.0         # Min |step| to emit a loudness_step event
+SPLICE_CENTROID_STEP_MIN_HZ = 300.0       # Min |centroid step| for a spectral_step event
+SPLICE_FLATNESS_STEP_MIN = 0.10           # Min |flatness step| for a spectral_step event
+SPLICE_STEP_SIDE_WINDOW_SECONDS = 5.0     # Side window for spectral aggregation
 # Tail no-VAD re-transcription window (spec 1.2). An untranscribed tail whose
 # length falls between min and max is re-run with vad_filter=False so quiet
 # DAI post-rolls reach the LLM windows. DB-tunable via the
