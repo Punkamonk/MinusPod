@@ -20,18 +20,18 @@ def test_pool_has_five_distinct_client_strings():
         assert client in joined
 
 
-def test_pick_never_returns_first_ua():
-    first = REFETCH_USER_AGENTS[0]
-    for _ in range(50):
-        assert pick_refetch_user_agent(first) != first
+def test_pick_excludes_first_ua_and_returns_pool_member():
+    for first in (None, '', REFETCH_USER_AGENTS[0], 'SomeOtherBot/1.0',
+                  BROWSER_USER_AGENT):
+        for _ in range(100):
+            picked = pick_refetch_user_agent(first)
+            assert picked in REFETCH_USER_AGENTS
+            assert picked != first
 
 
-def test_pick_returns_pool_member_for_browser_ua():
-    assert pick_refetch_user_agent(BROWSER_USER_AGENT) in REFETCH_USER_AGENTS
-
-
-def test_pick_handles_none_first_ua():
-    assert pick_refetch_user_agent(None) in REFETCH_USER_AGENTS
+def test_pick_rotates_across_calls_with_same_first_ua():
+    picks = {pick_refetch_user_agent(BROWSER_USER_AGENT) for _ in range(100)}
+    assert len(picks) >= 2
 
 
 def test_dai_domain_in_direct_host():

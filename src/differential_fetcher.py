@@ -11,10 +11,7 @@ realistic podcast-client string because ad decisioning keys on the request
 fingerprint and UA + natural time spacing is the only variation available.
 """
 
-import logging
 import random
-
-logger = logging.getLogger('podcast.differential')
 
 # Realistic podcast-client UA strings for the refetch pool.
 REFETCH_USER_AGENTS = (
