@@ -147,11 +147,16 @@ def test_end_of_episode_cut_extends_and_holds_invariant(processor, tmp_path):
 
 
 def test_time_saved_reflects_beep_replacement(processor, tmp_path):
-    """Production timeSaved == original_duration - new_duration (processing.py,
-    webhook_service.py, api/episodes.py). Because each cut is replaced by the
-    beep, that expression is already beep-aware: it reads n*beep LESS than the
-    raw marker-duration sum. Pins the metric against a regression to summing
-    marker/cut durations, which would overcount by one beep per cut."""
+    """Pins the RENDERER precondition that keeps production timeSaved
+    beep-aware: the rendered file's real decoded duration reflects the
+    beep-replaced cut, so (original - new_duration) == marker_sum - n*beep.
+
+    Production timeSaved is original_duration - new_duration (processing.py:1709,
+    webhook_service.py:98, api/episodes.py:98/177). This test does NOT exercise
+    those sites -- it recomputes original - new from real ffprobe decodes to
+    confirm the decoded output carries the beep, which is the precondition that
+    makes original-minus-new beep-aware. It cannot catch a regression of the
+    metric formula itself to marker-summing."""
     input_path = tmp_path / 'input.wav'
     output_path = tmp_path / 'out.mp3'
     _make_input(input_path, 60.0, [(10.0, 30.0)])
@@ -165,15 +170,14 @@ def test_time_saved_reflects_beep_replacement(processor, tmp_path):
 
     original_duration = processor.get_audio_duration(str(input_path))
     new_duration = processor.get_audio_duration(str(output_path))
-    # The exact expression every production timeSaved site uses.
+    # Same arithmetic shape production uses; recomputed here, not imported.
     time_saved = original_duration - new_duration
 
     marker_sum = sum(a['end'] - a['start'] for a in applied)
     beep_total = len(applied) * processor.get_beep_duration()
-    # Beep-aware: timeSaved reflects the beep the cut was replaced with.
+    # The decoded output carries the beep, so original-minus-new is beep-aware.
     assert time_saved == pytest.approx(marker_sum - beep_total, abs=_DURATION_TOL_S)
-    # And is therefore strictly below the raw marker sum -- a regression to
-    # summing marker durations (Case B) would report ~one beep per cut too much.
+    # And therefore sits ~one beep per cut below the raw marker sum.
     assert time_saved < marker_sum - beep_total / 2
 
 
