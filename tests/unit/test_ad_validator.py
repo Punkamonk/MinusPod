@@ -884,3 +884,82 @@ class TestAudioCorroborationSource:
         analysis = {'signals': [self._volume_anomaly(10558.0, 10599.0),
                                 self._transition_pair(10557.4, 10599.6)]}
         assert self._validator(analysis)._audio_corroboration_source(ad) == 'transition_pair'
+
+
+class TestVadGapClampBypass:
+    """TWiT 1091 regression (this-week-in-tech-audio/b37bf6df81a5): a DAI
+    post-roll played ~15 dB quieter, Whisper VAD dropped it, and the vad_gap
+    marker covering it (0.75 + 0.05 POST_ROLL boost = 0.80) was clamped to
+    0.79 because untranscribed audio can never show ad signals in transcript.
+    A stored 15 dB transition pair at the boundary must bypass the clamp.
+    """
+
+    SEGMENTS = [
+        {'start': 10520.0, 'end': 10545.0,
+         'text': 'So that is our show for this week everybody.'},
+        {'start': 10545.0, 'end': 10557.6,
+         'text': 'Thanks for being here and we will see you next time on the show.'},
+    ]
+
+    def _marker(self):
+        # Untranscribed 42.4s tail; start at 99.6% position (POST_ROLL).
+        return {
+            'start': 10557.6,
+            'end': 10600.0,
+            'confidence': 0.75,
+            'reason': 'VAD gap at episode tail (42.4s untranscribed)',
+            'detection_stage': 'vad_gap',
+            'sponsor': None,
+        }
+
+    def _tail_transition_analysis(self):
+        # Stored 15 dB transition pair bounding the tail (down into the quiet
+        # DAI fill at 10557.4s, back up at 10599.6s).
+        return {
+            'signals': [{
+                'start': 10557.4, 'end': 10599.6,
+                'signal_type': 'dai_transition_pair',
+                'confidence': 0.95, 'duration': 42.2,
+                'details': {'avg_delta_db': 15.0, 'start_direction': 'down',
+                            'start_delta_db': 15.2, 'end_delta_db': 14.8,
+                            'start_from_lufs': -16.0, 'start_to_lufs': -31.2,
+                            'end_from_lufs': -31.0, 'end_to_lufs': -16.2},
+            }],
+            'loudness_baseline': -16.0,
+            'analysis_time_seconds': 4.2,
+            'errors': [],
+        }
+
+    def test_corroborated_tail_marker_is_accepted(self):
+        validator = AdValidator(episode_duration=10600.0, segments=self.SEGMENTS)
+        result = validator.validate([self._marker()],
+                                    audio_analysis=self._tail_transition_analysis())
+        ad = result.ads[0]
+        assert ad['validation']['decision'] == Decision.ACCEPT.value
+        assert ad['validation']['adjusted_confidence'] == pytest.approx(0.80)
+        assert ad['corroborated_by'] == 'transition_pair'
+
+    def test_uncorroborated_tail_marker_clamped_to_review(self):
+        validator = AdValidator(episode_duration=10600.0, segments=self.SEGMENTS)
+        result = validator.validate([self._marker()])
+        ad = result.ads[0]
+        assert ad['validation']['decision'] == Decision.REVIEW.value
+        assert ad['validation']['adjusted_confidence'] == pytest.approx(0.79)
+        assert 'corroborated_by' not in ad
+
+    def test_distant_analysis_signal_does_not_bypass_clamp(self):
+        analysis = self._tail_transition_analysis()
+        analysis['signals'][0]['start'] = 5000.0
+        analysis['signals'][0]['end'] = 5060.0
+        validator = AdValidator(episode_duration=10600.0, segments=self.SEGMENTS)
+        result = validator.validate([self._marker()], audio_analysis=analysis)
+        ad = result.ads[0]
+        assert ad['validation']['decision'] == Decision.REVIEW.value
+        assert 'corroborated_by' not in ad
+
+    def test_stale_corroborated_by_popped_when_evidence_absent(self):
+        marker = self._marker()
+        marker['corroborated_by'] = 'transition_pair'
+        validator = AdValidator(episode_duration=10600.0, segments=self.SEGMENTS)
+        result = validator.validate([marker])
+        assert 'corroborated_by' not in result.ads[0]

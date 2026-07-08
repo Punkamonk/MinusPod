@@ -328,9 +328,10 @@ class AdValidator:
         corrections = []
         confidence = ad.get('confidence', 1.0)
 
-        # Pop stale held state -- re-derived on every validation pass.
+        # Pop stale held/corroboration state -- re-derived on every pass.
         ad.pop('held_for_review', None)
         ad.pop('hold_reason', None)
+        ad.pop('corroborated_by', None)
 
         duration = ad['end'] - ad['start']
         position = ad['start'] / self.episode_duration if self.episode_duration > 0 else 0
@@ -521,10 +522,17 @@ class AdValidator:
 
         # vad_gap markers come from a heuristic detector with no transcript
         # content signal. If neither sponsor nor ad-signal patterns matched in
-        # range, there is no corroborating evidence -- force the marker below
-        # the cut threshold so it goes to REVIEW instead of being auto-cut.
+        # range, look for measured audio evidence at the boundaries; only when
+        # that is also absent force the marker below the cut threshold so it
+        # goes to REVIEW instead of being auto-cut. Untranscribed audio can
+        # never show transcript signals (TWiT 1091 catch-22).
         if ad.get('detection_stage') == 'vad_gap':
-            confidence = min(confidence, max(0.0, self.min_cut_confidence - 0.01))
+            source = self._audio_corroboration_source(ad)
+            if source is not None:
+                ad['corroborated_by'] = source
+                flags.append(f"INFO: Audio corroboration ({source})")
+            else:
+                confidence = min(confidence, max(0.0, self.min_cut_confidence - 0.01))
 
         # Verify end_text exists in transcript
         end_text = ad.get('end_text', '')
