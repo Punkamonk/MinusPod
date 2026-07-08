@@ -493,11 +493,13 @@ class AdReviewer:
                 held["reviewer_confidence"] = verdict.confidence
                 held["reviewer_model"] = verdict.model_used
                 held["source"] = "reviewer"
+                held["reviewer_contradiction"] = True
                 logger.warning(
                     f"[{episode_meta.get('slug')}:{episode_meta.get('episode_id')}] "
                     f"Reviewer contradiction hold @ "
                     f"{verdict.original_start:.1f}-{verdict.original_end:.1f}s: "
-                    f"verdict={verdict.verdict} but reasoning says not an ad"
+                    f"verdict={verdict.verdict} but reasoning says not an ad: "
+                    f"reasoning={verdict.reasoning[:80]!r}"
                 )
                 result.held_by_contradiction.append(held)
             else:

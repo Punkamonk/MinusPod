@@ -1022,6 +1022,7 @@ def _apply_reviewer_verdict_to_ad(ad, v):
         ad['held_for_review'] = True
         ad['hold_reason'] = HOLD_REASON_REVIEWER_CONTRADICTION
         ad['source'] = 'reviewer'
+        ad['reviewer_contradiction'] = True
         return
     if v.verdict == 'adjust':
         ad['reviewer_original_start'] = v.original_start

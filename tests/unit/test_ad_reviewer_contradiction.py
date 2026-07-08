@@ -106,6 +106,7 @@ def test_confirmed_with_contradictory_reasoning_is_held_not_cut():
     assert held['was_cut'] is False
     assert held['hold_reason'] == HOLD_REASON_REVIEWER_CONTRADICTION
     assert held['source'] == 'reviewer'
+    assert held.get('reviewer_contradiction') is True
 
 
 def test_adjust_with_contradictory_reasoning_is_held_not_cut():
@@ -125,7 +126,10 @@ def test_adjust_with_contradictory_reasoning_is_held_not_cut():
     )
     assert result.verdicts[0].verdict == 'adjust'
     assert result.accepted_after_review == []
-    assert result.held_by_contradiction[0]['held_for_review'] is True
+    held = result.held_by_contradiction[0]
+    assert held['held_for_review'] is True
+    assert held['was_cut'] is False
+    assert held.get('reviewer_contradiction') is True
 
 
 def test_confirmed_with_normal_reasoning_still_cut():
@@ -179,6 +183,7 @@ def test_apply_reviewer_verdict_contradiction_holds_master_ad():
     assert ad['was_cut'] is False
     assert ad['hold_reason'] == HOLD_REASON_REVIEWER_CONTRADICTION
     assert ad['reviewer_verdict'] == 'confirmed'
+    assert ad.get('reviewer_contradiction') is True
 
 
 def test_apply_reviewer_verdict_contradicted_adjust_keeps_boundaries():
@@ -193,3 +198,4 @@ def test_apply_reviewer_verdict_contradicted_adjust_keeps_boundaries():
     assert ad['held_for_review'] is True
     assert ad['start'] == 120.0
     assert ad['end'] == 180.0
+    assert ad.get('reviewer_contradiction') is True
