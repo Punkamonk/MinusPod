@@ -85,7 +85,9 @@ def test_spectral_step_across_tone_change(tmp_path):
     ev = next(e for e in payload['events'] if e['type'] == 'digital_silence')
     # 440 Hz -> 880 Hz: centroid step ~ +440 Hz.
     assert 300.0 <= ev['centroid_step_hz'] <= 600.0
-    assert any(e['type'] == 'spectral_step' for e in payload['events'])
+    steps = [e for e in payload['events'] if e['type'] == 'spectral_step']
+    assert len(steps) == 1
+    assert steps[0]['time'] == pytest.approx(30.0, abs=0.2)
 
 
 def test_deep_silence_detected(tmp_path):
