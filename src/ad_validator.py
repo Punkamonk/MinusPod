@@ -1,7 +1,7 @@
 """Post-detection validation for ad markers."""
 import re
 import logging
-from typing import ClassVar, Dict, List
+from typing import ClassVar, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -94,6 +94,11 @@ class AdValidator:
         re.IGNORECASE
     )
 
+    # Audio corroboration (ad-splice-detection Layer 1): stored-analysis
+    # signals within this window of a marker edge corroborate the marker.
+    CORROBORATION_WINDOW_S = 5.0
+    CORROBORATION_MIN_VOLUME_STEP_DB = 12.0
+
     def __init__(self, episode_duration: float, segments: List[Dict] = None,
                  episode_description: str = None,
                  false_positive_corrections: List[Dict] = None,
@@ -128,6 +133,7 @@ class AdValidator:
         self.positional_prior = positional_prior
         self.max_ad_duration_override = max_ad_duration_override
         self.cue_gate_enabled = cue_gate_enabled
+        self._audio_analysis = None
 
         if self.false_positive_corrections:
             logger.info(f"Loaded {len(self.false_positive_corrections)} false positive corrections")
@@ -243,15 +249,21 @@ class AdValidator:
         """Check if a time range overlaps with any user-confirmed correction."""
         return self._overlaps_corrections(self.confirmed_corrections, start, end, overlap_threshold)
 
-    def validate(self, ads: List[Dict]) -> ValidationResult:
+    def validate(self, ads: List[Dict],
+                 audio_analysis: Optional[Dict] = None) -> ValidationResult:
         """Validate all ads and return results.
 
         Args:
             ads: List of ad markers from detection
+            audio_analysis: Stored audio-analysis dict for the episode
+                (AudioAnalysisResult.to_dict() shape); used to corroborate
+                heuristic markers with measured audio evidence
 
         Returns:
             ValidationResult with validated ads and statistics
         """
+        self._audio_analysis = audio_analysis
+
         if not ads:
             return ValidationResult(ads=[])
 
@@ -522,6 +534,36 @@ class AdValidator:
                 return max(0.0, confidence - 0.05)
 
         return confidence
+
+    def _audio_corroboration_source(self, ad: Dict) -> Optional[str]:
+        """Return the strongest stored-audio evidence source near the ad's
+        boundaries, or None.
+
+        Layer 1 checks DAI transition pairs and >= 12 dB volume anomalies
+        within +-5s of the ad start or end. Layer 2 adds splice_evidence
+        events (+-3s); Layer 3 adds dai_differential region overlap.
+        """
+        analysis = self._audio_analysis
+        if not analysis:
+            return None
+
+        window = self.CORROBORATION_WINDOW_S
+
+        def near_edge(t):
+            return (abs(t - ad['start']) <= window
+                    or abs(t - ad['end']) <= window)
+
+        volume_hit = False
+        for sig in analysis.get('signals') or []:
+            if not (near_edge(sig.get('start', 0.0)) or near_edge(sig.get('end', 0.0))):
+                continue
+            if sig.get('signal_type') == 'dai_transition_pair':
+                return 'transition_pair'
+            if sig.get('signal_type') in ('volume_increase', 'volume_decrease'):
+                deviation = (sig.get('details') or {}).get('deviation_db') or 0.0
+                if abs(deviation) >= self.CORROBORATION_MIN_VOLUME_STEP_DB:
+                    volume_hit = True
+        return 'volume_anomaly' if volume_hit else None
 
     def _get_text_in_range(self, start: float, end: float) -> str:
         """Get transcript text within time range.

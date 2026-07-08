@@ -807,3 +807,80 @@ class TestCueGatedApproval:
         ad = result.ads[0]
         assert not ad.get('held_for_review')
         assert ad['validation']['decision'] == Decision.ACCEPT.value
+
+
+class TestAudioCorroborationSource:
+    """Layer 1 audio corroboration seam (ad-splice-detection spec 1.1).
+
+    The stored audio_analysis dict is AudioAnalysisResult.to_dict():
+    {'signals': [{'start', 'end', 'signal_type', 'confidence', 'duration',
+    'details'}, ...], 'loudness_baseline', 'analysis_time_seconds', 'errors'}.
+    """
+
+    def _validator(self, analysis):
+        validator = AdValidator(episode_duration=10600.0, segments=[])
+        validator._audio_analysis = analysis
+        return validator
+
+    def _transition_pair(self, start, end, avg_delta_db=15.0):
+        return {
+            'start': start, 'end': end,
+            'signal_type': 'dai_transition_pair',
+            'confidence': 0.95, 'duration': end - start,
+            'details': {'avg_delta_db': avg_delta_db, 'start_direction': 'down',
+                        'start_delta_db': avg_delta_db, 'end_delta_db': avg_delta_db,
+                        'start_from_lufs': -16.0, 'start_to_lufs': -31.0,
+                        'end_from_lufs': -31.0, 'end_to_lufs': -16.0},
+        }
+
+    def _volume_anomaly(self, start, end, deviation_db=-15.0):
+        return {
+            'start': start, 'end': end,
+            'signal_type': 'volume_decrease',
+            'confidence': 0.9, 'duration': end - start,
+            'details': {'deviation_db': deviation_db, 'baseline_lufs': -16.0,
+                        'direction': 'decrease'},
+        }
+
+    def test_validate_stores_audio_analysis_kwarg(self):
+        validator = AdValidator(episode_duration=10600.0, segments=[])
+        analysis = {'signals': [], 'loudness_baseline': -16.0}
+        validator.validate([], audio_analysis=analysis)
+        assert validator._audio_analysis is analysis
+
+    def test_transition_pair_near_marker_start(self):
+        ad = {'start': 10557.6, 'end': 10600.0}
+        analysis = {'signals': [self._transition_pair(10557.4, 10599.6)]}
+        assert self._validator(analysis)._audio_corroboration_source(ad) == 'transition_pair'
+
+    def test_transition_pair_near_marker_end_only(self):
+        # Pair end within 5s of the ad end; pair start far from both edges.
+        ad = {'start': 500.0, 'end': 560.0}
+        analysis = {'signals': [self._transition_pair(400.0, 557.0)]}
+        assert self._validator(analysis)._audio_corroboration_source(ad) == 'transition_pair'
+
+    def test_volume_anomaly_at_boundary(self):
+        ad = {'start': 10557.6, 'end': 10600.0}
+        analysis = {'signals': [self._volume_anomaly(10558.0, 10599.0)]}
+        assert self._validator(analysis)._audio_corroboration_source(ad) == 'volume_anomaly'
+
+    def test_volume_anomaly_below_12db_ignored(self):
+        ad = {'start': 10557.6, 'end': 10600.0}
+        analysis = {'signals': [self._volume_anomaly(10558.0, 10599.0, deviation_db=-8.0)]}
+        assert self._validator(analysis)._audio_corroboration_source(ad) is None
+
+    def test_signal_outside_window_ignored(self):
+        ad = {'start': 10557.6, 'end': 10600.0}
+        analysis = {'signals': [self._transition_pair(10500.0, 10550.0)]}
+        assert self._validator(analysis)._audio_corroboration_source(ad) is None
+
+    def test_no_analysis_returns_none(self):
+        ad = {'start': 10557.6, 'end': 10600.0}
+        validator = AdValidator(episode_duration=10600.0, segments=[])
+        assert validator._audio_corroboration_source(ad) is None
+
+    def test_transition_pair_outranks_volume_anomaly(self):
+        ad = {'start': 10557.6, 'end': 10600.0}
+        analysis = {'signals': [self._volume_anomaly(10558.0, 10599.0),
+                                self._transition_pair(10557.4, 10599.6)]}
+        assert self._validator(analysis)._audio_corroboration_source(ad) == 'transition_pair'
