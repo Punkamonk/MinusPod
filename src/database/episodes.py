@@ -93,7 +93,8 @@ class EpisodeMixin:
                       ed.transcript_vtt,
                       ed.chapters_json, ed.ad_markers_json,
                       ed.first_pass_response, ed.first_pass_prompt,
-                      ed.second_pass_prompt, ed.second_pass_response
+                      ed.second_pass_prompt, ed.second_pass_response,
+                      ed.dai_differential_json
                FROM episodes e
                JOIN podcasts p ON e.podcast_id = p.id
                LEFT JOIN episode_details ed ON e.id = ed.episode_id
@@ -546,6 +547,49 @@ class EpisodeMixin:
         ).fetchone()
         return row['audio_analysis_json'] if row else None
 
+    def save_episode_dai_differential(self, slug: str, episode_id: str,
+                                      dai_differential_json: str):
+        """Save the cross-fetch differential result for an episode."""
+        conn = self.get_connection()
+
+        db_episode_id = self._get_episode_db_id(slug, episode_id)
+        if not db_episode_id:
+            logger.warning(f"Episode not found for dai differential: {slug}/{episode_id}")
+            return
+
+        cursor = conn.execute(
+            "SELECT id FROM episode_details WHERE episode_id = ?",
+            (db_episode_id,)
+        )
+        row = cursor.fetchone()
+
+        if row:
+            conn.execute(
+                "UPDATE episode_details SET dai_differential_json = ? WHERE id = ?",
+                (dai_differential_json, row['id'])
+            )
+        else:
+            conn.execute(
+                """INSERT INTO episode_details (episode_id, dai_differential_json)
+                   VALUES (?, ?)""",
+                (db_episode_id, dai_differential_json)
+            )
+
+        conn.commit()
+        logger.debug(f"[{slug}:{episode_id}] Saved dai differential to database")
+
+    def get_episode_dai_differential(self, slug: str, episode_id: str):
+        """Return the raw dai_differential_json for an episode, or None."""
+        conn = self.get_connection()
+        db_episode_id = self._get_episode_db_id(slug, episode_id)
+        if not db_episode_id:
+            return None
+        row = conn.execute(
+            "SELECT dai_differential_json FROM episode_details WHERE episode_id = ?",
+            (db_episode_id,),
+        ).fetchone()
+        return row['dai_differential_json'] if row else None
+
     def clear_episode_details(self, slug: str, episode_id: str):
         """Clear transcript and ad markers for an episode."""
         conn = self.get_connection()
@@ -638,6 +682,31 @@ class EpisodeMixin:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    _EPISODE_JSON_COLS = frozenset({'ad_markers_json', 'audio_analysis_json'})
+
+    def _get_recent_episode_json_col(self, slug: str, col: str,
+                                     exclude_episode_id: Optional[str] = None,
+                                     limit: int = 30,
+                                     min_duration: float = 60) -> List[Dict]:
+        """Shared query for fetching a JSON detail column from recent processed episodes."""
+        if col not in self._EPISODE_JSON_COLS:
+            raise ValueError(f"Invalid column: {col!r}")
+        conn = self.get_connection()
+        cursor = conn.execute(
+            f"""SELECT e.episode_id, e.original_duration, ed.{col}
+               FROM episodes e
+               JOIN podcasts p ON e.podcast_id = p.id
+               JOIN episode_details ed ON ed.episode_id = e.id
+               WHERE p.slug = ? AND e.status = 'processed'
+                     AND e.episode_id != COALESCE(?, '')
+                     AND e.original_duration > ?
+                     AND ed.{col} IS NOT NULL
+               ORDER BY COALESCE(e.published_at, e.created_at) DESC
+               LIMIT ?""",
+            (slug, exclude_episode_id, min_duration, limit)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_recent_episode_ad_history(self, slug: str,
                                       exclude_episode_id: Optional[str] = None,
                                       limit: int = 30,
@@ -648,21 +717,20 @@ class EpisodeMixin:
         ad_markers_json. Episodes at or under min_duration seconds
         (trailers/bonus clips) are excluded.
         """
-        conn = self.get_connection()
-        cursor = conn.execute(
-            """SELECT e.episode_id, e.original_duration, ed.ad_markers_json
-               FROM episodes e
-               JOIN podcasts p ON e.podcast_id = p.id
-               JOIN episode_details ed ON ed.episode_id = e.id
-               WHERE p.slug = ? AND e.status = 'processed'
-                     AND e.episode_id != COALESCE(?, '')
-                     AND e.original_duration > ?
-                     AND ed.ad_markers_json IS NOT NULL
-               ORDER BY COALESCE(e.published_at, e.created_at) DESC
-               LIMIT ?""",
-            (slug, exclude_episode_id, min_duration, limit)
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        return self._get_recent_episode_json_col(
+            slug, 'ad_markers_json', exclude_episode_id, limit, min_duration)
+
+    def get_recent_audio_analyses(self, slug: str,
+                                  exclude_episode_id: Optional[str] = None,
+                                  limit: int = 5,
+                                  min_duration: float = 60) -> List[Dict]:
+        """Get recent processed episodes' audio analysis for splice calibration.
+
+        Returns newest-first rows with episode_id, original_duration and the
+        raw audio_analysis_json.
+        """
+        return self._get_recent_episode_json_col(
+            slug, 'audio_analysis_json', exclude_episode_id, limit, min_duration)
 
     def get_episodes_by_ids(self, slug: str, episode_ids: List[str]) -> List[Dict]:
         """Get multiple episodes by slug and episode_ids in a single query."""

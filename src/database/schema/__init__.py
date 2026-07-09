@@ -406,6 +406,8 @@ class SchemaMixin:
             ('original_transcript_text', 'TEXT'),
             ('original_segments_json', 'TEXT'),
             ('final_segments_json', 'TEXT'),
+            # Layer 3 cross-fetch differential result (additive; never dropped)
+            ('dai_differential_json', 'TEXT'),
         ]
         for col, definition in details_migrations:
             self._add_column_if_missing(conn, 'episode_details', col, definition, det_cols)
@@ -432,6 +434,8 @@ class SchemaMixin:
             ('cue_snap_lag_override', 'REAL'),
             ('silence_snap_enabled', 'INTEGER'),
             ('transition_snap_enabled', 'INTEGER'),
+            # Layer 3 cross-fetch differential opt-in
+            ('differential_fetch_enabled', 'INTEGER'),
             # Phase C held-for-review per-feed settings
             ('max_ad_duration_override', 'REAL'),
             ('cue_gated_approval', 'INTEGER DEFAULT 0'),

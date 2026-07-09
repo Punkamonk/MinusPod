@@ -1,0 +1,201 @@
+"""Reviewer verdict/reasoning contradiction (spec 1.4).
+
+ROOT CAUSE: _review_single derives confirmed/adjust purely from boundary
+arithmetic (src/ad_reviewer.py:698-720) and never inspects the model's
+reason text (kept.get("reason") at :648 is stored, not evaluated). A model
+response that returns the ad object with unchanged boundaries but a reason
+of "no advertisement content" therefore ships verdict=confirmed and the ad
+is cut (Dillon "Vrbo" 90s false cut; 4 similar TWiT contradictions).
+This is a parser/derivation gap, not malformed model output.
+"""
+import os
+import sys
+import tempfile
+
+os.environ.setdefault('MINUSPOD_DATA_DIR', tempfile.mkdtemp(prefix='contradiction_test_'))
+os.environ.setdefault('SECRET_KEY', 'test-secret')
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+
+from dataclasses import dataclass
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import main_app.processing as processing
+from ad_reviewer import AdReviewer, ReviewVerdict, reasoning_contradicts_cut
+from config import HOLD_REASON_REVIEWER_CONTRADICTION
+
+
+def _mock_segments():
+    return [
+        {'start': 0.0, 'end': 60.0, 'text': 'show content'},
+        {'start': 60.0, 'end': 120.0, 'text': 'before ad'},
+        {'start': 120.0, 'end': 180.0, 'text': 'ad sponsor pitch'},
+        {'start': 180.0, 'end': 240.0, 'text': 'after ad'},
+        {'start': 240.0, 'end': 300.0, 'text': 'more show content'},
+    ]
+
+
+def _mock_episode_meta():
+    return {
+        'podcast_name': 'Test Podcast', 'episode_title': 'Test Episode',
+        'episode_description': 'desc', 'podcast_description': 'pod desc',
+        'slug': 'test-pod', 'episode_id': 'ep1', 'podcast_id': 'p1',
+    }
+
+
+def _build_reviewer(db_settings=None):
+    db_settings = db_settings or {}
+    db = MagicMock()
+    db.get_setting.side_effect = lambda key: db_settings.get(key)
+    db.get_connection.return_value = MagicMock()
+    llm_client = MagicMock()
+    return AdReviewer(db=db, llm_client=llm_client, sponsor_service=None)
+
+
+@dataclass
+class _LLMResp:
+    content: str
+    model: str = "test-model"
+
+
+def _resp(body: str) -> _LLMResp:
+    return _LLMResp(content=body)
+
+
+NEGATIVE_REASONS = [
+    'This segment contains no advertisement content whatsoever',
+    'This is NOT AN AD, it is host conversation',
+    'Window has no ad content at these timestamps',
+    'The span contains no ad and should not be cut',
+]
+
+
+@pytest.mark.parametrize('reason', NEGATIVE_REASONS)
+def test_reasoning_contradicts_cut_matches_negative_patterns(reason):
+    assert reasoning_contradicts_cut(reason) is True
+
+
+def test_reasoning_contradicts_cut_ignores_normal_reasons():
+    assert reasoning_contradicts_cut('Confirmed sponsor read for BetterHelp') is False
+    assert reasoning_contradicts_cut(None) is False
+
+
+def test_confirmed_with_contradictory_reasoning_is_held_not_cut():
+    """Pre-guard, this exact response yielded verdict=confirmed and the ad
+    STAYED in accepted_after_review (see module docstring for root cause)."""
+    reviewer = _build_reviewer({
+        'review_prompt': 'review', 'resurrect_prompt': 'resurrect',
+        'review_max_boundary_shift': '60',
+    })
+    reviewer._llm_client.messages_create.return_value = _resp(
+        '[{"start": 120.0, "end": 180.0, "confidence": 0.9, '
+        '"reason": "This segment contains no advertisement content whatsoever"}]'
+    )
+    ad = {'start': 120.0, 'end': 180.0, 'confidence': 0.9}
+    result = reviewer.review(
+        accepted_ads=[ad], resurrection_eligible=[],
+        segments=_mock_segments(), episode_meta=_mock_episode_meta(),
+        pass_num=1, pass_model='claude-test',
+    )
+    assert result.verdicts[0].verdict == 'confirmed'
+    assert result.accepted_after_review == []
+    held = result.held_by_contradiction[0]
+    assert held['held_for_review'] is True
+    assert held['was_cut'] is False
+    assert held['hold_reason'] == HOLD_REASON_REVIEWER_CONTRADICTION
+    assert held['source'] == 'reviewer'
+    assert held.get('reviewer_contradiction') is True
+
+
+def test_adjust_with_contradictory_reasoning_is_held_not_cut():
+    reviewer = _build_reviewer({
+        'review_prompt': 'review', 'resurrect_prompt': 'resurrect',
+        'review_max_boundary_shift': '60',
+    })
+    reviewer._llm_client.messages_create.return_value = _resp(
+        '[{"start": 115.0, "end": 185.0, "confidence": 0.6, '
+        '"reason": "Not an ad - continuous host monologue"}]'
+    )
+    ad = {'start': 120.0, 'end': 180.0, 'confidence': 0.9}
+    result = reviewer.review(
+        accepted_ads=[ad], resurrection_eligible=[],
+        segments=_mock_segments(), episode_meta=_mock_episode_meta(),
+        pass_num=1, pass_model='claude-test',
+    )
+    assert result.verdicts[0].verdict == 'adjust'
+    assert result.accepted_after_review == []
+    held = result.held_by_contradiction[0]
+    assert held['held_for_review'] is True
+    assert held['was_cut'] is False
+    assert held.get('reviewer_contradiction') is True
+
+
+def test_confirmed_with_normal_reasoning_still_cut():
+    reviewer = _build_reviewer({
+        'review_prompt': 'review', 'resurrect_prompt': 'resurrect',
+        'review_max_boundary_shift': '60',
+    })
+    reviewer._llm_client.messages_create.return_value = _resp(
+        '[{"start": 120.0, "end": 180.0, "confidence": 0.95, '
+        '"reason": "Confirmed sponsor read"}]'
+    )
+    ad = {'start': 120.0, 'end': 180.0, 'confidence': 0.9}
+    result = reviewer.review(
+        accepted_ads=[ad], resurrection_eligible=[],
+        segments=_mock_segments(), episode_meta=_mock_episode_meta(),
+        pass_num=1, pass_model='claude-test',
+    )
+    assert result.accepted_after_review == [ad]
+    assert result.held_by_contradiction == []
+
+
+def test_failure_verdict_keeps_pass1_cut_decision():
+    """Documented fallback (spec 1.4): reviewer unavailable -> trust the
+    pass-1 decision. The ad stays in the cut list and is NOT held."""
+    reviewer = _build_reviewer({
+        'review_prompt': 'review', 'resurrect_prompt': 'resurrect',
+    })
+    with patch('ad_reviewer.call_llm_for_window',
+               return_value=(None, RuntimeError('boom'))):
+        ad = {'start': 120.0, 'end': 180.0, 'confidence': 0.9}
+        result = reviewer.review(
+            accepted_ads=[ad], resurrection_eligible=[],
+            segments=_mock_segments(), episode_meta=_mock_episode_meta(),
+            pass_num=1, pass_model='claude-test',
+        )
+    assert result.verdicts[0].verdict == 'failure'
+    assert result.accepted_after_review == [ad]
+    assert result.held_by_contradiction == []
+    assert 'held_for_review' not in ad
+
+
+def test_apply_reviewer_verdict_contradiction_holds_master_ad():
+    ad = {'start': 120.0, 'end': 180.0, 'was_cut': True}
+    v = ReviewVerdict(
+        pool='accepted', pass_num=1, verdict='confirmed',
+        original_start=120.0, original_end=180.0,
+        reasoning='Contains no ad content', confidence=0.9, model_used='m',
+    )
+    processing._apply_reviewer_verdict_to_ad(ad, v)
+    assert ad['held_for_review'] is True
+    assert ad['was_cut'] is False
+    assert ad['hold_reason'] == HOLD_REASON_REVIEWER_CONTRADICTION
+    assert ad['reviewer_verdict'] == 'confirmed'
+    assert ad.get('reviewer_contradiction') is True
+
+
+def test_apply_reviewer_verdict_contradicted_adjust_keeps_boundaries():
+    ad = {'start': 120.0, 'end': 180.0, 'was_cut': True}
+    v = ReviewVerdict(
+        pool='accepted', pass_num=1, verdict='adjust',
+        original_start=120.0, original_end=180.0,
+        adjusted_start=115.0, adjusted_end=185.0,
+        reasoning='no advertisement present here', model_used='m',
+    )
+    processing._apply_reviewer_verdict_to_ad(ad, v)
+    assert ad['held_for_review'] is True
+    assert ad['start'] == 120.0
+    assert ad['end'] == 180.0
+    assert ad.get('reviewer_contradiction') is True

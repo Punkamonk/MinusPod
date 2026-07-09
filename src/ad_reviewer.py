@@ -12,6 +12,7 @@ from config import (
     AD_REVIEWER_PARALLEL_ADS_MIN,
     AD_REVIEWER_PARALLEL_ADS_MAX,
     resolve_env_backed_default,
+    HOLD_REASON_REVIEWER_CONTRADICTION,
     AUDIO_CUE_ROLE_DEFAULT,
     AUDIO_CUE_ROLE_NON_AD,
     AUDIO_CUE_TYPE_CONTENT_TRANSITION,
@@ -48,6 +49,28 @@ def _review_failure_reason(error: Exception) -> str:
     if is_rate_limit_error(error):
         return "Review unavailable: LLM rate limit reached"
     return "Review unavailable: LLM call failed"
+
+
+# Verdict/reasoning contradiction guard (spec 1.4). Verdicts are derived
+# from boundary arithmetic, so a model that returns the ad unchanged while
+# its reason text says the span is not an ad ships as "confirmed". Reasoning
+# matching one of these substrings (case-insensitive) gets held for human
+# review instead of auto-cut. Never auto-reject: the reasoning could be the
+# wrong half of the contradiction.
+REVIEWER_CONTRADICTION_PATTERNS = (
+    'no advertisement',
+    'not an ad',
+    'no ad content',
+    'contains no ad',
+)
+
+
+def reasoning_contradicts_cut(reasoning: Optional[str]) -> bool:
+    """True when reviewer reasoning asserts the span is not an ad."""
+    if not reasoning:
+        return False
+    lowered = reasoning.lower()
+    return any(p in lowered for p in REVIEWER_CONTRADICTION_PATTERNS)
 
 
 def _resolve_reviewer_parallel_ads() -> int:
@@ -134,6 +157,7 @@ class ReviewResult:
     rejected_by_reviewer: List[Dict] = field(default_factory=list)
     resurrected: List[Dict] = field(default_factory=list)
     verdicts: List[ReviewVerdict] = field(default_factory=list)
+    held_by_contradiction: List[Dict] = field(default_factory=list)
 
 
 def _format_cue_section(*, audio_analysis, ad_start: float, ad_end: float,
@@ -265,6 +289,44 @@ def _format_cue_section(*, audio_analysis, ad_start: float, ad_end: float,
             lines.append(
                 "Prefer aligning a boundary to a marker when the transcript "
                 "supports it, but a marker never forces a cut."
+            )
+
+        splice = getattr(audio_analysis, 'splice_evidence', None) or {}
+        near_splice = []
+        for event in splice.get('events', []):
+            time = event.get('time')
+            if time is None:
+                continue
+            end_time = event.get('end_time')
+            end_time = end_time if end_time is not None else time
+            near = any(
+                abs(event_time - ad_edge) <= bucket_radius
+                for ad_edge in (ad_start, ad_end)
+                for event_time in (time, end_time)
+            )
+            if near:
+                near_splice.append((event, time, end_time))
+        if near_splice:
+            lines.append("SPLICE EVIDENCE NEAR BOUNDARIES:")
+            for event, time, end_time in near_splice:
+                parts = [f"{event.get('duration_s', 0.0):.1f}s"]
+                if event.get('depth_dbfs') is not None:
+                    parts.append(f"depth {event['depth_dbfs']} dBFS")
+                if event.get('loudness_step_lu') is not None:
+                    parts.append(f"loudness step {event['loudness_step_lu']:+.1f} LU")
+                if event.get('centroid_step_hz') is not None:
+                    parts.append(f"centroid step {event['centroid_step_hz']:+.0f} Hz")
+                if event.get('flatness_step') is not None:
+                    parts.append(f"flatness step {event['flatness_step']:+.2f}")
+                lines.append(
+                    f"  - {event.get('type')} at {time:.1f}s-{end_time:.1f}s "
+                    f"({', '.join(parts)})"
+                )
+            lines.append(
+                "These are encoding artifacts typical of dynamic ad insertion. "
+                "An untranscribed span next to one is likely inserted ad audio, "
+                "not the show going quiet -- weigh that when the transcript "
+                "inside the candidate is sparse or empty."
             )
 
         # Pre/post-roll position bias: an ad wholly outside the content span
@@ -458,6 +520,26 @@ class AdReviewer:
                 marked["reviewer_model"] = verdict.model_used
                 marked["source"] = "reviewer"
                 result.rejected_by_reviewer.append(marked)
+            elif (verdict.verdict in ("confirmed", "adjust")
+                    and reasoning_contradicts_cut(verdict.reasoning)):
+                held = dict(updated_ad)
+                held["was_cut"] = False
+                held["held_for_review"] = True
+                held["hold_reason"] = HOLD_REASON_REVIEWER_CONTRADICTION
+                held["reviewer_verdict"] = verdict.verdict
+                held["reviewer_reasoning"] = verdict.reasoning
+                held["reviewer_confidence"] = verdict.confidence
+                held["reviewer_model"] = verdict.model_used
+                held["source"] = "reviewer"
+                held["reviewer_contradiction"] = True
+                logger.warning(
+                    f"[{episode_meta.get('slug')}:{episode_meta.get('episode_id')}] "
+                    f"Reviewer contradiction hold @ "
+                    f"{verdict.original_start:.1f}-{verdict.original_end:.1f}s: "
+                    f"verdict={verdict.verdict} but reasoning says not an ad: "
+                    f"reasoning={verdict.reasoning[:80]!r}"
+                )
+                result.held_by_contradiction.append(held)
             else:
                 result.accepted_after_review.append(updated_ad)
 

@@ -17,6 +17,7 @@ from api import (
     _serialize_nullable_bool, _deserialize_nullable_bool,
     _normalize_nullable_finite_float,
 )
+from differential_fetcher import is_likely_dai_feed
 from positional_prior import compute_ad_distribution
 from utils.language import LANGUAGE_CODE_RE
 from utils.opml import build_opml_xml, modified_feed_url
@@ -129,12 +130,13 @@ def _normalize_cue_float_override(value, field_name, lo, hi):
     return _normalize_nullable_finite_float(value, field_name, lo, hi)
 
 
-# (json_key, db_col) for the boundary-snap and held-review opt-in flags.
-# Nullable-bool columns; NULL/0 read as off everywhere downstream.
+# (json_key, db_col) for the boundary-snap, held-review, and differential
+# opt-in flags. Nullable-bool columns; NULL/0 read as off downstream.
 _SNAP_FLAG_FIELDS = [
-    ('silenceSnapEnabled',    'silence_snap_enabled'),
-    ('transitionSnapEnabled', 'transition_snap_enabled'),
-    ('cueGatedApproval',      'cue_gated_approval'),
+    ('silenceSnapEnabled',       'silence_snap_enabled'),
+    ('transitionSnapEnabled',    'transition_snap_enabled'),
+    ('cueGatedApproval',         'cue_gated_approval'),
+    ('differentialFetchEnabled', 'differential_fetch_enabled'),
 ]
 
 def _cue_override_fields(podcast) -> dict:
@@ -546,6 +548,12 @@ def get_feed(slug):
     # Convert auto_process_override from string to boolean/null
     auto_process_override_result = _deserialize_auto_process(podcast.get('auto_process_override'))
 
+    # DAI-likelihood hint from recent enclosure URLs (Layer 3). Prefix
+    # services embed the chain in the URL, so no network round trip needed.
+    recent_episodes, _ = db.get_episodes(slug, limit=5)
+    dai_likely = is_likely_dai_feed(
+        [e.get('original_url') for e in recent_episodes])
+
     return json_response({
         'slug': podcast['slug'],
         'title': podcast['title'] or podcast['slug'],
@@ -559,6 +567,7 @@ def get_feed(slug):
         'createdAt': podcast.get('created_at'),
         'networkId': podcast.get('network_id'),
         'daiPlatform': podcast.get('dai_platform'),
+        'daiLikely': dai_likely,
         'networkIdOverride': podcast.get('network_id_override'),
         'autoProcessOverride': auto_process_override_result,
         'languageOverride': podcast.get('language_override'),

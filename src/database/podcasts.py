@@ -94,13 +94,19 @@ class PodcastMixin:
         'cue_gated_approval',
     )
 
+    # Layer 3 cross-fetch differential opt-in (NULL/0 = off, 1 = on).
+    _DIFFERENTIAL_COLS = (
+        'differential_fetch_enabled',
+    )
+
     def get_podcast_cue_settings_overrides(self, podcast_id: int) -> dict:
         """Per-feed cue knob overrides plus boundary-snap flags in one query.
 
         Returns a dict with keys matching the DB column names. Each value is
         the raw DB value (None means NULL / no override set).
         """
-        cols = self._CUE_OVERRIDE_COLS + self._SNAP_FLAG_COLS + self._HELD_REVIEW_COLS
+        cols = (self._CUE_OVERRIDE_COLS + self._SNAP_FLAG_COLS
+                + self._HELD_REVIEW_COLS + self._DIFFERENTIAL_COLS)
         cols_sql = ', '.join(cols)
         conn = self.get_connection()
         cursor = conn.execute(
@@ -153,6 +159,7 @@ class PodcastMixin:
                 *self._CUE_OVERRIDE_COLS,
                 *self._SNAP_FLAG_COLS,
                 *self._HELD_REVIEW_COLS,
+                *self._DIFFERENTIAL_COLS,
                 'max_episodes', 'etag',
                 'last_modified_header', 'only_expose_processed_episodes',
             ):

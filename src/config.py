@@ -41,6 +41,9 @@ MIN_UNCOVERED_TAIL_DURATION = 15.0  # Min seconds for an uncovered tail to be pr
 # Hold-reason constants (Phase C held-for-review). Stored in ad['hold_reason'].
 HOLD_REASON_MAX_DURATION = 'max_duration'
 HOLD_REASON_NO_CUE = 'no_cue_evidence'
+HOLD_REASON_NO_SPLICE = 'no_splice_evidence'
+HOLD_REASON_REVIEWER_CONTRADICTION = 'reviewer_contradiction'
+HOLD_REASON_UNCORROBORATED_TAIL = 'uncorroborated_tail'
 
 
 def is_cue_backed(ad) -> bool:
@@ -262,6 +265,39 @@ AUDIO_CUE_CAPTURE_WARN_AD_SECONDS = 5.0
 SILENCE_SNAP_NOISE_DB = -50.0               # Amplitude (dBFS) below which audio counts as silence
 SILENCE_SNAP_MIN_DURATION_SECONDS = 0.3     # Shortest sub-threshold span that counts as a silence
 SILENCE_SNAP_MAX_DISTANCE_SECONDS = 2.0     # Farthest an ad edge may move to reach a silence
+# ============================================================
+# Splice-evidence detection (spec 2.1)
+# ============================================================
+# Encoding artifacts that mark DAI splice points. Evidence only: consumers
+# corroborate, snap, veto, and annotate prompts -- nothing cuts on these
+# alone. Numeric defaults are the cold-start values; per-feed calibration
+# raises effective thresholds on splice-noisy feeds.
+SPLICE_DIGITAL_SILENCE_DBFS = -80.0       # RMS below this is encoded digital silence
+SPLICE_DIGITAL_SILENCE_MIN_SECONDS = 0.5  # Min run length for a digital_silence event
+SPLICE_DEEP_SILENCE_DBFS = -70.0          # RMS below this is a deep silence
+SPLICE_DEEP_SILENCE_MIN_SECONDS = 1.4     # Min run length for a deep_silence event
+SPLICE_LOUDNESS_GATE_LUFS = -70.0         # Ignore momentary frames at/below this
+SPLICE_LOUDNESS_STEP_MIN_LU = 5.0         # Min |step| to emit a loudness_step event
+SPLICE_CENTROID_STEP_MIN_HZ = 300.0       # Min |centroid step| for a spectral_step event
+SPLICE_FLATNESS_STEP_MIN = 0.10           # Min |flatness step| for a spectral_step event
+SPLICE_STEP_SIDE_WINDOW_SECONDS = 5.0     # Side window for spectral aggregation
+# Rows to FETCH, not the calibrated threshold. Set above MIN_EPISODES because
+# pre-schema rows pass the audio_analysis_json NOT NULL filter but lack the
+# splice_evidence key, so more than MIN rows may be needed to gather MIN valid
+# payloads. Plan named 5; the buffer is the intentional divergence.
+SPLICE_CALIBRATION_RECENT_EPISODES = 10
+SPLICE_CALIBRATION_MIN_EPISODES = 5       # Min VALID payloads for calibrated; below this: cold_start
+SPLICE_CALIBRATION_MAX_FP_PER_HOUR = 1.0  # Target content false-positive event rate
+SPLICE_CORROBORATION_WINDOW_SECONDS = 3.0  # Event-to-edge distance that corroborates a marker
+VETO_MIN_CUT_SECONDS = 60.0  # Cuts at/over this from claude/text_pattern need splice evidence
+TERMINAL_SNAP_WINDOW_SECONDS = 30.0        # Max backward scan from a terminal marker's start
+TERMINAL_SNAP_EOF_TOLERANCE_SECONDS = 2.0  # Marker end within this of EOF counts as terminal
+# Tail no-VAD re-transcription window (spec 1.2). An untranscribed tail whose
+# length falls between min and max is re-run with vad_filter=False so quiet
+# DAI post-rolls reach the LLM windows. DB-tunable via the
+# tail_retranscribe_min_seconds / tail_retranscribe_max_seconds settings.
+TAIL_RETRANSCRIBE_MIN_SECONDS = 10.0
+TAIL_RETRANSCRIBE_MAX_SECONDS = 600.0
 AUDIO_CUE_PAIR_CONFIDENCE = 0.85        # Min cue confidence to synthesize an ad from a pair
 AUDIO_CUE_PAIR_MIN_BREAK_SECONDS = 30.0   # Shortest plausible cue-pair break
 AUDIO_CUE_PAIR_MAX_BREAK_SECONDS = 480.0  # Longest plausible cue-pair break
@@ -510,6 +546,11 @@ def resolve_transition_snap_enabled(db, podcast_id):
     return _resolve_snap_flag(db, podcast_id, 'transition_snap_enabled')
 
 
+def resolve_differential_fetch_enabled(db, podcast_id):
+    """Per-feed cross-fetch differential opt-in (Layer 3). Default False."""
+    return _resolve_snap_flag(db, podcast_id, 'differential_fetch_enabled')
+
+
 def resolve_max_ad_duration_override(db, podcast_id) -> Optional[float]:
     """Per-feed max ad duration cap in seconds (Phase C held-for-review).
 
@@ -553,6 +594,32 @@ def resolve_silence_snap_tunables(db):
     except Exception:
         _tunable_logger.warning('resolve_silence_snap_tunables: read failed; using defaults')
         return dict(_SILENCE_SNAP_DEFAULTS)
+
+
+_TAIL_RETRANSCRIBE_DEFAULTS = {
+    'min_seconds': TAIL_RETRANSCRIBE_MIN_SECONDS,
+    'max_seconds': TAIL_RETRANSCRIBE_MAX_SECONDS,
+}
+
+
+def resolve_tail_retranscribe_tunables(db):
+    """Tail no-VAD re-transcription window: min/max untranscribed-tail length.
+
+    Falls back to code defaults when db is None or a read fails.
+    """
+    if not db:
+        return dict(_TAIL_RETRANSCRIBE_DEFAULTS)
+    try:
+        return {
+            'min_seconds': db.get_setting_float(
+                'tail_retranscribe_min_seconds', TAIL_RETRANSCRIBE_MIN_SECONDS),
+            'max_seconds': db.get_setting_float(
+                'tail_retranscribe_max_seconds', TAIL_RETRANSCRIBE_MAX_SECONDS),
+        }
+    except Exception:
+        _tunable_logger.warning(
+            'resolve_tail_retranscribe_tunables: read failed; using defaults')
+        return dict(_TAIL_RETRANSCRIBE_DEFAULTS)
 
 
 # Cue template types (#350). A cue is one of a fixed set of types chosen from a
@@ -650,6 +717,7 @@ SHORT_CUT_KEEP_CONFIDENCE = 0.9      # Keep a shorter cut anyway at/above this c
 POST_ROLL_TRIM_THRESHOLD = 30.0      # Threshold for trimming post-roll content
 MERGE_GAP_SECONDS = 1.0              # Cuts separated by less than this merge into one
                                      # (distinct from the validator's MERGE_GAP_THRESHOLD)
+RENDER_DRIFT_WARN_SECONDS = 1.0      # Warn when rendered duration diverges from marker arithmetic
 SEGMENT_AD_COVERAGE_THRESHOLD = 0.8  # Drop a transcript segment when removed ads
                                      # cover more than this fraction of it
 

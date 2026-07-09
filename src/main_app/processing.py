@@ -18,22 +18,30 @@ from ad_detector import (
 from ad_detector.cue_boundary_snap import snap_ad_boundaries_to_cues
 from ad_detector.cue_pair_ads import synthesize_ads_from_cue_pairs
 from ad_detector.cue_telemetry import build_cue_detection_records
+from ad_detector.boundaries import snap_terminal_ad_to_splice
 from ad_detector.silence_boundary_snap import snap_ad_boundaries_to_silence
 from ad_reviewer import (
-    AdReviewer, ReviewVerdict, split_resurrection_pool,
+    AdReviewer, ReviewVerdict, reasoning_contradicts_cut,
+    split_resurrection_pool,
 )
 from cancel import ProcessingCancelled, _check_cancel, _cancel_events, _cancel_events_lock
+from differential_fetcher import fetch_and_diff
 from utils.time import ranges_overlap, utc_now_iso
 from config import (
     MIN_CUT_CONFIDENCE, MAX_EPISODE_RETRIES,
     MIN_CONTENT_BETWEEN_ADS_SECONDS,
     AUDIO_CUE_PAIR_CONFIDENCE, AUDIO_CUE_PAIR_ORIENT_WINDOW_SECONDS,
     HOLD_REASON_NO_CUE,
+    HOLD_REASON_REVIEWER_CONTRADICTION,
     is_cue_backed, is_pending_review,
     resolve_feed_cue_settings,
     resolve_silence_snap_tunables,
+    resolve_tail_retranscribe_tunables,
     resolve_max_ad_duration_override,
     resolve_cue_gated_approval,
+    resolve_differential_fetch_enabled,
+    TERMINAL_SNAP_WINDOW_SECONDS,
+    VETO_MIN_CUT_SECONDS,
 )
 from llm_capabilities import (
     PASS_AD_DETECTION_1, PASS_AD_DETECTION_2,
@@ -42,6 +50,8 @@ from llm_capabilities import (
 )
 from llm_client import is_retryable_error, is_llm_api_error, is_rate_limit_error, start_episode_token_tracking, get_episode_token_totals
 from positional_prior import format_prior_hint, load_positional_prior
+from splice_calibration import compute_splice_calibration
+from transcriber import extract_audio_chunk
 from utils.constants import EpisodeStatus
 from utils.episode_paths import episode_relative_path
 from utils.gpu import get_available_memory_gb, clear_gpu_memory
@@ -229,6 +239,75 @@ def start_background_processing(slug, episode_id, original_url, title, podcast_n
     return True, "started"
 
 
+def _retranscribe_tail_no_vad(slug, episode_id, audio_path, segments,
+                              podcast_name, language_override):
+    """Re-transcribe the untranscribed episode tail without VAD (spec 1.2).
+
+    Whisper's VAD drops quiet DAI post-rolls, so the transcript can end well
+    before the audio does and no LLM window ever sees the tail. When the gap
+    is inside the configured window, re-run just the tail with
+    vad_filter=False and append the segments flagged novad_tail=True.
+    On the API whisper backend the tail is sent as its own upload (no remote
+    VAD switch exists); that is the intended behavior. Returns
+    (segments, tail_added).
+    """
+    if not segments:
+        return segments, False
+    duration = transcriber.get_audio_duration(audio_path)
+    if not duration:
+        return segments, False
+    last_end = segments[-1]['end']
+    gap = duration - last_end
+    tunables = resolve_tail_retranscribe_tunables(db)
+    if gap < tunables['min_seconds'] or gap > tunables['max_seconds']:
+        return segments, False
+
+    audio_logger.info(
+        f"[{slug}:{episode_id}] Untranscribed tail {gap:.1f}s "
+        f"({last_end:.1f}s-{duration:.1f}s); re-transcribing without VAD")
+    chunk_path = extract_audio_chunk(audio_path, last_end, duration)
+    if not chunk_path:
+        audio_logger.warning(
+            f"[{slug}:{episode_id}] Tail chunk extraction failed; skipping")
+        return segments, False
+    try:
+        tail_segments = transcriber.transcribe(
+            chunk_path, podcast_name=podcast_name,
+            language_override=language_override, vad_filter=False)
+    except Exception as e:
+        # Tail pass is best-effort: a failure here must not kill the episode.
+        audio_logger.warning(
+            f"[{slug}:{episode_id}] Tail re-transcription failed; "
+            f"proceeding without tail: {e}")
+        return segments, False
+    finally:
+        if os.path.exists(chunk_path):
+            try:
+                os.unlink(chunk_path)
+            except OSError:
+                pass
+    if not tail_segments:
+        audio_logger.info(
+            f"[{slug}:{episode_id}] Tail re-transcription produced no segments")
+        return segments, False
+
+    for seg in tail_segments:
+        seg['start'] += last_end
+        seg['end'] += last_end
+        for word in seg.get('words') or []:
+            word['start'] += last_end
+            word['end'] += last_end
+        seg['novad_tail'] = True
+    tail_segments = transcriber.filter_hallucinations(tail_segments)
+    if not tail_segments:
+        return segments, False
+    audio_logger.info(
+        f"[{slug}:{episode_id}] Tail re-transcription added "
+        f"{len(tail_segments)} segment(s) ({tail_segments[0]['start']:.1f}s-"
+        f"{tail_segments[-1]['end']:.1f}s)")
+    return segments + tail_segments, True
+
+
 def _download_and_transcribe(slug, episode_id, episode_url, podcast_name):
     """Pipeline stage: Download audio and get/create transcript segments.
 
@@ -275,6 +354,17 @@ def _download_and_transcribe(slug, episode_id, episode_url, podcast_name):
             audio_path = transcriber.download_audio(episode_url)
             if not audio_path:
                 raise Exception("Failed to download audio")
+        language_override = get_feed_language_override(db, slug)
+        segments, tail_added = _retranscribe_tail_no_vad(
+            slug, episode_id, audio_path, segments, podcast_name,
+            language_override)
+        if tail_added:
+            # save_original_* stores are write-once records of the first
+            # pre-cut transcription (database/episodes.py:410-431 COALESCE);
+            # only the live transcript is refreshed here. The tail is
+            # re-derived on each reprocess, which is idempotent.
+            storage.save_transcript(
+                slug, episode_id, transcriber.segments_to_text(segments))
     else:
         available, cdn_error = transcriber.check_audio_availability(episode_url)
         if not available:
@@ -310,6 +400,10 @@ def _download_and_transcribe(slug, episode_id, episode_url, podcast_name):
         duration_min = segments[-1]['end'] / 60 if segments else 0
         audio_logger.info(f"[{slug}:{episode_id}] Transcription complete: {len(segments)} segments, {duration_min:.1f} min")
 
+        segments, _tail_added = _retranscribe_tail_no_vad(
+            slug, episode_id, audio_path, segments, podcast_name,
+            language_override)
+
         transcript_text = transcriber.segments_to_text(segments)
         storage.save_transcript(slug, episode_id, transcript_text)
         storage.save_original_transcript(slug, episode_id, transcript_text)
@@ -342,6 +436,12 @@ def _run_audio_analysis(slug, episode_id, audio_path, segments):
             for err in result.errors:
                 audio_logger.warning(f"[{slug}:{episode_id}] Audio analysis warning: {err}")
 
+        # Attach per-feed calibration (spec 2.2) before persisting so the
+        # stored payload and all downstream consumers see the same dict.
+        # The detector stamps a cold_start placeholder; this replaces it.
+        if result.splice_evidence is not None:
+            result.splice_evidence['calibration'] = compute_splice_calibration(
+                db, slug, exclude_episode_id=episode_id)
         db.save_episode_audio_analysis(slug, episode_id, json.dumps(result.to_dict()))
         return result
     except Exception as e:
@@ -349,10 +449,65 @@ def _run_audio_analysis(slug, episode_id, audio_path, segments):
         return None
 
 
+def _make_validator_audio_analysis(audio_analysis_result, dai_differential):
+    """Build the audio_analysis dict passed to AdValidator.
+
+    Carries dai_differential even when Layer 2 (audio analysis) returned None
+    so that a Layer 2 failure does not suppress Layer 3 (cross-fetch
+    differential) corroboration. Mirrors the recut path which manually merges
+    dai_differential into the stored audio_analysis dict.
+    """
+    if audio_analysis_result is not None:
+        return audio_analysis_result.to_dict()
+    if dai_differential is not None:
+        return {'dai_differential': dai_differential}
+    return None
+
+
+def _run_differential_fetch(slug, episode_id, episode_url, audio_path, podcast_id):
+    """Pipeline stage: cross-fetch differential (Layer 3, per-feed opt-in).
+
+    Returns the fetch_and_diff result dict, or None when the feed is not
+    opted in or an unexpected failure occurs. Never raises (except
+    ProcessingCancelled): the flag read, status update, fetch, and store are
+    all guarded so nothing here can fail the episode. The pipeline continues.
+    """
+    try:
+        if not resolve_differential_fetch_enabled(db, podcast_id):
+            return None
+        status_service.update_job_stage("pass1:differential", 22)
+        audio_logger.info(f"[{slug}:{episode_id}] Differential fetch: starting")
+        work_dir = tempfile.mkdtemp(prefix='dai_diff_')
+        try:
+            result = fetch_and_diff(episode_url, audio_path, work_dir)
+        except Exception as e:
+            # fetch_and_diff traps expected failures itself; this guards the rest.
+            audio_logger.warning(f"[{slug}:{episode_id}] Differential fetch failed: {e}")
+            result = {'status': 'error', 'regions': [], 'refetch_meta': {},
+                      'error': str(e)}
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        try:
+            db.save_episode_dai_differential(slug, episode_id, json.dumps(result))
+        except Exception as e:
+            audio_logger.warning(f"[{slug}:{episode_id}] Differential store failed: {e}")
+        diff_count = len([r for r in result.get('regions', [])
+                          if r.get('kind') == 'differential'])
+        audio_logger.info(
+            f"[{slug}:{episode_id}] Differential fetch: status={result.get('status')} "
+            f"differential_regions={diff_count}")
+        return result
+    except Exception as e:
+        # Outer non-fatal boundary: the flag read, status update, or mkdtemp
+        # can raise outside the inner guards; the episode must not fail here.
+        audio_logger.warning(f"[{slug}:{episode_id}] Differential stage failed: {e}")
+        return None
+
+
 def _detect_ads_first_pass(ctx, segments, audio_path,
                             skip_patterns, audio_analysis_result,
                             progress_callback, cancel_event=None,
-                            positional_prior_hint=""):
+                            positional_prior_hint="", dai_differential=None):
     """Pipeline stage: Run first-pass Claude ad detection.
 
     Returns (first_pass_ads, first_pass_count, ad_result).
@@ -368,6 +523,7 @@ def _detect_ads_first_pass(ctx, segments, audio_path,
         skip_patterns=skip_patterns,
         progress_callback=progress_callback,
         audio_analysis=audio_analysis_result,
+        dai_differential=dai_differential,
         cancel_event=cancel_event,
         ctx=ctx,
         positional_prior_hint=positional_prior_hint,
@@ -649,7 +805,8 @@ def _gate_validation_by_confidence(slug, episode_id, validation_ads, min_cut_con
 def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
                           episode_description, episode_duration, min_cut_confidence,
                           podcast_name, skip_patterns=False, positional_prior=None,
-                          max_ad_duration_override=None, cue_gate_enabled=False):
+                          max_ad_duration_override=None, cue_gate_enabled=False,
+                          audio_analysis=None):
     """Pipeline stage: Refine ad boundaries, detect rolls, validate, gate by confidence.
 
     Returns (ads_to_remove, all_ads_with_validation).
@@ -682,8 +839,11 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
         positional_prior=positional_prior,
         max_ad_duration_override=max_ad_duration_override,
         cue_gate_enabled=cue_gate_enabled,
+        splice_veto_enabled=db.get_setting_bool('splice_veto_enabled', default=True),
+        veto_min_cut_seconds=db.get_setting_float('veto_min_cut_seconds',
+                                                  VETO_MIN_CUT_SECONDS),
     )
-    validation_result = validator.validate(all_ads)
+    validation_result = validator.validate(all_ads, audio_analysis=audio_analysis)
 
     audio_logger.info(
         f"[{slug}:{episode_id}] Validation: "
@@ -924,6 +1084,17 @@ def _apply_reviewer_verdict_to_ad(ad, v):
         ad['reviewer_confidence'] = v.confidence
     if v.model_used:
         ad['reviewer_model'] = v.model_used
+    if (v.verdict in ('confirmed', 'adjust')
+            and reasoning_contradicts_cut(v.reasoning)):
+        # Contradiction guard (spec 1.4): hold for a human, never auto-reject.
+        # Boundaries stay at the pass-1 values; an "adjust" whose reasoning
+        # denies the ad exists is not a boundary correction to trust.
+        ad['was_cut'] = False
+        ad['held_for_review'] = True
+        ad['hold_reason'] = HOLD_REASON_REVIEWER_CONTRADICTION
+        ad['source'] = 'reviewer'
+        ad['reviewer_contradiction'] = True
+        return
     if v.verdict == 'adjust':
         ad['reviewer_original_start'] = v.original_start
         ad['reviewer_original_end'] = v.original_end
@@ -1029,6 +1200,47 @@ def _run_ad_reviewer(slug, episode_id, podcast_id, ads_to_remove,
     storage.save_combined_ads(slug, episode_id, all_ads_with_validation)
 
     return new_ads_to_remove, all_ads_with_validation
+
+
+def _snap_terminal_starts(slug, episode_id, ads_to_remove, all_ads_with_validation,
+                          segments, audio_analysis_result, episode_duration):
+    """Terminal boundary snap (spec 2.3b): pull a terminal cut's start back
+    to the strongest deep-silence splice event. Runs after the reviewer,
+    whose adjust verdicts are what move Dillon-style starts inside the ad
+    block. Mutates matching master entries in place; returns the cut list.
+    """
+    if not ads_to_remove or not episode_duration:
+        return ads_to_remove
+    splice = getattr(audio_analysis_result, 'splice_evidence', None) or {}
+    events = splice.get('events') or []
+    if not events:
+        return ads_to_remove
+    window_s = db.get_setting_float('terminal_snap_window_seconds',
+                                    TERMINAL_SNAP_WINDOW_SECONDS)
+    snapped = snap_terminal_ad_to_splice(
+        ads_to_remove, segments, events, episode_duration, window_s,
+        coverage_ads=all_ads_with_validation,
+    )
+    changed = False
+    for old, new in zip(ads_to_remove, snapped):
+        if new['start'] >= old['start']:
+            continue
+        changed = True
+        audio_logger.info(
+            f"[{slug}:{episode_id}] Terminal snap: cut start "
+            f"{old['start']:.1f}s -> {new['start']:.1f}s "
+            f"(-{old['start'] - new['start']:.1f}s)"
+        )
+        for master in all_ads_with_validation:
+            if master is old or (master.get('start') == old['start']
+                                 and master.get('end') == old['end']):
+                master['start'] = new['start']
+                master['terminal_snap'] = new['terminal_snap']
+                break
+    if not changed:
+        return ads_to_remove
+    storage.save_combined_ads(slug, episode_id, all_ads_with_validation)
+    return snapped
 
 
 def _complete_cut_tails(slug, episode_id, ads_to_remove, all_ads_with_validation,
@@ -1815,6 +2027,30 @@ def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
         if a.get('was_cut'):
             a['_saved_was_cut'] = True
 
+    # Stored audio analysis re-corroborates vad_gap markers on recut; without
+    # it re-validation would strip corroborated_by and re-clamp.
+    raw_analysis = db.get_episode_audio_analysis(slug, episode_id)
+    try:
+        audio_analysis = json.loads(raw_analysis) if raw_analysis else None
+    except (TypeError, ValueError):
+        audio_analysis = None
+
+    # Merge episode-level dai_differential into the audio_analysis dict so the
+    # validator's _audio_corroboration_source can find it on the recut path.
+    # The persisted audio_analysis_json does not include dai_differential
+    # (that lives in episode_details.dai_differential_json separately).
+    try:
+        raw_dd = db.get_episode_dai_differential(slug, episode_id)
+        if raw_dd:
+            dd_parsed = json.loads(raw_dd)
+            if dd_parsed:
+                if audio_analysis is None:
+                    audio_analysis = {}
+                audio_analysis['dai_differential'] = dd_parsed
+    except (TypeError, ValueError, AttributeError):
+        # AttributeError: db is None or method absent on older db
+        pass
+
     validator = AdValidator(
         episode_duration, segments, episode_description,
         false_positive_corrections=false_positive_corrections,
@@ -1822,8 +2058,11 @@ def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
         min_cut_confidence=min_cut_confidence,
         max_ad_duration_override=max_ad_duration_override,
         cue_gate_enabled=cue_gate_enabled,
+        splice_veto_enabled=db.get_setting_bool('splice_veto_enabled', default=True),
+        veto_min_cut_seconds=db.get_setting_float('veto_min_cut_seconds',
+                                                  VETO_MIN_CUT_SECONDS),
     )
-    validation_result = validator.validate(all_ads)
+    validation_result = validator.validate(all_ads, audio_analysis=audio_analysis)
 
     # Force previously-cut markers back to ACCEPT so the gate cuts them again,
     # overriding any hold/review outcome from re-validation. FP/confirm rejects
@@ -2102,9 +2341,26 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
         audio_path, segments = _download_and_transcribe(slug, episode_id, episode_url, podcast_name)
         _check_cancel(cancel_event, slug, episode_id)
 
+        # Stage 1b: Cross-fetch differential (Layer 3, per-feed opt-in).
+        # Runs after transcription so the natural delay separates the two
+        # fetches; results are ready before first-pass detection. Non-fatal.
+        dai_differential = _run_differential_fetch(
+            slug, episode_id, episode_url, audio_path,
+            podcast_settings.get('id') if podcast_settings else None)
+        _check_cancel(cancel_event, slug, episode_id)
+
         try:
             # Stage 2: Audio analysis
             audio_analysis_result = _run_audio_analysis(slug, episode_id, audio_path, segments)
+            if audio_analysis_result is not None and dai_differential is not None:
+                # Ride along on the analysis result so the detector prompt and
+                # the validator's audio_analysis dict see the differential.
+                audio_analysis_result.dai_differential = dai_differential
+            # Build the dict the validator receives; carry dai_differential even
+            # when Layer 2 (audio analysis) failed so Layer 3 is decoupled from
+            # Layer 2 success.
+            _val_audio_analysis = _make_validator_audio_analysis(
+                audio_analysis_result, dai_differential)
             # Count audio-cue signals (issue #350) for the stats dashboard.
             audio_cue_count = (len(audio_analysis_result.get_signals_by_type('audio_cue'))
                                if audio_analysis_result else 0)
@@ -2154,6 +2410,7 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                 cancel_event=cancel_event,
                 positional_prior_hint=format_prior_hint(positional_prior,
                                                         episode_duration),
+                dai_differential=dai_differential,
             )
             _check_cancel(cancel_event, slug, episode_id)
 
@@ -2171,6 +2428,7 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                 skip_patterns=skip_patterns, positional_prior=positional_prior,
                 max_ad_duration_override=max_ad_duration_override,
                 cue_gate_enabled=cue_gate_enabled,
+                audio_analysis=_val_audio_analysis,
             )
             _check_cancel(cancel_event, slug, episode_id)
 
@@ -2185,6 +2443,13 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                 cue_gate_enabled=cue_gate_enabled,
             )
             _check_cancel(cancel_event, slug, episode_id)
+
+            # Terminal boundary snap (spec 2.3b): after the reviewer so a
+            # reviewer-adjusted start can be pulled back to the splice point.
+            ads_to_remove = _snap_terminal_starts(
+                slug, episode_id, ads_to_remove, all_ads_with_validation,
+                segments, audio_analysis_result, episode_duration
+            )
 
             # Tail completion: final content-based end sweep after the reviewer,
             # which can pull cut ends back to the detector boundary and strand

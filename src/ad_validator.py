@@ -1,7 +1,7 @@
 """Post-detection validation for ad markers."""
 import re
 import logging
-from typing import ClassVar, Dict, List
+from typing import ClassVar, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -12,6 +12,9 @@ from config import (
     POST_ROLL, MAX_AD_PERCENTAGE, MAX_ADS_PER_5MIN,
     MERGE_GAP_THRESHOLD, MAX_SILENT_GAP,
     HOLD_REASON_MAX_DURATION, HOLD_REASON_NO_CUE,
+    HOLD_REASON_NO_SPLICE, VETO_MIN_CUT_SECONDS,
+    HOLD_REASON_UNCORROBORATED_TAIL,
+    SPLICE_CORROBORATION_WINDOW_SECONDS,
     is_cue_backed,
 )
 from utils.text import extract_text_from_segments
@@ -94,6 +97,12 @@ class AdValidator:
         re.IGNORECASE
     )
 
+    # Audio corroboration (ad-splice-detection Layer 1): stored-analysis
+    # signals within this window of a marker edge corroborate the marker.
+    CORROBORATION_WINDOW_S = 5.0
+    CORROBORATION_MIN_VOLUME_STEP_DB = 12.0
+    TAIL_EOF_WINDOW_S = 5.0  # marker end this close to EOF counts as tail
+
     def __init__(self, episode_duration: float, segments: List[Dict] = None,
                  episode_description: str = None,
                  false_positive_corrections: List[Dict] = None,
@@ -101,7 +110,9 @@ class AdValidator:
                  min_cut_confidence: float = 0.80,
                  positional_prior=None,
                  max_ad_duration_override: float = None,
-                 cue_gate_enabled: bool = False):
+                 cue_gate_enabled: bool = False,
+                 splice_veto_enabled: bool = True,
+                 veto_min_cut_seconds: float = VETO_MIN_CUT_SECONDS):
         """Initialize validator.
 
         Args:
@@ -128,6 +139,9 @@ class AdValidator:
         self.positional_prior = positional_prior
         self.max_ad_duration_override = max_ad_duration_override
         self.cue_gate_enabled = cue_gate_enabled
+        self.splice_veto_enabled = splice_veto_enabled
+        self.veto_min_cut_seconds = veto_min_cut_seconds
+        self._audio_analysis = None
 
         if self.false_positive_corrections:
             logger.info(f"Loaded {len(self.false_positive_corrections)} false positive corrections")
@@ -243,15 +257,21 @@ class AdValidator:
         """Check if a time range overlaps with any user-confirmed correction."""
         return self._overlaps_corrections(self.confirmed_corrections, start, end, overlap_threshold)
 
-    def validate(self, ads: List[Dict]) -> ValidationResult:
+    def validate(self, ads: List[Dict],
+                 audio_analysis: Optional[Dict] = None) -> ValidationResult:
         """Validate all ads and return results.
 
         Args:
             ads: List of ad markers from detection
+            audio_analysis: Stored audio-analysis dict for the episode
+                (AudioAnalysisResult.to_dict() shape); used to corroborate
+                heuristic markers with measured audio evidence
 
         Returns:
             ValidationResult with validated ads and statistics
         """
+        self._audio_analysis = audio_analysis
+
         if not ads:
             return ValidationResult(ads=[])
 
@@ -316,9 +336,10 @@ class AdValidator:
         corrections = []
         confidence = ad.get('confidence', 1.0)
 
-        # Pop stale held state -- re-derived on every validation pass.
+        # Pop stale held/corroboration state -- re-derived on every pass.
         ad.pop('held_for_review', None)
         ad.pop('hold_reason', None)
+        ad.pop('corroborated_by', None)
 
         duration = ad['end'] - ad['start']
         position = ad['start'] / self.episode_duration if self.episode_duration > 0 else 0
@@ -486,6 +507,16 @@ class AdValidator:
             Adjusted confidence
         """
         if not self.segments:
+            # No segments: check vad_gap corroboration early. Untranscribed
+            # audio can never show transcript signals (TWiT 1091 catch-22).
+            if ad.get('detection_stage') == 'vad_gap':
+                source = self._audio_corroboration_source(ad)
+                if source is not None:
+                    ad['corroborated_by'] = source
+                    flags.append(f"INFO: Audio corroboration ({source})")
+                else:
+                    # No corroboration found - clamp confidence to force REVIEW
+                    confidence = min(confidence, max(0.0, self.min_cut_confidence - 0.01))
             return confidence
 
         # Get transcript text for ad time range
@@ -493,6 +524,8 @@ class AdValidator:
 
         if not ad_text:
             flags.append("WARN: No transcript text in ad range")
+            # Tail markers with no transcript text defer corroboration check to
+            # _apply_hold_rules via direct _audio_corroboration_source call.
             return confidence
 
         # Check for sponsor names
@@ -507,12 +540,16 @@ class AdValidator:
         if confidence < 0.85:
             flags.append("WARN: No ad signals in transcript")
 
-        # vad_gap markers come from a heuristic detector with no transcript
-        # content signal. If neither sponsor nor ad-signal patterns matched in
-        # range, there is no corroborating evidence -- force the marker below
-        # the cut threshold so it goes to REVIEW instead of being auto-cut.
+        # vad_gap markers: check audio corroboration when text exists but
+        # patterns don't match. Set corroborated_by if source found, else clamp.
         if ad.get('detection_stage') == 'vad_gap':
-            confidence = min(confidence, max(0.0, self.min_cut_confidence - 0.01))
+            source = self._audio_corroboration_source(ad)
+            if source is not None:
+                ad['corroborated_by'] = source
+                flags.append(f"INFO: Audio corroboration ({source})")
+            else:
+                # No corroboration found - clamp confidence to force REVIEW
+                confidence = min(confidence, max(0.0, self.min_cut_confidence - 0.01))
 
         # Verify end_text exists in transcript
         end_text = ad.get('end_text', '')
@@ -522,6 +559,75 @@ class AdValidator:
                 return max(0.0, confidence - 0.05)
 
         return confidence
+
+    def _splice_events(self) -> List[Dict]:
+        """Events from the stored splice_evidence payload, [] when absent."""
+        payload = (self._audio_analysis or {}).get('splice_evidence') or {}
+        return payload.get('events') or []
+
+    def _splice_calibrated(self) -> bool:
+        """True when this feed's splice calibration status is 'calibrated'
+        (spec 2.3c); cold-start feeds corroborate but never veto."""
+        payload = (self._audio_analysis or {}).get('splice_evidence') or {}
+        return payload.get('calibration', {}).get('status') == 'calibrated'
+
+    def _audio_corroboration_source(self, ad: Dict) -> Optional[str]:
+        """Return the strongest stored-audio evidence source near the ad's
+        boundaries, or None.
+
+        Layer 1 checks DAI transition pairs and >= 12 dB volume anomalies
+        within +-5s of the ad start or end. Layer 2 adds splice_evidence
+        events (+-3s); Layer 3 adds dai_differential region overlap.
+        """
+        analysis = self._audio_analysis
+        if not analysis:
+            return None
+
+        window = self.CORROBORATION_WINDOW_S
+
+        def near_edge(t):
+            return (abs(t - ad['start']) <= window
+                    or abs(t - ad['end']) <= window)
+
+        volume_hit = False
+        for sig in analysis.get('signals') or []:
+            if not (near_edge(sig.get('start', 0.0)) or near_edge(sig.get('end', 0.0))):
+                continue
+            if sig.get('signal_type') == 'dai_transition_pair':
+                return 'transition_pair'
+            if sig.get('signal_type') in ('volume_increase', 'volume_decrease'):
+                deviation = (sig.get('details') or {}).get('deviation_db') or 0.0
+                if abs(deviation) >= self.CORROBORATION_MIN_VOLUME_STEP_DB:
+                    volume_hit = True
+        if volume_hit:
+            return 'volume_anomaly'
+
+        # Layer 2: a splice-evidence event within +-3.0s of either boundary
+        # (spec 2.3a). Tighter window than the transition/volume checks
+        # because splice events are sharply localized.
+        for event in self._splice_events():
+            time = event.get('time')
+            if time is None:
+                continue
+            end_time = event.get('end_time')
+            end_time = end_time if end_time is not None else time
+            for edge in (ad.get('start'), ad.get('end')):
+                if edge is None:
+                    continue
+                if (time - SPLICE_CORROBORATION_WINDOW_SECONDS <= edge
+                        <= end_time + SPLICE_CORROBORATION_WINDOW_SECONDS):
+                    return 'splice_evidence'
+
+        # Layer 3: a cross-fetch differential region overlapping the marker is
+        # the strongest corroboration class (audio proven to differ).
+        diff = (self._audio_analysis or {}).get('dai_differential') or {}
+        for region in diff.get('regions', []):
+            if region.get('kind') != 'differential':
+                continue
+            if (float(region['start_s']) < float(ad.get('end', 0.0))
+                    and float(region['end_s']) > float(ad.get('start', 0.0))):
+                return 'dai_differential'
+        return None
 
     def _get_text_in_range(self, start: float, end: float) -> str:
         """Get transcript text within time range.
@@ -591,6 +697,34 @@ class AdValidator:
             if not is_cue_backed(ad):
                 self._mark_held(ad, flags, HOLD_REASON_NO_CUE)
                 return Decision.REVIEW
+
+        # Rule 3: zero-splice-evidence veto (spec 2.3c). A long LLM/pattern
+        # cut with no splice event inside the span or near either edge goes
+        # to the review queue instead of shipping silently. Calibrated feeds
+        # only: cold-start evidence corroborates but never vetoes.
+        if (self.splice_veto_enabled and decision == Decision.ACCEPT
+                and duration >= self.veto_min_cut_seconds
+                and ad.get('detection_stage') in ('claude', 'text_pattern')
+                and self._splice_calibrated()
+                and self._audio_corroboration_source(ad) is None):
+            self._mark_held(ad, flags, HOLD_REASON_NO_SPLICE)
+            return Decision.REVIEW
+
+        # Rule 4: an uncorroborated vad_gap marker at the episode tail must
+        # surface in the pending-review queue instead of shipping silently.
+        # Fires on REVIEW (clamp already routed it there) AND on ACCEPT (the
+        # empty-text early-return left confidence unclamped; 0.80 >= threshold
+        # = ACCEPT but there is no stored evidence to justify the cut). A
+        # corroborated tail (source not None) cuts regardless of decision.
+        # Calls the corroboration helper directly so tails with no transcript
+        # text in range still count stored audio evidence.
+        if (decision in (Decision.REVIEW, Decision.ACCEPT)
+                and ad.get('detection_stage') == 'vad_gap'
+                and self.episode_duration > 0
+                and self.episode_duration - ad['end'] <= self.TAIL_EOF_WINDOW_S
+                and self._audio_corroboration_source(ad) is None):
+            self._mark_held(ad, flags, HOLD_REASON_UNCORROBORATED_TAIL)
+            return Decision.REVIEW
 
         return decision
 

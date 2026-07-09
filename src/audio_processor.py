@@ -13,7 +13,7 @@ from utils.subprocess_registry import tracked_run
 from config import (
     FFMPEG_LONG_TIMEOUT, SUBPROCESS_VERSION_PROBE,
     MIN_AD_DURATION_FOR_REMOVAL, POST_ROLL_TRIM_THRESHOLD, MERGE_GAP_SECONDS,
-    SHORT_CUT_KEEP_CONFIDENCE,
+    SHORT_CUT_KEEP_CONFIDENCE, RENDER_DRIFT_WARN_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -255,6 +255,13 @@ class AudioProcessor:
                             f"{total_duration:.1f}s ({remaining:.1f}s would remain)")
                 ads[-1]['end'] = total_duration
 
+        applied_total = sum(a['end'] - a['start'] for a in ads)
+        requested_total = sum(c['end'] - c['start'] for c in clamped)
+        logger.info(
+            f"Applied cuts: {len(ads)} cut(s) totaling {applied_total:.1f}s "
+            f"(requested {len(clamped)} totaling {requested_total:.1f}s; "
+            f"delta {applied_total - requested_total:+.1f}s from merge/drop/end-extend)")
+
         return ads
 
     def remove_ads(self, input_path: str, ad_segments: List[Dict],
@@ -394,11 +401,26 @@ class AudioProcessor:
                 logger.error(f"FFMPEG failed: {stderr_text}")
                 return None
 
-            # Verify output
+            # Verify output. Each applied cut is REPLACED by the beep, so the
+            # exact expectation is input - cuts + n*beep; drift beyond
+            # RENDER_DRIFT_WARN_SECONDS means the render diverged from marker
+            # arithmetic (spec 1.5 overshoot forensics).
             new_duration = self.get_audio_duration(output_path)
             if new_duration:
                 removed_time = total_duration - new_duration
-                logger.info(f"FFMPEG processing complete: {total_duration:.1f}s -> {new_duration:.1f}s (removed {removed_time:.1f}s)")
+                cut_total = sum(a['end'] - a['start'] for a in ads)
+                expected_duration = total_duration - cut_total + len(ads) * beep_duration
+                drift = new_duration - expected_duration
+                logger.info(
+                    f"FFMPEG processing complete: {total_duration:.1f}s -> "
+                    f"{new_duration:.1f}s (removed {removed_time:.1f}s; cuts "
+                    f"{cut_total:.1f}s, beeps {len(ads)}x{beep_duration:.2f}s, "
+                    f"render drift {drift:+.2f}s)")
+                if abs(drift) > RENDER_DRIFT_WARN_SECONDS:
+                    logger.warning(
+                        f"Cut-render drift {drift:+.2f}s exceeds "
+                        f"{RENDER_DRIFT_WARN_SECONDS:.1f}s tolerance; applied cuts: "
+                        f"{[(round(a['start'], 1), round(a['end'], 1)) for a in ads]}")
                 return ads
             else:
                 logger.error("Could not verify output file")

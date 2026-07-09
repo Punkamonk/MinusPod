@@ -1,0 +1,200 @@
+"""Cut-renderer duration invariant on synthetic audio (spec 1.5).
+
+remove_ads REPLACES each applied cut with the beep asset (1.08s), so the
+exact invariant is:
+
+    output_duration == input_duration - sum(applied cuts) + n_cuts * beep
+
+within 1.0s. The naive `input - sum(cuts)` form is short one beep per cut
+by design; that beep term is also why per-episode "timeSaved" reads ~1.1s
+less than marker arithmetic per cut.
+
+The synthetic 'ad' regions are digital silence baked into a sine tone, so:
+  - any leftover ad audio in the output shows up as a >=2s silence
+    (silencedetect probe), and
+  - the beep slice at the cut point must be loud (volumedetect mean above
+    -60 dB; the raw silent region measures ~-91 dB).
+
+Requires ffmpeg/ffprobe on PATH. Skipped if unavailable.
+"""
+import re
+import shutil
+import subprocess
+
+import pytest
+
+from audio_processor import AudioProcessor
+
+pytestmark = pytest.mark.skipif(
+    shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
+    reason='ffmpeg/ffprobe required',
+)
+
+_DURATION_TOL_S = 1.0
+
+
+@pytest.fixture
+def processor():
+    return AudioProcessor()
+
+
+def _make_input(path, duration, silent_ranges):
+    """Sine tone with digital-silence 'ad' regions baked in."""
+    expr = '0.8*sin(440*2*PI*t)'
+    for start, end in silent_ranges:
+        expr = f'if(between(t,{start},{end}),0,{expr})'
+    subprocess.run(
+        ['ffmpeg', '-y', '-f', 'lavfi', '-i',
+         f"aevalsrc='{expr}':d={duration}",
+         '-ar', '44100', '-ac', '1', str(path)],
+        check=True, capture_output=True,
+    )
+
+
+def _mean_volume_db(path, start, dur):
+    result = subprocess.run(
+        ['ffmpeg', '-ss', str(start), '-t', str(dur), '-i', str(path),
+         '-af', 'volumedetect', '-f', 'null', '-'],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        f'volumedetect ffmpeg failed (rc={result.returncode}): '
+        f'{result.stderr[-500:]}')
+    out = result.stderr
+    m = re.search(r'mean_volume: (-?[\d.]+) dB', out)
+    assert m, f'volumedetect produced no mean_volume: {out[-500:]}'
+    return float(m.group(1))
+
+
+def _silence_starts(path, noise_db=-45, min_dur=2.0):
+    result = subprocess.run(
+        ['ffmpeg', '-i', str(path),
+         '-af', f'silencedetect=noise={noise_db}dB:d={min_dur}',
+         '-f', 'null', '-'],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        f'silencedetect ffmpeg failed (rc={result.returncode}): '
+        f'{result.stderr[-500:]}')
+    return re.findall(r'silence_start: ([\d.]+)', result.stderr)
+
+
+def _beep_output_start(applied, index, beep_duration):
+    """Output-timeline start of the beep that replaces applied[index].
+
+    Earlier cuts each collapse to a beep, so a later beep shifts left by the
+    earlier cut lengths and right by the earlier beep durations.
+    """
+    earlier_cuts = sum(
+        applied[j]['end'] - applied[j]['start'] for j in range(index))
+    return applied[index]['start'] - earlier_cuts + index * beep_duration
+
+
+def _assert_beep_loud(processor, output_path, applied, index):
+    """The beep replacing applied[index] must be loud, not leftover silence."""
+    beep_start = _beep_output_start(
+        applied, index, processor.get_beep_duration())
+    assert _mean_volume_db(output_path, beep_start + 0.1, 0.8) > -60.0
+
+
+def _assert_invariant(processor, input_path, output_path, applied):
+    in_dur = processor.get_audio_duration(str(input_path))
+    out_dur = processor.get_audio_duration(str(output_path))
+    assert in_dur is not None, f'ffprobe failed on input {input_path}'
+    assert out_dur is not None, f'ffprobe failed on output {output_path}'
+    cut_total = sum(a['end'] - a['start'] for a in applied)
+    expected = in_dur - cut_total + len(applied) * processor.get_beep_duration()
+    assert abs(out_dur - expected) <= _DURATION_TOL_S, (
+        f'render drift {out_dur - expected:+.2f}s: in={in_dur:.2f}s '
+        f'out={out_dur:.2f}s cuts={cut_total:.2f}s beeps={len(applied)}')
+
+
+def test_mid_episode_cut_duration_and_beep(processor, tmp_path):
+    input_path = tmp_path / 'input.wav'
+    output_path = tmp_path / 'out.mp3'
+    _make_input(input_path, 60.0, [(10.0, 30.0)])
+
+    applied = processor.remove_ads(
+        str(input_path),
+        [{'start': 10.0, 'end': 30.0, 'confidence': 0.9}],
+        str(output_path),
+    )
+    assert applied == [{'start': 10.0, 'end': 30.0, 'confidence': 0.9}]
+    _assert_invariant(processor, input_path, output_path, applied)
+    # The cut point carries the beep, not the (silent) ad audio.
+    assert _mean_volume_db(output_path, 10.1, 0.8) > -60.0
+    # No 2s+ silence anywhere: leftover ad audio would be silent.
+    assert _silence_starts(output_path) == []
+
+
+def test_end_of_episode_cut_extends_and_holds_invariant(processor, tmp_path):
+    input_path = tmp_path / 'input.wav'
+    output_path = tmp_path / 'out.mp3'
+    _make_input(input_path, 60.0, [(40.0, 55.0)])
+
+    applied = processor.remove_ads(
+        str(input_path),
+        [{'start': 40.0, 'end': 55.0, 'confidence': 0.9}],
+        str(output_path),
+    )
+    # <30s would remain (POST_ROLL_TRIM_THRESHOLD), so the cut runs to EOF.
+    assert len(applied) == 1
+    assert applied[-1]['end'] == pytest.approx(60.0, abs=0.1)
+    _assert_invariant(processor, input_path, output_path, applied)
+    # The extended cut is replaced by the beep, not left as silence.
+    _assert_beep_loud(processor, output_path, applied, 0)
+    assert _silence_starts(output_path) == []
+
+
+def test_time_saved_reflects_beep_replacement(processor, tmp_path):
+    """Pins the RENDERER precondition that keeps production timeSaved
+    beep-aware: the rendered file's real decoded duration reflects the
+    beep-replaced cut, so (original - new_duration) == marker_sum - n*beep.
+
+    Production timeSaved is original_duration - new_duration (processing.py:1709,
+    webhook_service.py:98, api/episodes.py:98/177). This test does NOT exercise
+    those sites -- it recomputes original - new from real ffprobe decodes to
+    confirm the decoded output carries the beep, which is the precondition that
+    makes original-minus-new beep-aware. It cannot catch a regression of the
+    metric formula itself to marker-summing."""
+    input_path = tmp_path / 'input.wav'
+    output_path = tmp_path / 'out.mp3'
+    _make_input(input_path, 60.0, [(10.0, 30.0)])
+
+    applied = processor.remove_ads(
+        str(input_path),
+        [{'start': 10.0, 'end': 30.0, 'confidence': 0.9}],
+        str(output_path),
+    )
+    assert len(applied) == 1
+
+    original_duration = processor.get_audio_duration(str(input_path))
+    new_duration = processor.get_audio_duration(str(output_path))
+    # Same arithmetic shape production uses; recomputed here, not imported.
+    time_saved = original_duration - new_duration
+
+    marker_sum = sum(a['end'] - a['start'] for a in applied)
+    beep_total = len(applied) * processor.get_beep_duration()
+    # The decoded output carries the beep, so original-minus-new is beep-aware.
+    assert time_saved == pytest.approx(marker_sum - beep_total, abs=_DURATION_TOL_S)
+    # And therefore sits ~one beep per cut below the raw marker sum.
+    assert time_saved < marker_sum - beep_total / 2
+
+
+def test_two_cuts_scale_beep_count(processor, tmp_path):
+    input_path = tmp_path / 'input.wav'
+    output_path = tmp_path / 'out.mp3'
+    _make_input(input_path, 120.0, [(10.0, 30.0), (60.0, 75.0)])
+
+    applied = processor.remove_ads(
+        str(input_path),
+        [{'start': 10.0, 'end': 30.0, 'confidence': 0.9},
+         {'start': 60.0, 'end': 75.0, 'confidence': 0.9}],
+        str(output_path),
+    )
+    assert len(applied) == 2
+    _assert_invariant(processor, input_path, output_path, applied)
+    # Both beeps sit at shifted output positions and must be loud.
+    _assert_beep_loud(processor, output_path, applied, 0)
+    _assert_beep_loud(processor, output_path, applied, 1)
+    assert _silence_starts(output_path) == []

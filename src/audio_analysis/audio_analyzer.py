@@ -16,6 +16,7 @@ from .volume_analyzer import VolumeAnalyzer
 from .transition_detector import TransitionDetector
 from .cue_template_matcher import AudioCueTemplateMatcher
 from .silence_detector import SilenceDetector
+from .splice_detector import SpliceDetector
 from config import (
     AUDIO_CUE_FORMANT_ATTEN_DB,
     resolve_cue_template_score,
@@ -50,6 +51,8 @@ def calculate_component_timeouts(duration_seconds: float) -> Dict[str, int]:
         # what SilenceDetector's own ffmpeg pass would use so the wrapper does
         # not pre-empt the detector on long opted-in episodes.
         'silence': ffmpeg_timeout(duration_seconds),
+        # Splice detection runs its own full 8kHz decode; size like silence.
+        'splice': ffmpeg_timeout(duration_seconds),
     }
 
 
@@ -90,6 +93,10 @@ class AudioAnalyzer:
             min_ad_duration=MIN_TRANSITION_AD_DURATION,
             max_ad_duration=MAX_TRANSITION_AD_DURATION,
         )
+
+        # Splice-evidence detector (spec 2.1). Stateless; thresholds are code
+        # constants, so a single instance serves every run.
+        self.splice_detector = SpliceDetector()
 
         # Audio cue detector (issue #350) is built per run in analyze() from
         # current settings, not here, so the experiment toggle takes effect
@@ -204,6 +211,16 @@ class AudioAnalyzer:
         except Exception as exc:
             logger.warning('Failed to load silence config: %s', exc)
             return None
+
+    def _splice_enabled(self) -> bool:
+        """Global splice-evidence toggle (spec 2.1). Default on; DB-tunable."""
+        if not self.db:
+            return False
+        try:
+            return self.db.get_setting_bool('splice_evidence_enabled', default=True)
+        except Exception as exc:
+            logger.warning('Failed to read splice_evidence_enabled: %s', exc)
+            return False
 
     def is_enabled(self) -> bool:
         """Audio analysis is always enabled (volume-only is lightweight, uses ffmpeg)."""
@@ -367,12 +384,30 @@ class AudioAnalyzer:
             else:
                 silence_spans = silence_result or []
 
+        # Splice-evidence detection (spec 2.1): deep silences plus loudness
+        # and spectral steps at those silences. Reuses the ebur128 frames
+        # from the volume pass; runs its own 8kHz mono decode.
+        splice_evidence = None
+        if self._splice_enabled():
+            if status_callback:
+                status_callback("analyzing: splice evidence", 50)
+            splice_result, splice_error = self._run_component_with_timeout(
+                'splice',
+                lambda: self.splice_detector.detect(audio_path, duration, frames),
+                timeouts.get('splice', timeouts['volume']),
+            )
+            if splice_error:
+                errors.append(splice_error)
+            else:
+                splice_evidence = splice_result
+
         result.signals = signals
         result.cue_near_misses = cue_near_misses
         result.silence_spans = silence_spans
         # Expose the resolved silence tunables so processing.py can use them
         # for snap_ad_boundaries_to_silence without a second DB read.
         result.silence_tunables = getattr(self, '_silence_tunables', None)
+        result.splice_evidence = splice_evidence
         result.errors = errors
         result.loudness_baseline = baseline
         result.loudness_frames = frames

@@ -81,6 +81,46 @@ def _positional_guidance(window_start, window_end, pre_roll_boundary,
     )
 
 
+def _splice_lines(audio_analysis, window_start, window_end):
+    """Render splice-evidence events overlapping the window (spec 2.3d)."""
+    payload = getattr(audio_analysis, 'splice_evidence', None) or {}
+    lines = []
+    for event in payload.get('events', []):
+        start = event.get('time')
+        if start is None:
+            continue
+        end = event.get('end_time')
+        end = end if end is not None else start
+        if end <= window_start or start >= window_end:
+            continue
+        etype = event.get('type')
+        if etype in ('digital_silence', 'deep_silence'):
+            label = etype.replace('_', ' ')
+            depth = event.get('depth_dbfs')
+            depth_str = f"depth {depth} dBFS" if depth is not None else "depth unknown"
+            lines.append(
+                f"- Splice evidence: {label} at {start:.1f}s-{end:.1f}s "
+                f"({event.get('duration_s', 0.0):.1f}s, {depth_str})"
+            )
+        elif etype == 'loudness_step' and event.get('loudness_step_lu') is not None:
+            lines.append(
+                f"- Splice evidence: loudness step of "
+                f"{event['loudness_step_lu']:+.1f} LU across {start:.1f}s-{end:.1f}s"
+            )
+        elif etype == 'spectral_step':
+            parts = []
+            if event.get('centroid_step_hz') is not None:
+                parts.append(f"centroid {event['centroid_step_hz']:+.0f} Hz")
+            if event.get('flatness_step') is not None:
+                parts.append(f"flatness {event['flatness_step']:+.2f}")
+            if parts:
+                lines.append(
+                    f"- Splice evidence: spectral step ({', '.join(parts)}) "
+                    f"across {start:.1f}s-{end:.1f}s"
+                )
+    return lines
+
+
 class AudioEnforcer:
     """
     Formats audio analysis signals as prompt context for Claude.
@@ -102,7 +142,28 @@ class AudioEnforcer:
         Returns:
             Formatted string for prompt injection, or empty string if no signals
         """
-        if not audio_analysis or not audio_analysis.signals:
+        # Splice evidence renders even for signal-less analyses, so windows
+        # over untranscribed tails are no longer empty of audio context.
+        if not audio_analysis:
+            return ""
+
+        # Cross-fetch differential regions (Layer 3): audio that differs
+        # across fetches is dynamically inserted by definition.
+        dai_regions = []
+        dai_differential = getattr(audio_analysis, 'dai_differential', None) or {}
+        for region in dai_differential.get('regions', []):
+            if region.get('kind') != 'differential':
+                continue
+            r_start = float(region['start_s'])
+            r_end = float(region['end_s'])
+            if r_end <= window_start or r_start >= window_end:
+                continue
+            dai_regions.append((r_start, r_end))
+
+        splice_evidence_raw = getattr(audio_analysis, 'splice_evidence', None) or {}
+        has_splice_events = bool(splice_evidence_raw.get('events'))
+
+        if not audio_analysis.signals and not dai_regions and not has_splice_events:
             return ""
 
         lines = []
@@ -207,6 +268,17 @@ class AudioEnforcer:
                 f"- +{omitted_count} more unlabelled audio cues omitted for brevity"
             )
 
+        for r_start, r_end in dai_regions:
+            lines.append(
+                f"- CONFIRMED dynamically inserted ad at {r_start:.1f}s-{r_end:.1f}s: "
+                f"the audio in this range differs across independent fetches of "
+                f"this episode, so an ad server inserted it and it is not part "
+                f"of the show"
+            )
+
+        splice_lines = _splice_lines(audio_analysis, window_start, window_end)
+        lines.extend(splice_lines)
+
         pre_roll_boundary, post_roll_boundary = content_anchors(audio_analysis)
         positional_guidance = _positional_guidance(
             window_start, window_end, pre_roll_boundary, post_roll_boundary)
@@ -261,6 +333,14 @@ class AudioEnforcer:
             "copy sits right next to a marker, prefer the marker as the boundary.\n"
         ) if has_content_transition_cue else ""
 
+        splice_guidance = (
+            "\nSPLICE EVIDENCE: each splice-evidence line above is an encoding "
+            "artifact typical of a dynamic ad-insertion point. It marks a likely "
+            "boundary, never an ad by itself: use it to place the edge of "
+            "promotional content you find in the transcript.\n"
+        ) if splice_lines else ""
+
         return (header + "\n".join(lines) + "\n"
                 + cue_guidance + spectral_guidance + non_ad_guidance
-                + content_transition_guidance + positional_guidance)
+                + content_transition_guidance + splice_guidance
+                + positional_guidance)
