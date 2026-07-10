@@ -19,9 +19,11 @@ export function useAuditionPlayer(preloadSrc?: string) {
   // comparison against audio.src) because the browser absolutizes audio.src,
   // making suffix matching against a relative path fragile.
   const srcRef = useRef(preloadSrc);
-  if (preloadSrc !== undefined && srcRef.current !== preloadSrc) {
-    srcRef.current = preloadSrc;
-  }
+  // Sync when preloadSrc appears or changes (the element's src attribute
+  // follows the prop); an effect, not render code, per react-hooks/refs.
+  useEffect(() => {
+    if (preloadSrc !== undefined) srcRef.current = preloadSrc;
+  }, [preloadSrc]);
   // True while a source swap is settling; a swap fires a browser pause event
   // for the old playback, which must not clobber the just-set playingKey.
   const switchingRef = useRef(false);
