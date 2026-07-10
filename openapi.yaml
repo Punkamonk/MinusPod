@@ -485,7 +485,7 @@ paths:
       tags:
         - Feeds
       summary: Update feed settings
-      description: Update podcast feed settings like network override, DAI platform, and processing overrides
+      description: Update podcast feed settings like network override, DAI platform, processing overrides, and the source RSS URL
       operationId: updateFeed
       parameters:
         - $ref: '#/components/parameters/slug'
@@ -496,6 +496,17 @@ paths:
             schema:
               type: object
               properties:
+                sourceUrl:
+                  type: string
+                  format: uri
+                  description: >-
+                    Replacement source RSS URL for this feed. The server
+                    fetches and parses the URL before persisting; a URL that
+                    does not return a parseable RSS feed is rejected with 400
+                    and nothing is saved. On success the stored
+                    ETag/Last-Modified validators are cleared and an immediate
+                    forced refresh runs. Existing episodes are kept (matched
+                    by GUID). Cannot be null or empty.
                 networkIdOverride:
                   type:
                     - string
