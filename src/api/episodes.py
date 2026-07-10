@@ -508,6 +508,8 @@ def reprocess_episode(slug, episode_id):
             reprocess_requested_at=utc_now_iso(),
             retry_count=0,
             error_message=None,
+            deferred_at=None,
+            deferred_service=None,
         )
 
         episode_url = episode.get('original_url')
@@ -805,7 +807,7 @@ def bulk_episode_action(slug):
         for episode_id in episode_ids:
             try:
                 episode = episodes_by_id.get(episode_id)
-                if not episode or episode.get('status') not in ('processed', 'failed', 'permanently_failed'):
+                if not episode or episode.get('status') not in ('processed', 'failed', 'permanently_failed', 'deferred'):
                     skipped += 1
                     continue
                 # LLM-only reprocess needs a saved transcript; skip episodes without one.
@@ -833,7 +835,7 @@ def bulk_episode_action(slug):
         eligible_ids = []
         for episode_id in episode_ids:
             episode = episodes_by_id.get(episode_id)
-            if not episode or episode.get('status') not in ('processed', 'failed', 'permanently_failed'):
+            if not episode or episode.get('status') not in ('processed', 'failed', 'permanently_failed', 'deferred'):
                 skipped += 1
                 continue
             eligible_ids.append(episode_id)

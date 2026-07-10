@@ -633,3 +633,116 @@ class TestSkipFlacCompressionSetting:
                 )
         finally:
             os.unlink(temp_path)
+
+
+class TestWhisperServiceUnavailable:
+    """Connectivity failures must raise ServiceUnavailableError (#482) so the
+    offline queue can defer instead of failing the episode."""
+
+    def _make_settings(self, **overrides):
+        settings = {
+            'backend': WHISPER_BACKEND_API,
+            'api_base_url': 'http://localhost:8765/v1',
+            'api_key': '',
+            'api_model': 'whisper-1',
+            'skip_flac_compression': True,
+        }
+        settings.update(overrides)
+        return settings
+
+    def _make_audio_file(self):
+        f = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        f.write(b'fake' * 512)
+        f.close()
+        return f.name
+
+    def test_all_attempts_connection_error_raises(self):
+        import requests as requests_lib
+        import pytest
+        from utils.errors import ServiceUnavailableError
+        temp_path = self._make_audio_file()
+        try:
+            with patch('transcriber.safe_post',
+                       side_effect=requests_lib.exceptions.ConnectionError('refused')):
+                transcriber = Transcriber()
+                transcriber.preprocess_audio = MagicMock(return_value=None)
+                with pytest.raises(ServiceUnavailableError) as exc:
+                    transcriber._transcribe_via_api(
+                        temp_path, whisper_settings=self._make_settings())
+                assert exc.value.service == 'whisper'
+        finally:
+            os.unlink(temp_path)
+
+    def test_persistent_503_raises(self):
+        import pytest
+        from utils.errors import ServiceUnavailableError
+        temp_path = self._make_audio_file()
+        try:
+            mock_response = MagicMock()
+            mock_response.status_code = 503
+            with patch('transcriber.safe_post', return_value=mock_response):
+                transcriber = Transcriber()
+                transcriber.preprocess_audio = MagicMock(return_value=None)
+                with pytest.raises(ServiceUnavailableError) as exc:
+                    transcriber._transcribe_via_api(
+                        temp_path, whisper_settings=self._make_settings())
+                assert exc.value.service == 'whisper'
+        finally:
+            os.unlink(temp_path)
+
+    def test_400_still_returns_none(self):
+        temp_path = self._make_audio_file()
+        try:
+            mock_response = MagicMock()
+            mock_response.status_code = 400
+            mock_response.text = 'bad request'
+            with patch('transcriber.safe_post', return_value=mock_response):
+                transcriber = Transcriber()
+                transcriber.preprocess_audio = MagicMock(return_value=None)
+                result = transcriber._transcribe_via_api(
+                    temp_path, whisper_settings=self._make_settings())
+                assert result is None
+        finally:
+            os.unlink(temp_path)
+
+    def test_missing_base_url_returns_none(self):
+        with patch('transcriber.safe_post') as mock_post:
+            transcriber = Transcriber()
+            result = transcriber._transcribe_via_api(
+                '/tmp/test.wav',
+                whisper_settings=self._make_settings(api_base_url=''))
+            assert result is None
+            mock_post.assert_not_called()
+
+
+class TestCheckWhisperConnectivity:
+    """Availability probe used by the offline queue re-drive."""
+
+    def test_local_backend_always_reachable(self):
+        from transcriber import check_whisper_connectivity
+        with patch('transcriber._get_whisper_settings',
+                   return_value={'backend': WHISPER_BACKEND_LOCAL,
+                                 'api_base_url': '', 'api_key': ''}):
+            assert check_whisper_connectivity() is True
+
+    def test_api_backend_reachable_below_500(self):
+        from transcriber import check_whisper_connectivity
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        with patch('transcriber._get_whisper_settings',
+                   return_value={'backend': WHISPER_BACKEND_API,
+                                 'api_base_url': 'http://localhost:8765/v1',
+                                 'api_key': ''}), \
+             patch('transcriber.safe_get', return_value=mock_response):
+            assert check_whisper_connectivity() is True
+
+    def test_api_backend_unreachable_on_exception(self):
+        import requests as requests_lib
+        from transcriber import check_whisper_connectivity
+        with patch('transcriber._get_whisper_settings',
+                   return_value={'backend': WHISPER_BACKEND_API,
+                                 'api_base_url': 'http://localhost:8765/v1',
+                                 'api_key': ''}), \
+             patch('transcriber.safe_get',
+                   side_effect=requests_lib.exceptions.ConnectionError('refused')):
+            assert check_whisper_connectivity() is False
