@@ -1,7 +1,8 @@
 import { useState, useRef, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getEpisode, getFeed, getOriginalTranscript, reprocessEpisode, regenerateChapters } from '../api/feeds';
+import { Play, Pause } from 'lucide-react';
+import { episodeOriginalUrl, getEpisode, getFeed, getOriginalTranscript, reprocessEpisode, regenerateChapters } from '../api/feeds';
 import { submitCorrection } from '../api/patterns';
 import PrevNextLink from '../components/PrevNextLink';
 import LoadingSpinner from '../components/LoadingSpinner';
@@ -19,7 +20,6 @@ import CueCandidatesSection from '../components/CueCandidatesSection';
 import { useLocalStorageState } from '../hooks/useLocalStorageState';
 import { formatStorage, formatDuration } from './settings/settingsUtils';
 import { formatTimestamp } from '../utils/format';
-import { Play, Pause } from 'lucide-react';
 import { useAuditionPlayer } from '../hooks/useAuditionPlayer';
 
 function btnLabel(status: string, idle: string): string {
@@ -212,7 +212,7 @@ function EpisodeDetail() {
   // Windowed playback for Held for Review rows. Held ads are never cut, and
   // their marker times are in the original-audio timeline, so the retained
   // original is the correct source.
-  const heldAudioUrl = `/api/v1/feeds/${slug}/episodes/${episodeId}/original.mp3`;
+  const heldAudioUrl = episodeOriginalUrl(slug!, episodeId!);
   const heldAudition = useAuditionPlayer(heldAudioUrl);
 
   if (isLoading) {
@@ -730,6 +730,8 @@ function EpisodeDetail() {
                 mutAd?.reason === (segment.reason || '')
                   ? saveStatus
                   : 'idle';
+              const heldKey = `held-${segment.start}-${segment.end}`;
+              const heldPlaying = heldAudition.playingKey === heldKey;
               return (
                 <div
                   key={index}
@@ -737,21 +739,17 @@ function EpisodeDetail() {
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      {episode.hasOriginalAudio && (() => {
-                        const heldKey = `held-${segment.start}-${segment.end}`;
-                        const isPlaying = heldAudition.playingKey === heldKey;
-                        return (
-                          <button
-                            type="button"
-                            onClick={() => heldAudition.toggle(heldKey, heldAudioUrl, segment.start, segment.end)}
-                            aria-label={isPlaying ? 'Pause ad' : 'Play this ad'}
-                            title={isPlaying ? 'Pause' : 'Play this ad'}
-                            className="p-1.5 rounded-full bg-primary text-primary-foreground hover:bg-primary/90 transition-colors shrink-0 touch-manipulation"
-                          >
-                            {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-                          </button>
-                        );
-                      })()}
+                      {episode.hasOriginalAudio && (
+                        <button
+                          type="button"
+                          onClick={() => heldAudition.toggle(heldKey, heldAudioUrl, segment.start, segment.end)}
+                          aria-label={heldPlaying ? 'Pause ad' : 'Play this ad'}
+                          title={heldPlaying ? 'Pause' : 'Play this ad'}
+                          className="p-1.5 rounded-full bg-primary text-primary-foreground hover:bg-primary/90 transition-colors shrink-0 touch-manipulation"
+                        >
+                          {heldPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                        </button>
+                      )}
                       <span className="font-mono text-sm">
                         {formatTimestamp(segment.start)} - {formatTimestamp(segment.end)}
                       </span>

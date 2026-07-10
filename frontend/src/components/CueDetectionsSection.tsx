@@ -4,6 +4,7 @@ import CollapsibleSection from './CollapsibleSection';
 import { cueTypeLabel, type CueTemplateType } from '../api/cueTemplates';
 import { setCueDetectionVerdict, type CueVerdict } from '../api/cueDetections';
 import type { CueDetection } from '../api/types';
+import { episodeOriginalUrl } from '../api/feeds';
 import { formatTimestamp } from '../utils/format';
 import { useAuditionPlayer } from '../hooks/useAuditionPlayer';
 
@@ -60,7 +61,7 @@ function CueDetectionsSection({ slug, episodeId, detections }: CueDetectionsSect
   const hasPending = detections.some((d) => d.verdict === 'pending');
 
   // Audition a match: shared windowed player, one row sounds at a time.
-  const audioUrl = `/api/v1/feeds/${slug}/episodes/${episodeId}/original.mp3`;
+  const audioUrl = episodeOriginalUrl(slug, episodeId);
   const { playingKey, toggle: toggleMatch, audioElement } = useAuditionPlayer(audioUrl);
 
   return (

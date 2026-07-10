@@ -10,7 +10,7 @@ import {
   type CrossEpisodeCandidate,
   type CrossEpisodeScanResponse,
 } from '../api/cueTemplates';
-import { getEpisode, getEpisodes } from '../api/feeds';
+import { episodeOriginalUrl, getEpisode, getEpisodes } from '../api/feeds';
 import type { Episode } from '../api/types';
 import { formatTimestamp } from '../utils/format';
 import { useAuditionPlayer } from '../hooks/useAuditionPlayer';
@@ -122,7 +122,7 @@ export default function CueCrossEpisodeScanModal({
   const playWindow = (episodeId: string, start: number, end: number) =>
     togglePlayback(
       `${episodeId}:${start}:${end}`,
-      `/api/v1/feeds/${slug}/episodes/${episodeId}/original.mp3`,
+      episodeOriginalUrl(slug, episodeId),
       start,
       end,
     );

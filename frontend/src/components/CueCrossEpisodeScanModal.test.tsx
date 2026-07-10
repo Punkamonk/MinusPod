@@ -29,6 +29,8 @@ const mockGetEpisode = vi.fn();
 vi.mock('../api/feeds', () => ({
   getEpisodes: (...args: unknown[]) => mockGetEpisodes(...args),
   getEpisode: (...args: unknown[]) => mockGetEpisode(...args),
+  episodeOriginalUrl: (slug: string, episodeId: string) =>
+    `/api/v1/feeds/${slug}/episodes/${episodeId}/original.mp3`,
 }));
 
 function makeEpisode(id: string, title: string): Episode {

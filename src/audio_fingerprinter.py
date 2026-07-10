@@ -141,14 +141,12 @@ def _enumerate_window_occurrences(window, ep_ints, ep_duration, similarity):
     own timeline; occurrences closer than AUDIO_CUE_FP_MIN_GAP_SECONDS
     collapse to one (same greedy collection as the self-match counter).
     """
-    ep_arr = np.asarray(ep_ints, dtype=np.int64).astype(np.uint32)
+    ep_arr = np.asarray(ep_ints, dtype=np.uint32)
     win = len(window)
     if win == 0 or len(ep_arr) < win or ep_duration <= 0:
         return []
     fps = len(ep_arr) / ep_duration
     sim = _window_similarity(np.concatenate([window, ep_arr]), 0, win)[win:]
-    if sim.size == 0:
-        return []
     min_gap = max(1, int(round(AUDIO_CUE_FP_MIN_GAP_SECONDS * fps)))
     win_s = win / fps
     return [(round(p / fps, 2), round(p / fps + win_s, 2))
@@ -830,7 +828,9 @@ class AudioFingerprinter:
             t_ints, [s for _, (s, _) in sib_fps],
             win, similarity, min_matches, min_len, max_len)
 
-        t_arr = np.asarray(t_ints, dtype=np.int64).astype(np.uint32)
+        t_arr = np.asarray(t_ints, dtype=np.uint32)
+        # Target first, then siblings at their original input index + 1.
+        all_fps = [(0, (t_ints, t_dur))] + [(i + 1, f) for i, f in sib_fps]
         out = []
         for a, b, count in segs:
             cand = {'start': round(a / fps, 2), 'end': round(b / fps, 2),
@@ -841,9 +841,7 @@ class AudioFingerprinter:
             try:
                 window = t_arr[a:b]
                 episodes = []
-                for index, (ep_ints, ep_dur) in (
-                        [(0, (t_ints, t_dur))]
-                        + [(i + 1, f) for i, f in sib_fps]):
+                for index, (ep_ints, ep_dur) in all_fps:
                     occ = _enumerate_window_occurrences(
                         window, ep_ints, ep_dur, similarity)
                     episodes.append({

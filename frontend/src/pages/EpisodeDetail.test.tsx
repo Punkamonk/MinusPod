@@ -72,6 +72,8 @@ vi.mock('../api/feeds', () => ({
   getOriginalTranscript: vi.fn(),
   reprocessEpisode: (...args: unknown[]) => mockReprocessEpisode(...args),
   regenerateChapters: vi.fn(),
+  episodeOriginalUrl: (slug: string, episodeId: string) =>
+    `/api/v1/feeds/${slug}/episodes/${episodeId}/original.mp3`,
 }));
 
 vi.mock('../api/patterns', () => ({
