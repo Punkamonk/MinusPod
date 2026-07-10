@@ -190,6 +190,27 @@ def _cue_override_fields(podcast) -> dict:
     }
 
 
+def _status_counts(podcast) -> dict:
+    """Per-status episode counts slice of a feed response (#466).
+
+    Keys deliberately match the frontend EPISODE_STATUS_COLORS keys: the DB
+    status 'processed' is exposed under its API alias 'completed' (the same
+    mapping api/episodes.py applies to episode responses). LEFT JOIN SUMs are
+    NULL for a feed with no episodes, hence the `or 0`.
+    """
+    return {
+        'statusCounts': {
+            'discovered': podcast.get('status_discovered') or 0,
+            'pending': podcast.get('status_pending') or 0,
+            'processing': podcast.get('status_processing') or 0,
+            'completed': podcast.get('status_processed') or 0,
+            'failed': podcast.get('status_failed') or 0,
+            'permanently_failed': podcast.get('status_permanently_failed') or 0,
+            'deferred': podcast.get('status_deferred') or 0,
+        }
+    }
+
+
 def _slug_from_url_path(source_url: str) -> Optional[str]:
     # Final-resort slug derivation when neither an upstream OPML title nor
     # an RSS <title> is available. Strips ``.xml`` / ``.rss`` suffixes
@@ -241,6 +262,7 @@ def list_feeds():
             'artworkUrl': f"/api/v1/feeds/{podcast['slug']}/artwork" if podcast.get('artwork_cached') else podcast.get('artwork_url'),
             'episodeCount': podcast.get('episode_count', 0),
             'processedCount': podcast.get('processed_count', 0),
+            **_status_counts(podcast),
             'lastRefreshed': podcast.get('last_checked_at'),
             'createdAt': podcast.get('created_at'),
             'lastEpisodeDate': podcast.get('last_episode_date'),
@@ -596,6 +618,7 @@ def get_feed(slug):
         'artworkUrl': f"/api/v1/feeds/{podcast['slug']}/artwork" if podcast.get('artwork_cached') else podcast.get('artwork_url'),
         'episodeCount': podcast.get('episode_count', 0),
         'processedCount': podcast.get('processed_count', 0),
+        **_status_counts(podcast),
         'lastRefreshed': podcast.get('last_checked_at'),
         'createdAt': podcast.get('created_at'),
         'networkId': podcast.get('network_id'),
@@ -753,6 +776,7 @@ def update_feed(slug):
             **_cue_override_fields(podcast),
             'maxEpisodes': podcast.get('max_episodes'),
             'onlyExposeProcessedEpisodes': _deserialize_nullable_bool(podcast.get('only_expose_processed_episodes')),
+            **_status_counts(podcast),
             'feedUrl': _public_feed_url(slug, get_feed_auth_key(db))
         })
     except Exception:

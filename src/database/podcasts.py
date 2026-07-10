@@ -6,17 +6,31 @@ from typing import Optional, Dict, List
 logger = logging.getLogger(__name__)
 
 
+# Per-status episode counts folded into the existing LEFT JOIN aggregation so
+# feed listings surface them without extra queries (#466). Keys mirror the
+# episodes.status CHECK values; 'deferred' is the offline-queue status (#482).
+EPISODE_STATUSES = (
+    'discovered', 'pending', 'processing', 'processed',
+    'failed', 'permanently_failed', 'deferred',
+)
+_STATUS_COUNT_SELECT = ',\n'.join(
+    f"SUM(CASE WHEN e.status = '{s}' THEN 1 ELSE 0 END) as status_{s}"
+    for s in EPISODE_STATUSES
+)
+
+
 class PodcastMixin:
     """Podcast management methods."""
 
     def get_all_podcasts(self) -> List[Dict]:
         """Get all podcasts with episode counts."""
         conn = self.get_connection()
-        cursor = conn.execute("""
+        cursor = conn.execute(f"""
             SELECT p.*,
                    COUNT(e.id) as episode_count,
                    SUM(CASE WHEN e.status = 'processed' THEN 1 ELSE 0 END) as processed_count,
-                   MAX(e.created_at) as last_episode_date
+                   MAX(e.created_at) as last_episode_date,
+                   {_STATUS_COUNT_SELECT}
             FROM podcasts p
             LEFT JOIN episodes e ON p.id = e.podcast_id
             GROUP BY p.id
@@ -43,11 +57,12 @@ class PodcastMixin:
     def get_podcast_by_slug(self, slug: str) -> Optional[Dict]:
         """Get podcast by slug with episode counts."""
         conn = self.get_connection()
-        cursor = conn.execute("""
+        cursor = conn.execute(f"""
             SELECT p.*,
                    COUNT(e.id) as episode_count,
                    SUM(CASE WHEN e.status = 'processed' THEN 1 ELSE 0 END) as processed_count,
-                   MAX(e.created_at) as last_episode_date
+                   MAX(e.created_at) as last_episode_date,
+                   {_STATUS_COUNT_SELECT}
             FROM podcasts p
             LEFT JOIN episodes e ON p.id = e.podcast_id
             WHERE p.slug = ?

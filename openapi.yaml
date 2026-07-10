@@ -6402,6 +6402,28 @@ components:
         processedCount:
           type: integer
           description: Number of processed episodes
+        statusCounts:
+          type: object
+          description: >-
+            Per-status episode counts for this feed. The database status
+            'processed' is exposed under its API alias 'completed', matching
+            episode responses. 'deferred' counts episodes waiting in the
+            offline queue for the LLM or Whisper endpoint to come back.
+          properties:
+            discovered:
+              type: integer
+            pending:
+              type: integer
+            processing:
+              type: integer
+            completed:
+              type: integer
+            failed:
+              type: integer
+            permanently_failed:
+              type: integer
+            deferred:
+              type: integer
         lastRefreshed:
           type:
             - string
