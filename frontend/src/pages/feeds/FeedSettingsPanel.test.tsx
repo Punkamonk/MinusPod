@@ -33,6 +33,11 @@ vi.mock('../../api/settings', () => ({
   getSettings: vi.fn().mockResolvedValue({}),
 }));
 
+// FeedTagsEditor queries api/community internally; not under test here.
+vi.mock('../../components/FeedTagsEditor', () => ({
+  FeedTagsEditor: () => null,
+}));
+
 function makeFeed(overrides: Partial<Feed> = {}): Feed {
   return {
     slug: 'test-feed',

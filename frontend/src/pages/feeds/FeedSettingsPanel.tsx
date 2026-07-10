@@ -5,6 +5,7 @@ import { getSettings } from '../../api/settings';
 import type { Feed } from '../../api/types';
 import CollapsibleSection from '../../components/CollapsibleSection';
 import CopyButton from '../../components/CopyButton';
+import { FeedTagsEditor } from '../../components/FeedTagsEditor';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import TriStateSelect from '../../components/TriStateSelect';
 import { WHISPER_LANGUAGES, labelForLanguage } from '../../utils/whisperLanguages';
@@ -235,7 +236,7 @@ function FeedSettingsPanel({ feed, slug }: Props) {
     <div className="mb-6">
       <CollapsibleSection
         title="Feed settings"
-        subtitle="Network, DAI platform, auto-processing, language, feed cap, and cue match threshold"
+        subtitle="Network, DAI platform, auto-processing, language, feed cap, cue match threshold, and tags"
         defaultOpen={false}
         storageKey={`feed-settings-${slug}`}
       >
@@ -731,6 +732,9 @@ function FeedSettingsPanel({ feed, slug }: Props) {
               )}
             </div>
           </div>
+
+          {/* Feed tags (nested sub-section, same pattern as cue tuning overrides) */}
+          <FeedTagsEditor slug={slug} />
         </div>
       </CollapsibleSection>
     </div>
