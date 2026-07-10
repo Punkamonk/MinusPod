@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Feed tags moved into the Feed Settings section on the feed detail page as a
   nested sub-section (open/closed state is preserved).
+- soupsieve bumped 2.8.3 to 2.8.4 (CVE-2026-49476, CVE-2026-49477).
 - `deferred_at` and `deferred_service` columns added to the episodes table
   and `deferred` added to the status CHECK constraint via a data-preserving
   table rebuild migration.
