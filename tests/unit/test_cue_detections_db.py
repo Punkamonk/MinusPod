@@ -118,3 +118,37 @@ def test_feed_advisory_excludes_below_threshold(temp_db):
     temp_db.record_cue_detections(pid, 'ep1', _phase6_records())
     adv = temp_db.cue_feed_advisory(pid)
     assert adv['total'] == 2  # below_threshold excluded
+
+
+def test_labeled_scores_exclude_pending_and_below_threshold(temp_db):
+    pid = temp_db.create_podcast('lfeed', 'http://x/rss', 'Feed')
+    temp_db.record_cue_detections(pid, 'ep1', [
+        {'template_id': 1, 'label': 'ding', 'start_s': 1, 'end_s': 2,
+         'match_score': 0.9, 'outcome': 'snap'},
+        {'template_id': 1, 'label': 'ding', 'start_s': 3, 'end_s': 4,
+         'match_score': 0.7, 'outcome': 'none'},
+        {'template_id': 1, 'label': 'ding', 'start_s': 5, 'end_s': 6,
+         'match_score': 0.6, 'outcome': 'below_threshold'},
+    ])
+    ids = [r['id'] for r in temp_db.list_cue_detections_for_episode(pid, 'ep1')]
+    temp_db.set_cue_detection_verdict(ids[0], 'confirmed')
+    temp_db.set_cue_detection_verdict(ids[1], 'rejected')
+    temp_db.set_cue_detection_verdict(ids[2], 'rejected')  # below_threshold row
+    labeled = temp_db.cue_labeled_scores(pid)
+    assert sorted(labeled) == [(0.7, 'rejected'), (0.9, 'confirmed')]
+
+
+def test_template_verdict_scores_grouped(temp_db):
+    pid = temp_db.create_podcast('gfeed', 'http://x/rss', 'Feed')
+    temp_db.record_cue_detections(pid, 'ep1', [
+        {'template_id': 1, 'label': 'ding', 'start_s': 1, 'end_s': 2,
+         'match_score': 0.9, 'outcome': 'snap'},
+        {'template_id': 2, 'label': 'sting', 'start_s': 3, 'end_s': 4,
+         'match_score': 0.8, 'outcome': 'none'},
+    ])
+    ids = [r['id'] for r in temp_db.list_cue_detections_for_episode(pid, 'ep1')]
+    temp_db.set_cue_detection_verdict(ids[0], 'confirmed')
+    temp_db.set_cue_detection_verdict(ids[1], 'rejected')
+    groups = {g['templateId']: g for g in temp_db.cue_template_verdict_scores(pid)}
+    assert groups[1]['confirmed'] == [0.9] and groups[1]['rejected'] == []
+    assert groups[2]['rejected'] == [0.8] and groups[2]['label'] == 'sting'

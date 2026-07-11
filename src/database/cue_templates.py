@@ -461,6 +461,73 @@ class CueTemplateMixin:
             'cue_threshold_scans', podcast_id, episode_id, error,
             claim_epoch=claim_epoch)
 
+    # Feed-wide candidate dismissals (2.44.0): "not a cue" feedback the scan
+    # worker matches against by fingerprint.
+
+    def create_cue_candidate_dismissal(self, podcast_id: int, source_episode_id: str,
+                                       start_s: float, end_s: float,
+                                       label: Optional[str],
+                                       fingerprint_json: str) -> int:
+        conn = self.get_connection()
+        cursor = conn.execute(
+            """INSERT INTO cue_candidate_dismissals
+                   (podcast_id, source_episode_id, start_s, end_s, label, fingerprint)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (podcast_id, source_episode_id, start_s, end_s, label, fingerprint_json))
+        conn.commit()
+        return cursor.lastrowid
+
+    def list_cue_candidate_dismissals(self, podcast_id: int) -> List[Dict]:
+        conn = self.get_connection()
+        rows = conn.execute(
+            """SELECT id, podcast_id, source_episode_id, start_s, end_s, label,
+                      fingerprint, created_at
+               FROM cue_candidate_dismissals WHERE podcast_id = ?
+               ORDER BY created_at DESC, id DESC""",
+            (podcast_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_cue_candidate_dismissal(self, dismissal_id: int) -> Optional[Dict]:
+        conn = self.get_connection()
+        row = conn.execute(
+            """SELECT id, podcast_id, source_episode_id, start_s, end_s, label,
+                      fingerprint, created_at
+               FROM cue_candidate_dismissals WHERE id = ?""",
+            (dismissal_id,)).fetchone()
+        return dict(row) if row else None
+
+    def delete_cue_candidate_dismissal(self, dismissal_id: int) -> bool:
+        conn = self.get_connection()
+        cursor = conn.execute(
+            "DELETE FROM cue_candidate_dismissals WHERE id = ?", (dismissal_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def list_cue_candidate_dismissal_ids(self, podcast_id: int) -> set:
+        """Just the ids, for read-time stamp reconciliation (skips the
+        fingerprint blobs)."""
+        conn = self.get_connection()
+        rows = conn.execute(
+            "SELECT id FROM cue_candidate_dismissals WHERE podcast_id = ?",
+            (podcast_id,)).fetchall()
+        return {r['id'] for r in rows}
+
+    def list_cue_candidate_dismissals_decoded(self, podcast_id: int) -> List[Dict]:
+        """Dismissals with fingerprint decoded to raw ints, for the scan
+        worker. Rows whose fingerprint does not decode to a non-empty list
+        are skipped with a warning -- corrupt feedback must never fail a scan."""
+        out = []
+        for d in self.list_cue_candidate_dismissals(podcast_id):
+            try:
+                ints = json.loads(d['fingerprint'])
+            except (ValueError, TypeError):
+                ints = None
+            if isinstance(ints, list) and ints:
+                out.append({'id': d['id'], 'raw_ints': ints})
+            else:
+                logger.warning('dismissal %s: unreadable fingerprint; skipped', d['id'])
+        return out
+
     # Cross-episode body scan family (D1b, #350).  Keyed by
     # (podcast_id, episode_set_hash) -- a sha256 hex of the sorted episode-id
     # list -- so the cache is shared across any identical episode set regardless

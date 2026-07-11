@@ -15,6 +15,14 @@ export async function setCueDetectionVerdict(
   });
 }
 
+export interface CueTemplateHint {
+  templateId: number;
+  label: string | null;
+  hint: 'raise_threshold' | 'recapture';
+  rejected: number;
+  confirmed: number;
+}
+
 export interface CueFeedAdvisory {
   total: number;
   snapped: number;
@@ -27,6 +35,7 @@ export interface CueFeedAdvisory {
   minScore: number | null;
   maxScore: number | null;
   confirmRate: number | null;
+  templateHints?: CueTemplateHint[];
 }
 
 // Per-feed cue health summary -- lets the user judge a feed's cues before

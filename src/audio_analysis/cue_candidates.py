@@ -3,6 +3,9 @@
 Pure -- no Flask/DB imports -- so the candidate-scan worker and unit tests use it
 directly.
 """
+import numpy as np
+
+from audio_fingerprinter import enumerate_window_occurrences
 from config import (
     AUDIO_CUE_TYPE_SHOW_INTRO, AUDIO_CUE_TYPE_SHOW_OUTRO,
     AUDIO_CUE_TYPE_CONTENT_TRANSITION,
@@ -143,3 +146,36 @@ def merge_cue_candidates(recurring, cross_episode, templated_spans=()):
             'affinitySource': c.get('affinitySource'),
         })
     return merged
+
+
+def mark_dismissed_candidates(candidates, dismissals, target_fp, similarity):
+    """Stamp dismissed/dismissalId on candidates that match a dismissed sound.
+
+    ``dismissals`` carry decoded raw fingerprint ints; each is located in the
+    episode's full fingerprint (``target_fp``) and any candidate whose span
+    overlaps an occurrence is marked in place. Candidates are marked in place
+    rather than removed so cached scan results stay reconcilable. Returns the
+    number of candidates marked.
+    """
+    raw_ints, duration = target_fp
+    ep_arr = np.asarray(raw_ints, dtype=np.uint32)
+    marked = 0
+    for d in dismissals:
+        window = np.asarray(d.get('raw_ints') or [], dtype=np.uint32)
+        if window.size == 0:
+            continue
+        occurrences = enumerate_window_occurrences(
+            window, ep_arr, duration, similarity)
+        if not occurrences:
+            continue
+        for c in candidates:
+            if c.get('dismissed'):
+                continue
+            if any(ranges_overlap(c['start'], c['end'], occ_s, occ_e)
+                   for occ_s, occ_e in occurrences):
+                c['dismissed'] = True
+                c['dismissalId'] = d['id']
+                marked += 1
+        if marked == len(candidates):
+            break
+    return marked

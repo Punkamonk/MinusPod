@@ -580,6 +580,22 @@ function CueTemplatesPanel({ slug }: Props) {
                 </div>
               ))}
             </div>
+            {(advisoryQuery.data.templateHints?.length ?? 0) > 0 && (
+              <div className="mt-3 space-y-1">
+                {advisoryQuery.data.templateHints!.map((h) => (
+                  <p key={h.templateId} className="text-sm text-muted-foreground">
+                    <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-amber-500/20 text-amber-600 dark:text-amber-400 mr-2">
+                      {h.hint === 'raise_threshold' ? 'Raise threshold' : 'Re-capture cue'}
+                    </span>
+                    {h.label || `Template ${h.templateId}`}: {h.rejected} rejected
+                    {h.confirmed > 0 && `, ${h.confirmed} confirmed`}
+                    {h.hint === 'raise_threshold'
+                      ? ' -- rejections sit just above the current threshold'
+                      : ' -- rejections spread across the score range; the capture matches the wrong audio'}
+                  </p>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </CollapsibleSection>

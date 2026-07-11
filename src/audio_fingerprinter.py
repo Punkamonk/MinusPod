@@ -133,7 +133,7 @@ def _count_window_matches(raw_ints, fp_duration, start_s, end_s, similarity):
     return len(_greedy_hit_positions(sim, similarity, min_gap))
 
 
-def _enumerate_window_occurrences(window, ep_ints, ep_duration, similarity):
+def enumerate_window_occurrences(window, ep_ints, ep_duration, similarity):
     """Every occurrence of ``window`` (uint32 array) in one episode's fingerprint.
 
     Cross-array twin of :func:`_count_window_matches` that keeps positions
@@ -472,31 +472,11 @@ class AudioFingerprinter:
 
             # If we need a specific segment, extract it first
             if start > 0 or duration is not None:
-                # Use ffmpeg to extract segment
                 with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
                     tmp_path = tmp.name
 
                 try:
-                    ffmpeg_cmd = [
-                        'ffmpeg', '-y', '-i', audio_path,
-                        '-ss', str(start),
-                    ]
-                    if duration:
-                        ffmpeg_cmd.extend(['-t', str(duration)])
-                    ffmpeg_cmd.extend([
-                        '-ac', '1',  # Mono
-                        '-ar', '16000',  # 16kHz
-                        '-f', 'wav',
-                        tmp_path
-                    ])
-
-                    tracked_run(
-                        ffmpeg_cmd,
-                        capture_output=True,
-                        timeout=FFMPEG_SHORT_TIMEOUT,
-                        check=True,
-                    )
-
+                    self._extract_wav_segment(audio_path, tmp_path, start, duration)
                     cmd.append(tmp_path)
                     result = tracked_run(
                         cmd,
@@ -668,6 +648,58 @@ class AudioFingerprinter:
             return None
         except Exception as e:
             logger.error(f"Full-file fingerprint generation failed: {e}")
+            return None
+
+    def _extract_wav_segment(self, audio_path, tmp_path, start, duration):
+        """Decode [start, start+duration) (duration None = to EOF) to mono
+        16 kHz WAV at tmp_path for fpcalc."""
+        cmd = ['ffmpeg', '-y', '-i', audio_path, '-ss', str(start)]
+        if duration is not None:
+            cmd.extend(['-t', str(duration)])
+        cmd.extend(['-ac', '1', '-ar', '16000', '-f', 'wav', tmp_path])
+        tracked_run(cmd, capture_output=True, timeout=FFMPEG_SHORT_TIMEOUT, check=True)
+
+    def generate_raw_span_fingerprint(
+        self, audio_path: str, start_s: float, end_s: float,
+    ) -> Optional[Tuple[List[int], float]]:
+        """Raw chromaprint ints for the [start_s, end_s] span of a file.
+
+        Extract-then-fingerprint twin of :meth:`generate_fingerprint` that
+        keeps the ``-raw`` int array (comparable against full-file raw
+        fingerprints via the window-occurrence helpers) instead of the
+        compressed string. Returns (raw_ints, duration) or None on failure.
+        """
+        if not self._fpcalc_path or end_s <= start_s:
+            return None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                self._extract_wav_segment(audio_path, tmp_path, start_s, end_s - start_s)
+                result = tracked_run(
+                    [self._fpcalc_path, '-raw', '-json', tmp_path],
+                    capture_output=True, timeout=FPCALC_TIMEOUT,
+                )
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            if result.returncode != 0:
+                logger.warning(f"span fpcalc failed: {result.stderr.decode()}")
+                return None
+            data = json.loads(result.stdout.decode())
+            raw_ints = data.get('fingerprint', [])
+            if not raw_ints or not isinstance(raw_ints, list):
+                return None
+            return (raw_ints, data.get('duration', end_s - start_s))
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode() if e.stderr else ''
+            logger.warning(f"span ffmpeg extract failed: {stderr}")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.error("Span fingerprint generation timed out")
+            return None
+        except Exception as e:
+            logger.error(f"Span fingerprint generation failed: {e}")
             return None
 
     def discover_recurring_spots(self, audio_path, *, similarity, min_count,
@@ -846,7 +878,7 @@ class AudioFingerprinter:
                 window = t_arr[a:b]
                 episodes = []
                 for index, (ep_ints, ep_dur) in all_fps:
-                    occ = _enumerate_window_occurrences(
+                    occ = enumerate_window_occurrences(
                         window, ep_ints, ep_dur, similarity)
                     episodes.append({
                         'index': index,

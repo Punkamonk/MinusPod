@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import threading
 import wave
@@ -37,7 +38,7 @@ from audio_analysis.cue_features import (
 from audio_analysis.cue_template_matcher import AudioCueTemplateMatcher, peak_zncc
 from audio_analysis.cue_candidates import (
     merge_cue_candidates, annotate_recurring_with_ad_affinity,
-    count_ad_boundary_hits,
+    count_ad_boundary_hits, mark_dismissed_candidates,
 )
 from audio_analysis.cue_speech_filter import is_likely_speech
 from audio_analysis.cue_detector import AudioCueDetector
@@ -72,6 +73,7 @@ from config import (
     AUDIO_CUE_AD_AFFINITY_TOLERANCE_SECONDS,
     AUDIO_CUE_AD_AFFINITY_MIN_FRACTION,
     AUDIO_CUE_AD_AFFINITY_PHASE_FRACTION,
+    AUDIO_CUE_DISMISS_MAX_SPAN_SECONDS,
     resolve_cue_template_score,
     resolve_cue_template_score_with_source,
     AUDIO_CUE_SCORE_MAX, AUDIO_CUE_SCORE_MIN,
@@ -1100,6 +1102,21 @@ def _capture_ceiling(db, cue_type):
     return cap_max
 
 
+def _strip_stale_dismissal_stamps(db, podcast_id, candidates):
+    """Drop dismissed/dismissalId stamps whose dismissal row no longer exists
+    (an undo after this episode's scan was cached). Read-time reconciliation:
+    the cache itself is rewritten on the next rescan."""
+    stamped_ids = {c.get('dismissalId') for c in candidates if c.get('dismissed')}
+    if not stamped_ids:
+        return candidates
+    live = db.list_cue_candidate_dismissal_ids(podcast_id)
+    for c in candidates:
+        if c.get('dismissed') and c.get('dismissalId') not in live:
+            c.pop('dismissed', None)
+            c.pop('dismissalId', None)
+    return candidates
+
+
 def _run_cue_candidate_scan(podcast_id, episode_id, slug, audio_path,
                             similarity, min_count):
     """Background worker: find cue-template candidates, then persist them.
@@ -1171,6 +1188,15 @@ def _run_cue_candidate_scan(podcast_id, episode_id, slug, audio_path,
             cross_episode = []
         templated = _templated_cue_spans(db, podcast_id, slug, episode_id)
         candidates = merge_cue_candidates(recurring, cross_episode, templated)
+        dismissals = db.list_cue_candidate_dismissals_decoded(podcast_id)
+        if dismissals and target_fp:
+            # same "same sound" judgment as recurrence discovery, honors per-install tuning
+            marked = mark_dismissed_candidates(
+                candidates, dismissals, target_fp, similarity)
+            if marked:
+                logger.info(
+                    'cue candidate scan: %d candidate(s) matched dismissed sounds',
+                    marked)
         # Stamp the schema version so caches produced before the speech filter
         # (#350 4A) read as stale and get rescanned once (the filter applies
         # retroactively).
@@ -1191,7 +1217,9 @@ def _run_cue_candidate_scan(podcast_id, episode_id, slug, audio_path,
 # 4: ad-affinity typing (#350 Phase 4) -- recurring candidates now carry
 #    suggestedType, adBoundaryHits, boundaryAffinity, affinitySource; old
 #    caches lack these fields, so force a rescan to populate them.
-CUE_CANDIDATE_SCHEMA_VERSION = 4
+# 5: candidate dismissals (2.44.0) -- candidates may carry dismissed/dismissalId
+#    and old caches were never matched against the feed's dismissals.
+CUE_CANDIDATE_SCHEMA_VERSION = 5
 
 
 def _candidates_are_current(candidates):
@@ -1240,6 +1268,7 @@ def episode_cue_candidates(slug, episode_id):
         if row and row.get('status') == 'ready':
             candidates = json.loads(row.get('candidates_json') or '[]')
             if _candidates_are_current(candidates):
+                candidates = _strip_stale_dismissal_stamps(db, podcast_id, candidates)
                 return json_response({
                     'episodeId': episode_id, 'status': 'ready', 'candidates': candidates,
                 })
@@ -1252,6 +1281,7 @@ def episode_cue_candidates(slug, episode_id):
         row = db.get_cue_candidate_scan(podcast_id, episode_id)
         candidates = json.loads((row or {}).get('candidates_json') or '[]')
         if _candidates_are_current(candidates):
+            candidates = _strip_stale_dismissal_stamps(db, podcast_id, candidates)
             return json_response({
                 'episodeId': episode_id, 'status': 'ready', 'candidates': candidates,
             })
@@ -1329,7 +1359,9 @@ def _run_cue_threshold_scan(podcast_id, episode_id, slug, audio_paths,
                 scores.append((s.details or {}).get('score', s.confidence))
             for t in debug.get('templates', []):
                 peaks[t['id']] = max(peaks.get(t['id'], 0.0), t.get('peak_score', 0.0))
-        suggestion = suggest_cue_threshold(scores, effect_floor=effect_floor)
+        labeled = db.cue_labeled_scores(podcast_id)
+        suggestion = suggest_cue_threshold(
+            scores, effect_floor=effect_floor, labeled_scores=labeled)
         per_feed_val = db.get_podcast_cue_score_override(podcast_id)
         current_threshold = resolve_cue_template_score(db, podcast_id)
         db.save_cue_threshold_scan_result(podcast_id, episode_id, {
@@ -1938,3 +1970,136 @@ def cue_window_optimize(slug, template_id):
             template_id, str(e), claim_epoch=claim_epoch)
         raise
     return json_response({'status': 'scanning', 'templateId': template_id})
+
+
+def _load_cached_candidates(db, podcast_id, episode_id):
+    """Candidates list from a ready cached scan, or None (missing, not ready,
+    or unparseable -- callers no-op)."""
+    row = db.get_cue_candidate_scan(podcast_id, episode_id)
+    if not row or row.get('status') != 'ready':
+        return None
+    try:
+        return json.loads(row.get('candidates_json') or '[]')
+    except ValueError:
+        return None
+
+
+def _stamp_cached_candidate(db, podcast_id, episode_id, start_s, end_s, dismissal_id):
+    """Mark the just-dismissed candidate in this episode's cached scan.
+
+    Other episodes' caches self-correct on their next rescan; only the episode
+    the dismissal was made from is stamped immediately.
+    """
+    # Guarded so a mid-flight rescan wins over a stale stamp write.
+    epoch = db.get_cue_candidate_scan_claim_epoch(podcast_id, episode_id)
+    candidates = _load_cached_candidates(db, podcast_id, episode_id)
+    if candidates is None:
+        return
+    changed = False
+    for c in candidates:
+        if (c.get('start') == start_s and c.get('end') == end_s
+                and not c.get('dismissed')):
+            c['dismissed'] = True
+            c['dismissalId'] = dismissal_id
+            changed = True
+            break
+    if changed:
+        db.save_cue_candidate_scan_result(podcast_id, episode_id, candidates,
+                                          claim_epoch=epoch)
+
+
+def _unstamp_cached_candidates(db, podcast_id, episode_id, dismissal_id):
+    """Undo twin of _stamp_cached_candidate: clear flags carrying this id."""
+    # Guarded so a mid-flight rescan wins over a stale stamp write.
+    epoch = db.get_cue_candidate_scan_claim_epoch(podcast_id, episode_id)
+    candidates = _load_cached_candidates(db, podcast_id, episode_id)
+    if candidates is None:
+        return
+    changed = False
+    for c in candidates:
+        if c.get('dismissalId') == dismissal_id:
+            c.pop('dismissed', None)
+            c.pop('dismissalId', None)
+            changed = True
+    if changed:
+        db.save_cue_candidate_scan_result(podcast_id, episode_id, candidates,
+                                          claim_epoch=epoch)
+
+
+@api.route('/feeds/<slug>/episodes/<episode_id>/cue-candidates/dismiss',
+           methods=['POST'])
+@log_request
+def dismiss_cue_candidate(slug, episode_id):
+    """Feed-wide 'not a cue': fingerprint the span and persist a dismissal."""
+    if not is_valid_episode_id(episode_id):
+        abort(400)
+    db = get_database()
+    storage = get_storage()
+    podcast = db.get_podcast_by_slug(slug)
+    if not podcast:
+        return error_response('feed not found', 404)
+    data = request.get_json(silent=True) or {}
+    try:
+        start_s = float(data.get('start_s'))
+        end_s = float(data.get('end_s'))
+    except (TypeError, ValueError):
+        return error_response('start_s and end_s must be numbers', 400)
+    if not (math.isfinite(start_s) and math.isfinite(end_s)) or end_s <= start_s:
+        return error_response('invalid span', 400)
+    if end_s - start_s > AUDIO_CUE_DISMISS_MAX_SPAN_SECONDS:
+        return error_response('span too long to be a cue', 400)
+    label = data.get('label') or None
+
+    audio_path, err = _resolve_original_audio(db, storage, slug, episode_id)
+    if err:
+        return err
+    span_fp = AudioFingerprinter().generate_raw_span_fingerprint(
+        audio_path, start_s, end_s)
+    if span_fp is None:
+        return error_response('could not fingerprint the selected sound', 503)
+    raw_ints, _dur = span_fp
+
+    dismissal_id = db.create_cue_candidate_dismissal(
+        podcast['id'], episode_id, start_s, end_s, label, json.dumps(raw_ints))
+    _stamp_cached_candidate(
+        db, podcast['id'], episode_id, start_s, end_s, dismissal_id)
+    logger.info('cue dismissal %s created: feed=%s ep=%s span=%.2f-%.2fs',
+                dismissal_id, slug, episode_id, start_s, end_s)
+    return json_response({
+        'id': dismissal_id, 'label': label, 'startS': start_s, 'endS': end_s,
+        'sourceEpisodeId': episode_id,
+    }, status=201)
+
+
+@api.route('/feeds/<slug>/cue-candidate-dismissals', methods=['GET'])
+@log_request
+def list_cue_candidate_dismissals_route(slug):
+    """The feed's dismissed sounds, newest first (undo targets for the UI)."""
+    db = get_database()
+    podcast = db.get_podcast_by_slug(slug)
+    if not podcast:
+        return error_response('feed not found', 404)
+    return json_response({'dismissals': [
+        {'id': d['id'], 'label': d['label'],
+         'sourceEpisodeId': d['source_episode_id'],
+         'startS': d['start_s'], 'endS': d['end_s'],
+         'createdAt': d['created_at']}
+        for d in db.list_cue_candidate_dismissals(podcast['id'])
+    ]})
+
+
+@api.route('/cue-candidate-dismissals/<int:dismissal_id>', methods=['DELETE'])
+@log_request
+def delete_cue_candidate_dismissal_route(dismissal_id):
+    """Undo a dismissal; the sound becomes suggestible again."""
+    db = get_database()
+    row = db.get_cue_candidate_dismissal(dismissal_id)
+    if not row:
+        return error_response('dismissal not found', 404)
+    # Delete the DB row first: a crash after delete but before unstamp leaves a
+    # stale stamp that read-time reconciliation corrects; the old order left an
+    # unstamped cache with a live dismissal row, which is harder to recover from.
+    db.delete_cue_candidate_dismissal(dismissal_id)
+    _unstamp_cached_candidates(
+        db, row['podcast_id'], row['source_episode_id'], dismissal_id)
+    return json_response({'deleted': True})

@@ -13,7 +13,7 @@ survivorship-free telemetry, not a detection the user reviews); a separate
 near-miss histogram and unused-reason breakdown surface the new rows.
 """
 import logging
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,9 @@ _ADVISORY_AGGREGATE_SQL = """
 # Above-threshold rows only: below_threshold near-misses are advisory telemetry,
 # never a detection the totals/confirm-rate should count.
 _ABOVE_THRESHOLD = "outcome != 'below_threshold'"
+# Labeled subset both verdict-feedback queries read: reviewed, scored,
+# above-threshold rows.
+_LABELED = f"verdict != 'pending' AND match_score IS NOT NULL AND {_ABOVE_THRESHOLD}"
 
 
 class CueDetectionMixin:
@@ -156,6 +159,36 @@ class CueDetectionMixin:
         out['nearMissTotal'] = near_miss_total
         out['unusedReasons'] = {r['unused_reason']: r['n'] for r in reason_rows}
         return out
+
+    def cue_labeled_scores(self, podcast_id: int) -> List[Tuple[float, str]]:
+        """Reviewed (score, verdict) pairs for the labeled threshold suggestion."""
+        conn = self.get_connection()
+        rows = conn.execute(
+            f"""SELECT match_score, verdict FROM cue_detections
+               WHERE podcast_id = ? AND {_LABELED}""",
+            (podcast_id,)).fetchall()
+        return [(r['match_score'], r['verdict']) for r in rows]
+
+    def cue_template_verdict_scores(self, podcast_id: int) -> List[Dict]:
+        """Reviewed scores grouped per template, for verdict hints."""
+        conn = self.get_connection()
+        rows = conn.execute(
+            f"""SELECT template_id, label, match_score, verdict
+               FROM cue_detections
+               WHERE podcast_id = ? AND template_id IS NOT NULL AND {_LABELED}
+               ORDER BY template_id""",
+            (podcast_id,)).fetchall()
+        grouped: Dict[int, Dict] = {}
+        for r in rows:
+            # Guard against future verdict states (the outcome CHECK was
+            # already widened once); unknown verdicts must not KeyError.
+            if r['verdict'] not in ('confirmed', 'rejected'):
+                continue
+            g = grouped.setdefault(r['template_id'], {
+                'templateId': r['template_id'], 'label': r['label'],
+                'rejected': [], 'confirmed': []})
+            g[r['verdict']].append(r['match_score'])
+        return list(grouped.values())
 
 
 def _histogram(buckets) -> List[Dict]:

@@ -127,6 +127,12 @@ the mark dialog seeded with the candidate's bounds and a suggested type. You
 review and save it like any hand-marked cue. The scan suggests; it never creates
 a template on its own.
 
+A **Dismiss** button on each candidate handles the junk. It stores that sound's
+fingerprint, and every later scan in the feed suppresses matching candidates in
+any episode. Dismissed sounds move to a collapsed **Dismissed** list with a
+per-entry Undo, so nothing is silently hidden. Episodes scanned before a
+dismissal keep showing the sound until you hit **Rescan** on their results.
+
 ## Finding cues across episodes
 
 The **Find across episodes** button in the Audio Cue Templates panel runs a
@@ -192,6 +198,14 @@ original; returns 409 when the original is gone.
 When a feed has cue templates, the episode page shows where each enabled cue
 matched, so you can confirm the matcher is keying on the right sound before you
 rely on it to snap boundaries.
+
+Confirming or rejecting matches also feeds tuning. Reviewed scores sharpen the
+`Suggest threshold` sweep: rejections raise the proposed floor, confirmations
+cap it, and a clean gap between the two places the suggestion directly. Once a
+template collects three or more rejections above the current threshold, the
+templates panel shows a hint chip: **Raise threshold** when the rejections sit
+just above it, **Re-capture cue** when they spread across the score range.
+Verdicts tune suggestions only; they never add or remove ads.
 
 ## Settings
 
