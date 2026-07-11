@@ -35,6 +35,9 @@ Key endpoints:
 - `POST /api/v1/feeds/{slug}/cue-templates/import` - Import a template zip into a feed (multipart `file`); the MFCC is recomputed from the WAV, sample-rate or channel mismatches are rejected. The manifest carries a `schemaVersion` field that is reserved for a future breaking change; this release only checks that it parses and does not gate or migrate on it.
 - `GET /api/v1/feeds/{slug}/episodes/{id}/cue-loud-spots` - Template-free energy pass over an episode's original audio; returns candidate "loud spots" the capture UI marks as jump points
 - `GET /api/v1/feeds/{slug}/episodes/{id}/cue-candidates` - Find-audio-cues scan: recurring in-episode stings (speech-like ones dropped) plus intros and outros shared across the feed (powers the Find audio cues button)
+- `POST /api/v1/feeds/{slug}/episodes/{id}/cue-candidates/dismiss` - Dismiss a candidate sound feed-wide (`start_s`, `end_s`, optional `label`; spans over 120 seconds are rejected). Stores the span's fingerprint from the retained original; future candidate scans suppress matching sounds
+- `GET /api/v1/feeds/{slug}/cue-candidate-dismissals` - List the feed's dismissed sounds, newest first
+- `DELETE /api/v1/cue-candidate-dismissals/{id}` - Undo a dismissal; the sound becomes suggestible again
 - `POST /api/v1/feeds/{slug}/episodes/{id}/cue-scan` - Diagnostic: run every enabled template against an episode and return per-template peak scores and match times (optional `scoreThreshold` override)
 - `POST /api/v1/feeds/{slug}/episodes/{id}/cue-template-preview` - Run a single template (`templateId`) against an episode
 - `POST /api/v1/feeds/{slug}/cue-cross-episode-scan` - Full-body cross-episode scan for recurring segments (`episodeIds`, 2-5; the first sets the coordinate frame). Poll with the same body; `rescan: true` forces a fresh run
