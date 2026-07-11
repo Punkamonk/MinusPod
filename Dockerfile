@@ -51,6 +51,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /usr/lib/python3/dist-packages/cryptography* \
               /usr/lib/python3/dist-packages/PyJWT* \
               /usr/lib/python3/dist-packages/jwt* \
+    # pebble ships in the ubuntu:26.04 OCI rootfs (not dpkg-owned); unused
+    # here and its embedded Go deps carry unfixed HIGH CVEs, so drop it
+    && rm -rf /usr/bin/pebble /var/lib/pebble \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && setpriv --reuid=nobody --regid=nogroup --init-groups true
 
