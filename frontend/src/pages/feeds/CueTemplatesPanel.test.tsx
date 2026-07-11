@@ -149,7 +149,7 @@ beforeEach(() => {
   mockListCueTemplates.mockResolvedValue([]);
   mockGetFeed.mockResolvedValue({ slug: 'test-feed', title: 'Test Feed' });
   mockGetSettings.mockResolvedValue({});
-  mockGetCueFeedAdvisory.mockResolvedValue({ total: 0 });
+  mockGetCueFeedAdvisory.mockResolvedValue({ total: 0, templateHints: [] });
 
   // Default picker: 3 eligible episodes
   mockGetEpisodes.mockResolvedValue({
