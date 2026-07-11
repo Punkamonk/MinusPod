@@ -1514,6 +1514,8 @@ def is_limit_exceeded_error(error: Exception) -> bool:
     Gemini's transient per-minute 429 message also says "exceeded your
     current quota ... billing details" and must keep retrying.
     """
+    if isinstance(error, LimitExceededError):
+        return True
     status = _provider_status_code(error)
     if status == 402:
         return True
@@ -1584,6 +1586,17 @@ class StructuralRateLimitError(Exception):
     Retrying cannot succeed at the current window size; callers must shrink
     the detection window or change provider/tier. Explicitly excluded from
     ``is_retryable_error`` below.
+    """
+    pass
+
+
+class LimitExceededError(Exception):
+    """A provider rejection caused by an exhausted spend/usage limit.
+
+    Used to carry the limit-exceeded classification across layers that
+    stringify errors (ad detector -> episode failure handler, #491).
+    Recognized by ``is_limit_exceeded_error`` and therefore excluded from
+    ``is_retryable_error``.
     """
     pass
 

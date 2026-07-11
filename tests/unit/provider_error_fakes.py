@@ -1,5 +1,7 @@
 """Shared fake provider errors for LLM classifier and retry-loop tests."""
 
+from utils.llm_call import call_llm_for_window
+
 
 class FakeResponse:
     def __init__(self, text=None, headers=None):
@@ -18,7 +20,6 @@ class FakeProviderError(Exception):
 
 def call_window(client, max_retries=5):
     """Invoke call_llm_for_window with test defaults."""
-    from utils.llm_call import call_llm_for_window
     return call_llm_for_window(
         llm_client=client,
         model="test-model",

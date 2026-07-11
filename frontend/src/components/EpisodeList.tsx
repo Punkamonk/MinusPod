@@ -76,7 +76,8 @@ function EpisodeRow({
   };
 
   const canSelect = episode.status !== 'processing';
-  const isFailed = isFailedStatus(episode.status);
+  const failureReason =
+    isFailedStatus(episode.status) && episode.error ? episode.error : undefined;
 
   return (
     <div className="relative bg-card rounded-lg border border-border hover:border-primary/50 transition-colors">
@@ -122,8 +123,8 @@ function EpisodeRow({
               </span>
             )}
             <span
-              className={`px-2 py-0.5 text-xs rounded-full whitespace-nowrap ${EPISODE_STATUS_COLORS[episode.status] || 'bg-muted text-muted-foreground'}${isFailed ? ' cursor-help' : ''}`}
-              title={isFailed ? episode.error || 'Processing failed' : undefined}
+              className={`px-2 py-0.5 text-xs rounded-full whitespace-nowrap ${EPISODE_STATUS_COLORS[episode.status] || 'bg-muted text-muted-foreground'}${failureReason ? ' cursor-help' : ''}`}
+              title={failureReason}
             >
               {EPISODE_STATUS_LABELS[episode.status] || episode.status}
             </span>

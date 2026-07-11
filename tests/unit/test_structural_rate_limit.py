@@ -8,14 +8,10 @@ to the existing transient retry path.
 """
 
 from llm_client import classify_structural_rate_limit
-from tests.unit.provider_error_fakes import (
-    FakeResponse as _FakeResponse,
-    FakeProviderError as _FakeError,
-    call_window,
-)
+from tests.unit.provider_error_fakes import FakeResponse, FakeProviderError, call_window
 
 
-class _FakeRateLimitError(_FakeError):
+class _FakeRateLimitError(FakeProviderError):
     """A RateLimitError so is_rate_limit_error returns True via string-match."""
     def __init__(self, message="rate limit 429", **kw):
         super().__init__(message, **kw)
@@ -69,7 +65,7 @@ class TestStructuralClassifier:
         assert classify_structural_rate_limit(err) is None
 
     def test_non_rate_limit_error_returns_false(self):
-        err = _FakeError(message="connection timeout")
+        err = FakeProviderError(message="connection timeout")
         assert classify_structural_rate_limit(err) is None
 
     def test_message_string_fallback(self):
@@ -84,7 +80,7 @@ class TestStructuralClassifier:
             '{"error":{"message":"tokens per minute: Limit 5000, Used 0, '
             'Requested ~7000","type":"tokens","code":"rate_limit_exceeded"}}'
         )
-        err = _FakeRateLimitError(response=_FakeResponse(text=body_text))
+        err = _FakeRateLimitError(response=FakeResponse(text=body_text))
         assert classify_structural_rate_limit(err) is not None
 
 
