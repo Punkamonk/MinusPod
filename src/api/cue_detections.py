@@ -17,6 +17,8 @@ from flask import request
 from api import (
     api, log_request, json_response, error_response, get_database,
 )
+from audio_analysis.cue_verdict_hints import template_verdict_hint
+from config import resolve_cue_template_score
 
 logger = logging.getLogger('podcast.api.cue_detections')
 
@@ -46,7 +48,17 @@ def get_cue_detections_advisory(slug):
     podcast = db.get_podcast_by_slug(slug)
     if not podcast:
         return error_response('feed not found', 404)
-    return json_response(db.cue_feed_advisory(podcast['id']))
+    payload = db.cue_feed_advisory(podcast['id'])
+    threshold = resolve_cue_template_score(db, podcast['id'])
+    hints = []
+    for t in db.cue_template_verdict_scores(podcast['id']):
+        hint = template_verdict_hint(t['rejected'], t['confirmed'], threshold)
+        if hint:
+            hints.append({
+                'templateId': t['templateId'], 'label': t['label'], 'hint': hint,
+                'rejected': len(t['rejected']), 'confirmed': len(t['confirmed'])})
+    payload['templateHints'] = hints
+    return json_response(payload)
 
 
 @api.route('/cue-detections/aggregate', methods=['GET'])

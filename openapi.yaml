@@ -5902,7 +5902,32 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CueAdvisory'
+                allOf:
+                  - $ref: '#/components/schemas/CueAdvisory'
+                  - type: object
+                    properties:
+                      templateHints:
+                        type: array
+                        description: Per-template verdict hints. Only templates with enough rejections to classify are included.
+                        items:
+                          type: object
+                          required: [templateId, hint, rejected, confirmed]
+                          properties:
+                            templateId:
+                              type: integer
+                            label:
+                              type: string
+                              nullable: true
+                            hint:
+                              type: string
+                              enum: [raise_threshold, recapture]
+                              description: raise_threshold when rejections cluster just above the threshold; recapture when they span the score range or overlap confirmed scores.
+                            rejected:
+                              type: integer
+                              description: Number of rejected detections for this template.
+                            confirmed:
+                              type: integer
+                              description: Number of confirmed detections for this template.
         '404':
           description: Feed not found
 
@@ -5989,6 +6014,17 @@ paths:
                       reason:
                         type: string
                         description: Human-readable reason. Present on low confidence results.
+                      labeledCounts:
+                        type: object
+                        description: Breakdown of labeled scores used in the suggestion (confirmed and rejected counts). Present when labeled scores were available.
+                        properties:
+                          confirmed:
+                            type: integer
+                          rejected:
+                            type: integer
+                      labeledOverlap:
+                        type: boolean
+                        description: True when the rejected and confirmed labeled score ranges overlap (no clean labeled placement is possible). Present only when both verdicts carry enough labeled scores to attempt one.
                   sampleEpisodes:
                     type: integer
                     description: Number of episodes included in the sweep.

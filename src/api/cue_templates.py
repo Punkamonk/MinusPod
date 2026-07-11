@@ -1360,7 +1360,9 @@ def _run_cue_threshold_scan(podcast_id, episode_id, slug, audio_paths,
                 scores.append((s.details or {}).get('score', s.confidence))
             for t in debug.get('templates', []):
                 peaks[t['id']] = max(peaks.get(t['id'], 0.0), t.get('peak_score', 0.0))
-        suggestion = suggest_cue_threshold(scores, effect_floor=effect_floor)
+        labeled = db.cue_labeled_scores(podcast_id)
+        suggestion = suggest_cue_threshold(
+            scores, effect_floor=effect_floor, labeled_scores=labeled)
         per_feed_val = db.get_podcast_cue_score_override(podcast_id)
         current_threshold = resolve_cue_template_score(db, podcast_id)
         db.save_cue_threshold_scan_result(podcast_id, episode_id, {
