@@ -28,12 +28,11 @@ RUN mkdir -p /app/static/ui/swagger \
 # CUDA runtime, and cuDNN/cuBLAS come from the pip nvidia-* wheels (torch
 # deps) via LD_LIBRARY_PATH below. GPU access is injected by the NVIDIA
 # container runtime, driven by the NVIDIA_* env vars in the ENV block.
-# This also avoids the driver>=580 gate that CUDA 13.x base images enforce.
 FROM ubuntu:26.04
 
 # Install Python 3.12 from deadsnakes PPA and system dependencies
-# Ubuntu 26.04 ships Python 3.14; deadsnakes pins 3.12 (numpy<2.0 caps
-# wheels at cp312, and numpy 2.x needs x86-64-v2 the target server lacks)
+# Ubuntu 26.04 ships Python 3.14; deadsnakes pins 3.12 (cp312 is the
+# ceiling for numpy<2.0 wheels; see the numpy pin in requirements.in)
 # setpriv (from util-linux, present in the base image) is used by
 # entrypoint.sh to drop privileges after the root-only chown step that
 # migrates the data volume on first boot.
@@ -71,8 +70,8 @@ RUN pip install --no-cache-dir --upgrade pip==25.2 setuptools==80.9.0 \
 WORKDIR /app
 
 # Pre-install PyTorch 2.13.0 with CUDA 12.6 (bundled cuDNN 9 / cuBLAS via
-# pip nvidia-* deps). cu13x wheels need driver>=580; prod T4 runs 535, and
-# CUDA 12.x wheels only need driver>=525.
+# pip nvidia-* deps). Stay on CUDA 12.x wheels: they run on driver >= 525,
+# while cu13x wheels raise the host driver floor to >= 580.
 RUN pip install --no-cache-dir \
     torch==2.13.0+cu126 \
     --extra-index-url https://download.pytorch.org/whl/cu126
@@ -91,8 +90,8 @@ RUN apt-get purge -y linux-libc-dev python3.12-dev libpython3.12-dev libc6-dev l
 # HOME must point to writable location (/app/data is the volume mount)
 # ORT_LOG_LEVEL=3 suppresses onnxruntime warnings (GPU discovery fails for AMD, irrelevant for NVIDIA)
 # LD_LIBRARY_PATH: venv nvidia pip dirs (cuDNN 9 bundled with torch, cuBLAS)
-# NVIDIA_*: previously inherited from the nvidia/cuda base image; needed so
-# the NVIDIA container runtime injects the driver under --gpus/legacy runtime
+# NVIDIA_*: make the NVIDIA container runtime inject the driver under
+# --gpus/legacy runtime (compose device reservations inject regardless)
 ENV HOME=/app/data \
     WHISPER_MODEL=small \
     HF_HOME=/app/data/.cache \

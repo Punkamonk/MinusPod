@@ -11,6 +11,7 @@
 #   docker buildx build --platform=linux/arm64 -f Dockerfile.cpu -t minuspod-cpu:arm64 --load .
 #
 # MAINTENANCE CONTRACT (mirror from Dockerfile when touched):
+#   - Base image (verbatim; both files build on plain ubuntu).
 #   - Frontend builder stage (verbatim).
 #   - apt package list and `apt-get upgrade -y` step (verbatim).
 #   - System dist-package purge (cryptography*, PyJWT*, jwt*) (verbatim).
@@ -22,9 +23,8 @@
 #     https://download.pytorch.org/whl/cpu (no +cu126, no --extra-index-url).
 #
 # DO NOT MIRROR:
-#   - GPU base image changes (both files share ubuntu:26.04 now, but the GPU
-#     file's NVIDIA notes/env do not apply here).
-#   - LD_LIBRARY_PATH cuDNN/cuBLAS edits and NVIDIA_* env vars.
+#   - The GPU file's NVIDIA base-image comment, LD_LIBRARY_PATH cuDNN/cuBLAS
+#     edits, and NVIDIA_* env vars.
 #   - GPU defaults: WHISPER_DEVICE=cuda, WHISPER_MODEL=small.
 # =============================================================================
 
@@ -57,8 +57,8 @@ RUN mkdir -p /app/static/ui/swagger \
 FROM ubuntu:26.04
 
 # Install Python 3.12 from deadsnakes PPA and system dependencies
-# Ubuntu 26.04 ships Python 3.14; deadsnakes pins 3.12 (numpy<2.0 caps
-# wheels at cp312, and numpy 2.x needs x86-64-v2 the target server lacks)
+# Ubuntu 26.04 ships Python 3.14; deadsnakes pins 3.12 (cp312 is the
+# ceiling for numpy<2.0 wheels; see the numpy pin in requirements.in)
 # setpriv (from util-linux, present in the base image) is used by
 # entrypoint.sh to drop privileges after the root-only chown step that
 # migrates the data volume on first boot.

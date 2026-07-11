@@ -15,9 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PyTorch upgraded from 2.6.0 (cu124) to 2.13.0 (cu126). CUDA 12.x wheels keep the host driver requirement at >= 525.
 - torchaudio removed from both images and CI: nothing imports it.
 
-### Removed
-- `nvidia/cuda` base image dependency (see Changed).
-
 ## [2.42.0] - 2026-07-10
 
 ### Added
