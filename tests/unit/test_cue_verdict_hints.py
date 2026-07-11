@@ -31,3 +31,16 @@ def test_no_confirmed_clustered_still_raise():
 
 def test_none_scores_filtered():
     assert template_verdict_hint([0.76, None, 0.78], [0.9], 0.75) is None
+
+
+def test_sub_threshold_rejections_ignored():
+    # All rejections at/below the current threshold: stale labels from before
+    # a threshold raise must not keep a hint alive.
+    assert template_verdict_hint([0.76, 0.78, 0.80], [0.9], 0.85) is None
+
+
+def test_mixed_sub_threshold_filtered():
+    # 0.70 is below the threshold and filtered; the remaining 3 cluster within
+    # the near band above 0.85 and below confirmed.
+    assert template_verdict_hint(
+        [0.70, 0.86, 0.87, 0.88], [0.95], 0.85) == HINT_RAISE_THRESHOLD

@@ -3,7 +3,9 @@
 Rejections clustered just above the feed's threshold mean the threshold is
 too loose (raise it); rejections spread across the score range or overlapping
 confirmed scores mean the capture itself matches the wrong audio (re-capture).
-Pure -- no Flask/DB imports -- mirroring cue_threshold_suggest.
+Rejections at or below the current threshold are ignored: they no longer match
+today, so stale labels recorded under an older, lower threshold cannot keep a
+hint alive. Pure -- no Flask/DB imports -- mirroring cue_threshold_suggest.
 """
 from typing import List, Optional
 
@@ -19,7 +21,8 @@ def template_verdict_hint(
     current_threshold: float,
 ) -> Optional[str]:
     """Classify one template's rejection pattern; None below the count gate."""
-    rejected = [s for s in (rejected_scores or []) if s is not None]
+    rejected = [s for s in (rejected_scores or [])
+                if s is not None and s > current_threshold]
     if len(rejected) < AUDIO_CUE_HINT_MIN_REJECTIONS:
         return None
     confirmed = [s for s in (confirmed_scores or []) if s is not None]
