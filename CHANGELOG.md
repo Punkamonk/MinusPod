@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.44.0] - 2026-07-11
+
+### Added
+- Feed-wide cue candidate dismissal: a Dismiss button on each audio-cue
+  candidate stores the sound's fingerprint, and every future candidate scan
+  in the feed suppresses matching sounds into a collapsed Dismissed group
+  with per-entry undo. Existing candidate caches rescan once to apply.
+- Verdict-fed cue threshold suggestion: confirmed/rejected detection reviews
+  now steer the suggested match threshold (rejections raise the proposed
+  floor, confirmations cap it; a clean labeled gap replaces the unsupervised
+  estimate). Suggestion-only, applied manually as before.
+- Per-template verdict hints in the cue templates panel: rejections
+  clustered just above the threshold suggest raising it; rejections spread
+  across the score range suggest re-capturing the cue.
+
 ## [2.43.1] - 2026-07-11
 
 ### Added
