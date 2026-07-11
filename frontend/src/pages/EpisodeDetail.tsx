@@ -296,7 +296,10 @@ function EpisodeDetail() {
               {episode.fileSize && (
                 <span>{formatFileSize(episode.fileSize)}</span>
               )}
-              <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${EPISODE_STATUS_COLORS[episode.status]}`}>
+              <span
+                className={`px-2 py-0.5 rounded-full text-xs font-medium ${EPISODE_STATUS_COLORS[episode.status]}${(episode.status === 'failed' || episode.status === 'permanently_failed') && episode.error ? ' cursor-help' : ''}`}
+                title={(episode.status === 'failed' || episode.status === 'permanently_failed') && episode.error ? episode.error : undefined}
+              >
                 {episode.status}
               </span>
               {episode.transcriptVttAvailable && (
@@ -405,6 +408,19 @@ function EpisodeDetail() {
             </div>
           </div>
         </div>
+
+        {(episode.status === 'failed' || episode.status === 'permanently_failed') && episode.error && (
+          <div className="mt-4 pt-4 border-t border-border">
+            <div className="p-4 rounded-lg bg-destructive/10 text-destructive text-sm">
+              <p className="font-medium mb-1">
+                {episode.status === 'permanently_failed'
+                  ? 'Processing failed permanently'
+                  : 'Processing failed'}
+              </p>
+              <p className="break-words">{episode.error}</p>
+            </div>
+          </div>
+        )}
 
         {episode.status === 'completed' && (
           <div className="mt-4 pt-4 border-t border-border">

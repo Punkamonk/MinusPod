@@ -1491,6 +1491,34 @@ def is_auth_error(error: Exception) -> bool:
     return False
 
 
+def is_limit_exceeded_error(error: Exception) -> bool:
+    """Check if error is a provider spend/quota limit rather than bad credentials.
+
+    Distinguishes billing exhaustion (OpenRouter monthly key limit 403s,
+    HTTP 402, OpenAI insufficient_quota 429s, Anthropic low-credit 400s) from
+    invalid-key auth errors and transient rate limits so webhooks can alert
+    with the right event. Keyword markers are scoped per status code: on 429
+    only the literal OpenAI ``insufficient_quota`` code counts, because
+    Gemini's transient per-minute 429 message also says "exceeded your
+    current quota ... billing details" and must keep retrying.
+    """
+    status = _provider_status_code(error)
+    if status == 402:
+        return True
+    if status in (401, 403):
+        markers = ('limit exceeded', 'quota', 'billing', 'insufficient credit',
+                   'insufficient fund', 'payment', 'spend limit')
+    elif status == 429:
+        markers = ('insufficient_quota',)
+    elif status == 400:
+        markers = ('credit balance is too low',)
+    else:
+        return False
+    body = extract_error_body(error)
+    text = str(body).lower() if body is not None else str(error).lower()
+    return any(marker in text for marker in markers)
+
+
 def is_not_found_error(error: Exception) -> bool:
     """Check if error is a model/resource not-found failure (404).
 

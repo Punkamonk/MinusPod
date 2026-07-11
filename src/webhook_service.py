@@ -25,11 +25,13 @@ EVENT_EPISODE_PROCESSED = 'Episode Processed'
 EVENT_EPISODE_FAILED = 'Episode Failed'
 EVENT_AUTH_FAILURE = 'Auth Failure'
 EVENT_RATE_LIMIT_STRUCTURAL = 'Rate Limit Structural'
+EVENT_LIMIT_EXCEEDED = 'Limit Exceeded'
 VALID_EVENTS = {
     EVENT_EPISODE_PROCESSED,
     EVENT_EPISODE_FAILED,
     EVENT_AUTH_FAILURE,
     EVENT_RATE_LIMIT_STRUCTURAL,
+    EVENT_LIMIT_EXCEEDED,
 }
 
 _sandbox_env = SandboxedEnvironment()
@@ -319,6 +321,61 @@ def fire_auth_failure_event(provider, model, error_message, status_code):
                             provider, status_code)
             except Exception:
                 logger.exception("Failed to send auth failure webhook to %s",
+                                 wh.get('url'))
+
+    thread = threading.Thread(target=_dispatch, daemon=True)
+    thread.start()
+
+
+_limit_exceeded_lock = threading.Lock()
+_last_limit_exceeded_time = 0.0
+_LIMIT_EXCEEDED_DEDUP_SECS = 300  # 5 minutes
+
+
+def fire_limit_exceeded_event(provider, model, error_message, status_code):
+    """Fire a spend/quota limit webhook with 5-minute dedup.
+
+    Signals that the provider rejected the request because a billing or
+    usage limit is exhausted (monthly key limit, out of credits), as opposed
+    to bad credentials (Auth Failure) or a per-minute cap (Rate Limit
+    Structural).
+    """
+    global _last_limit_exceeded_time
+
+    now = time.time()
+    with _limit_exceeded_lock:
+        if now - _last_limit_exceeded_time < _LIMIT_EXCEEDED_DEDUP_SECS:
+            logger.debug("Limit exceeded webhook suppressed (dedup window)")
+            return
+        _last_limit_exceeded_time = now
+
+    webhooks = load_webhooks()
+    if not webhooks:
+        return
+
+    matching = [w for w in webhooks
+                if w.get('enabled', False)
+                and EVENT_LIMIT_EXCEEDED in w.get('events', [])]
+    if not matching:
+        return
+
+    context = {
+        'event': EVENT_LIMIT_EXCEEDED,
+        'provider': provider,
+        'model': model,
+        'error_message': str(error_message),
+        'status_code': status_code,
+        'timestamp': utc_now_iso(),
+    }
+
+    def _dispatch():
+        for wh in matching:
+            try:
+                _prepare_and_dispatch(wh, context)
+                logger.info("Limit exceeded webhook sent (provider=%s, status=%s)",
+                            provider, status_code)
+            except Exception:
+                logger.exception("Failed to send limit exceeded webhook to %s",
                                  wh.get('url'))
 
     thread = threading.Thread(target=_dispatch, daemon=True)

@@ -10,6 +10,7 @@ from llm_client import (
     classify_structural_rate_limit,
     classify_daily_quota_exhaustion,
     is_auth_error,
+    is_limit_exceeded_error,
     extract_retry_after,
     get_effective_provider,
     StructuralRateLimitError,
@@ -135,6 +136,19 @@ def call_llm_for_window(
                 except Exception:
                     logger.exception("Failed to fire structural rate-limit webhook")
                 break
+            if is_limit_exceeded_error(e):
+                logger.warning(
+                    f"[{slug}:{episode_id}] {window_label} provider limit exceeded: {e}"
+                )
+                try:
+                    from webhook_service import fire_limit_exceeded_event
+                    fire_limit_exceeded_event(
+                        get_effective_provider(), model, str(e),
+                        getattr(e, 'status_code', None),
+                    )
+                except Exception:
+                    logger.exception("Failed to fire limit-exceeded webhook")
+                break
             if _is_retryable(e) and attempt < max_retries:
                 if is_rate_limit_error(e):
                     retry_after = extract_retry_after(e)
@@ -166,7 +180,8 @@ def call_llm_for_window(
                 )
             break
 
-    if response is None and last_error is not None and _is_retryable(last_error):
+    if (response is None and last_error is not None and _is_retryable(last_error)
+            and not is_limit_exceeded_error(last_error)):
         for retry_num, delay in enumerate([2, 5], 1):
             logger.warning(
                 f"[{slug}:{episode_id}] {window_label} per-window retry "

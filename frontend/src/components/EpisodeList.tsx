@@ -120,7 +120,10 @@ function EpisodeRow({
                 {episode.pendingReviewCount} held
               </span>
             )}
-            <span className={`px-2 py-0.5 text-xs rounded-full whitespace-nowrap ${EPISODE_STATUS_COLORS[episode.status] || 'bg-muted text-muted-foreground'}`}>
+            <span
+              className={`px-2 py-0.5 text-xs rounded-full whitespace-nowrap ${EPISODE_STATUS_COLORS[episode.status] || 'bg-muted text-muted-foreground'}${episode.status === 'failed' || episode.status === 'permanently_failed' ? ' cursor-help' : ''}`}
+              title={episode.status === 'failed' || episode.status === 'permanently_failed' ? episode.error || 'Processing failed' : undefined}
+            >
               {EPISODE_STATUS_LABELS[episode.status] || episode.status}
             </span>
           </div>
