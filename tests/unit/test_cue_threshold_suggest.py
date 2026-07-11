@@ -35,3 +35,50 @@ def test_live_effect_floor_below_signal_is_clean():
     scores = [0.45, 0.48, 0.50, 0.67, 0.70, 0.73]
     out = suggest_cue_threshold(scores, effect_floor=0.60)
     assert out['effectFloorWarning'] is None
+
+
+def test_labeled_clean_separation_wins():
+    scores = [0.4, 0.45, 0.5, 0.86, 0.9, 0.93]
+    labeled = [(0.70, 'rejected'), (0.72, 'rejected'),
+               (0.86, 'confirmed'), (0.90, 'confirmed')]
+    r = suggest_cue_threshold(scores, labeled_scores=labeled)
+    assert r['confidence'] == 'high'
+    assert 0.72 < r['suggested'] < 0.86
+    assert r['labeledCounts'] == {'confirmed': 2, 'rejected': 2}
+    assert r['labeledOverlap'] is False
+    assert 'rejected' in r['reason']
+
+
+def test_labeled_overlap_falls_back_to_unsupervised():
+    scores = [0.4, 0.45, 0.5, 0.86, 0.9, 0.93]
+    labeled = [(0.88, 'rejected'), (0.85, 'confirmed'), (0.9, 'confirmed')]
+    r = suggest_cue_threshold(scores, labeled_scores=labeled)
+    assert r['labeledOverlap'] is True
+    # unsupervised gap-find still ran; its fields are present
+    assert 'scoresN' in r
+
+
+def test_labeled_below_minimum_ignored():
+    scores = [0.4, 0.45, 0.5, 0.86, 0.9, 0.93]
+    r_no = suggest_cue_threshold(scores)
+    r_few = suggest_cue_threshold(scores, labeled_scores=[(0.7, 'rejected')])
+    assert r_few.get('suggested') == r_no.get('suggested')
+    assert r_few['labeledCounts'] == {'confirmed': 0, 'rejected': 1}
+    assert 'labeledOverlap' not in r_few
+
+
+def test_rejected_only_raises_floor():
+    scores = [0.4, 0.45, 0.5, 0.86, 0.9, 0.93]
+    base = suggest_cue_threshold(scores)
+    assert base['suggested'] is not None
+    labeled = [(base['suggested'] + 0.05, 'rejected')] * 3
+    r = suggest_cue_threshold(scores, labeled_scores=labeled)
+    assert r['suggested'] > base['suggested']
+
+
+def test_confirmed_only_caps_suggestion():
+    scores = [0.4, 0.45, 0.5, 0.86, 0.9, 0.93]
+    base = suggest_cue_threshold(scores)
+    labeled = [(base['suggested'] - 0.05, 'confirmed')] * 3
+    r = suggest_cue_threshold(scores, labeled_scores=labeled)
+    assert r['suggested'] < base['suggested']

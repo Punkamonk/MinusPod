@@ -7,10 +7,11 @@ no IO, unit-testable in isolation.
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from config import (
     AUDIO_CUE_SUGGEST_MIN_GAP,
+    AUDIO_CUE_SUGGEST_MIN_LABELED,
     AUDIO_CUE_SUGGEST_MIN_SIGNAL,
     AUDIO_CUE_SUGGEST_BAND,
     AUDIO_CUE_SUGGEST_MARGIN,
@@ -18,9 +19,9 @@ from config import (
 )
 
 
-def suggest_cue_threshold(
+def _unsupervised_suggest(
     occurrence_scores: List[float],
-    effect_floor: float = AUDIO_CUE_EFFECT_FLOOR,
+    effect_floor: float,
 ) -> Dict:
     """Propose a global match threshold from a list of per-occurrence scores.
 
@@ -99,3 +100,72 @@ def suggest_cue_threshold(
         'effectFloorWarning': warning,
         'scoresN': len(scores),
     }
+
+
+def suggest_cue_threshold(
+    occurrence_scores: List[float],
+    effect_floor: float = AUDIO_CUE_EFFECT_FLOOR,
+    labeled_scores: Optional[List[Tuple[float, str]]] = None,
+) -> Dict:
+    """Propose a global match threshold; verdict labels sharpen it when present.
+
+    Rejected verdicts are known false positives above the current threshold,
+    confirmed ones are known true matches; with enough of both and a clean
+    gap between them the labeled placement replaces the unsupervised
+    gap-find. One-sided labels only nudge the unsupervised result.
+    """
+    result = _unsupervised_suggest(occurrence_scores, effect_floor)
+    rejected = sorted(
+        float(s) for s, v in (labeled_scores or []) if v == 'rejected')
+    confirmed = sorted(
+        float(s) for s, v in (labeled_scores or []) if v == 'confirmed')
+    n_labeled = len(rejected) + len(confirmed)
+    if n_labeled:
+        result['labeledCounts'] = {
+            'confirmed': len(confirmed), 'rejected': len(rejected)}
+    if n_labeled < AUDIO_CUE_SUGGEST_MIN_LABELED:
+        return result
+
+    if rejected and confirmed:
+        if rejected[-1] >= confirmed[0]:
+            result['labeledOverlap'] = True
+            return result
+        # Initial midpoint estimate; MARGIN clamps may override it when the gap
+        # is tight, keeping the suggestion safely off both cluster edges.
+        suggested = min(
+            max((rejected[-1] + confirmed[0]) / 2,
+                rejected[-1] + AUDIO_CUE_SUGGEST_MARGIN),
+            confirmed[0] - AUDIO_CUE_SUGGEST_MARGIN,
+        )
+        result.update({
+            'confidence': 'partial' if confirmed[0] < effect_floor else 'high',
+            'suggested': round(min(max(suggested, 0.0), 0.99), 2),
+            'labeledOverlap': False,
+            'noiseCeiling': round(rejected[-1], 3),
+            'signalFloor': round(confirmed[0], 3),
+            'effectFloor': round(effect_floor, 3),
+            'effectFloorWarning': (
+                'signal-below-floor' if confirmed[0] < effect_floor else None),
+            'reason': (
+                f"{len(rejected)} rejected match(es) score at or below "
+                f"{rejected[-1]:.2f}; {len(confirmed)} confirmed at or above "
+                f"{confirmed[0]:.2f}"),
+        })
+        return result
+
+    # One-sided labels: nudge, never invent, a suggestion.
+    if result['suggested'] is None:
+        return result
+    if rejected and result['suggested'] <= rejected[-1]:
+        result['suggested'] = round(
+            min(rejected[-1] + AUDIO_CUE_SUGGEST_MARGIN, 0.99), 2)
+        result['reason'] = (
+            f"raised above {len(rejected)} rejected match(es) "
+            f"(max rejected score {rejected[-1]:.2f})")
+    elif confirmed and result['suggested'] >= confirmed[0]:
+        result['suggested'] = round(
+            max(confirmed[0] - AUDIO_CUE_SUGGEST_MARGIN, 0.0), 2)
+        result['reason'] = (
+            f"capped below the lowest confirmed match ({confirmed[0]:.2f}) "
+            f"so confirmed cues keep matching")
+    return result
