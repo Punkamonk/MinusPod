@@ -37,7 +37,7 @@ from audio_analysis.cue_features import (
 from audio_analysis.cue_template_matcher import AudioCueTemplateMatcher, peak_zncc
 from audio_analysis.cue_candidates import (
     merge_cue_candidates, annotate_recurring_with_ad_affinity,
-    count_ad_boundary_hits,
+    count_ad_boundary_hits, mark_dismissed_candidates,
 )
 from audio_analysis.cue_speech_filter import is_likely_speech
 from audio_analysis.cue_detector import AudioCueDetector
@@ -72,6 +72,7 @@ from config import (
     AUDIO_CUE_AD_AFFINITY_TOLERANCE_SECONDS,
     AUDIO_CUE_AD_AFFINITY_MIN_FRACTION,
     AUDIO_CUE_AD_AFFINITY_PHASE_FRACTION,
+    AUDIO_CUE_DISMISSAL_SIMILARITY,
     resolve_cue_template_score,
     resolve_cue_template_score_with_source,
     AUDIO_CUE_SCORE_MAX, AUDIO_CUE_SCORE_MIN,
@@ -1100,6 +1101,25 @@ def _capture_ceiling(db, cue_type):
     return cap_max
 
 
+def _decoded_dismissals(db, podcast_id):
+    """Feed dismissals with raw ints decoded from stored JSON.
+
+    A row whose fingerprint does not decode to a non-empty list is skipped
+    with a warning -- a corrupt dismissal must never fail the scan.
+    """
+    out = []
+    for d in db.list_cue_candidate_dismissals(podcast_id):
+        try:
+            ints = json.loads(d['fingerprint'])
+        except (ValueError, TypeError):
+            ints = None
+        if isinstance(ints, list) and ints:
+            out.append({'id': d['id'], 'raw_ints': ints})
+        else:
+            logger.warning('dismissal %s: unreadable fingerprint; skipped', d['id'])
+    return out
+
+
 def _run_cue_candidate_scan(podcast_id, episode_id, slug, audio_path,
                             similarity, min_count):
     """Background worker: find cue-template candidates, then persist them.
@@ -1171,6 +1191,14 @@ def _run_cue_candidate_scan(podcast_id, episode_id, slug, audio_path,
             cross_episode = []
         templated = _templated_cue_spans(db, podcast_id, slug, episode_id)
         candidates = merge_cue_candidates(recurring, cross_episode, templated)
+        dismissals = _decoded_dismissals(db, podcast_id)
+        if dismissals and target_fp:
+            marked = mark_dismissed_candidates(
+                candidates, dismissals, target_fp, AUDIO_CUE_DISMISSAL_SIMILARITY)
+            if marked:
+                logger.info(
+                    'cue candidate scan: %d candidate(s) matched dismissed sounds',
+                    marked)
         # Stamp the schema version so caches produced before the speech filter
         # (#350 4A) read as stale and get rescanned once (the filter applies
         # retroactively).
@@ -1191,7 +1219,9 @@ def _run_cue_candidate_scan(podcast_id, episode_id, slug, audio_path,
 # 4: ad-affinity typing (#350 Phase 4) -- recurring candidates now carry
 #    suggestedType, adBoundaryHits, boundaryAffinity, affinitySource; old
 #    caches lack these fields, so force a rescan to populate them.
-CUE_CANDIDATE_SCHEMA_VERSION = 4
+# 5: candidate dismissals (2.44.0) -- candidates may carry dismissed/dismissalId
+#    and old caches were never matched against the feed's dismissals.
+CUE_CANDIDATE_SCHEMA_VERSION = 5
 
 
 def _candidates_are_current(candidates):
