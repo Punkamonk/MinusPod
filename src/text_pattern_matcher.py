@@ -15,6 +15,7 @@ from config import (
     DEFAULT_AD_DURATION_ESTIMATE, LONG_AD_WARN,
     TFIDF_MATCH_THRESHOLD as TFIDF_THRESHOLD,
     FUZZY_MATCH_THRESHOLD as FUZZY_THRESHOLD,
+    normalize_segment_category,
 )
 from community_export import count_brand_occurrences, brand_match_candidates, get_sponsor_row_or_stub
 from utils.text import extract_text_from_segments
@@ -215,6 +216,10 @@ class TextMatch:
     confidence: float
     sponsor: Optional[str] = None
     match_type: str = "content"  # "content", "intro", "outro", "both"
+    # Segment category (#565) inherited from the matched pattern, so a
+    # re-match of a pattern learned from e.g. a cross_promo marker carries
+    # that category into the detection instead of falling back to 'sponsor'.
+    category: Optional[str] = None
 
 
 @dataclass
@@ -232,6 +237,7 @@ class AdPattern:
     sponsor_id: Optional[int] = None
     source: str = 'local'  # "local", "community", "imported"
     source_language: Optional[str] = None  # ISO 639-1 code of the transcript the pattern was learned from (#252)
+    category: Optional[str] = None  # Segment category (#565); None on a legacy/unmigrated row
 
 
 class TextPatternMatcher:
@@ -327,6 +333,7 @@ class TextPatternMatcher:
                     sponsor_id=p.get('sponsor_id'),
                     source=p.get('source') or 'local',
                     source_language=p.get('source_language'),
+                    category=p.get('category'),
                 ))
 
             # Cache sponsor_id -> tags for matcher eligibility checks.
@@ -648,7 +655,8 @@ class TextPatternMatcher:
                         end=end_time,
                         confidence=float(best_score),
                         sponsor=pattern.sponsor,
-                        match_type="content"
+                        match_type="content",
+                        category=pattern.category,
                     ))
 
         window_bounds = []
@@ -727,7 +735,8 @@ class TextPatternMatcher:
                             end=end_time,
                             confidence=best_score / 100,
                             sponsor=pattern.sponsor,
-                            match_type="intro"
+                            match_type="intro",
+                            category=pattern.category,
                         ))
 
                 # Check outro phrases
@@ -757,7 +766,8 @@ class TextPatternMatcher:
                             end=end_time,
                             confidence=best_score / 100,
                             sponsor=pattern.sponsor,
-                            match_type="outro"
+                            match_type="outro",
+                            category=pattern.category,
                         ))
 
         except ImportError:
@@ -920,7 +930,8 @@ class TextPatternMatcher:
                     end=max(current.end, match.end),
                     confidence=max(current.confidence, match.confidence),
                     sponsor=current.sponsor or match.sponsor,
-                    match_type="both" if current.match_type != match.match_type else current.match_type
+                    match_type="both" if current.match_type != match.match_type else current.match_type,
+                    category=current.category or match.category,
                 )
             else:
                 merged.append(current)
@@ -1093,7 +1104,8 @@ class TextPatternMatcher:
                     end=new_end,
                     confidence=match.confidence,
                     sponsor=match.sponsor,
-                    match_type=match.match_type
+                    match_type=match.match_type,
+                    category=match.category,
                 ))
 
         except ImportError:
@@ -1128,7 +1140,8 @@ class TextPatternMatcher:
         scope: str = "podcast",
         podcast_id: str = None,
         network_id: str = None,
-        episode_id: str = None
+        episode_id: str = None,
+        category: str = None
     ) -> Optional[int]:
         """
         Create a new ad pattern from a detected ad segment.
@@ -1142,6 +1155,9 @@ class TextPatternMatcher:
             podcast_id: Podcast ID for podcast-scoped patterns
             network_id: Network ID for network-scoped patterns
             episode_id: Episode ID for tracking pattern origin
+            category: Segment category (#565) the source marker carried.
+                Normalized before storage; None stores NULL, which reads
+                back as 'sponsor'.
 
         Returns:
             Pattern ID if created, None otherwise
@@ -1258,6 +1274,7 @@ class TextPatternMatcher:
                 created_from_episode_id=episode_id,
                 duration=duration,
                 source_language=get_pattern_language(self.db, slug=podcast_id),
+                category=normalize_segment_category(category) if category is not None else None,
             )
 
             logger.info(f"Created text pattern {pattern_id} for sponsor: {sponsor}")

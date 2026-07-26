@@ -4,7 +4,7 @@ import re
 from typing import List, Dict, Optional, Tuple
 
 from config import DEFAULT_CHAPTERS_MODEL as _DEFAULT_CHAPTERS_MODEL
-from config import resolve_stage_tunables
+from config import resolve_stage_tunables, normalize_segment_category
 from utils.time import parse_timestamp, adjust_timestamp, span_inside_any_cut
 from utils.text import extract_text_from_segments
 from llm_capabilities import PASS_CHAPTER_GENERATION
@@ -76,6 +76,88 @@ def _parse_description_anchors(description: str) -> List[Tuple[str, str]]:
             seen.setdefault(ts, title)
     return sorted(seen.items(), key=lambda kv: parse_timestamp(kv[0]))
 
+
+def _format_mmss(seconds: float) -> str:
+    """Format seconds as zero-padded MM:SS, matching the prompt's own
+    [MM:SS] transcript markers and example lines."""
+    total = max(0, int(round(seconds)))
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def build_segment_hints(markers: Optional[List[Dict]], cuts: Optional[List[Dict]],
+                         replacement_duration: float = 0.0) -> List[Dict]:
+    """Map applied ad/segment markers onto the processed timeline as
+    candidate topic-boundary hints for the topic-detection prompt.
+
+    The processed transcript has no trace of a cut ad, so the topic
+    detector loses the signal that a topic change likely happened there;
+    this reconstructs it from the same markers and applied-cut list the
+    rest of the pipeline uses (via utils.time.adjust_timestamp, so
+    positions stay in lockstep with the transcript's own mapping).
+
+    A 'remove' marker becomes a single seam position (where the
+    surrounding content now joins); 'keep'/'beep' markers become a
+    start/end range, since that time still exists in the processed audio.
+    Any other action, including markers still pending review, is skipped.
+    Returns [] when there are no markers, so callers can skip the hints
+    block entirely and leave the prompt unchanged.
+    """
+    if not markers:
+        return []
+    cuts = cuts or []
+    hints: List[Dict] = []
+    for marker in markers:
+        action = marker.get('action_applied')
+        if action not in ('remove', 'beep', 'keep'):
+            continue
+        start = marker.get('start')
+        end = marker.get('end')
+        if start is None or end is None:
+            continue
+        category = normalize_segment_category(marker.get('category'))
+        if action == 'remove':
+            seam = adjust_timestamp(start, cuts, replacement_duration)
+            hints.append({'type': 'seam', 'time': seam, 'category': category})
+        else:
+            mapped_start = adjust_timestamp(start, cuts, replacement_duration)
+            mapped_end = adjust_timestamp(end, cuts, replacement_duration)
+            if mapped_end <= mapped_start:
+                continue
+            hints.append({
+                'type': 'range', 'start': mapped_start, 'end': mapped_end,
+                'category': category,
+            })
+    hints.sort(key=lambda h: h.get('time', h.get('start', 0.0)))
+    return hints
+
+
+def _format_hints_block(hints: List[Dict]) -> str:
+    """Render segment hints into the prompt block explaining what they mean.
+
+    Returns "" when hints is empty, leaving the caller's prompt unchanged."""
+    if not hints:
+        return ""
+    lines = []
+    for hint in hints:
+        if hint['type'] == 'seam':
+            lines.append(f"{_format_mmss(hint['time'])} ad/segment break ({hint['category']})")
+        else:
+            lines.append(
+                f"{_format_mmss(hint['start'])}-{_format_mmss(hint['end'])} "
+                f"ad/segment ({hint['category']})"
+            )
+    hint_lines = '\n'.join(lines)
+    return (
+        "\n\nThese timestamps mark where an ad break or show segment was "
+        "detected in this episode. Podcast ads are usually inserted between "
+        "content segments, so a real topic change often falls at one of "
+        "these points. Treat them as CANDIDATE boundaries only: use one "
+        "only where the transcript itself shows a genuine topic change "
+        "there. Do not output a boundary just because it is listed here.\n\n"
+        f"Detected ad/segment positions:\n{hint_lines}"
+    )
+
+
 # Default model for chapter generation tasks (titles, topic detection, splitting).
 # Uses Haiku for cost efficiency -- these are simple classification/generation tasks.
 CHAPTERS_MODEL = _DEFAULT_CHAPTERS_MODEL
@@ -116,6 +198,13 @@ class ChaptersGenerator:
         self.api_key = api_key or get_api_key()
         self._llm_client_override: Optional[LLMClient] = None
         self._episode_id: Optional[str] = None
+        # Set when topic detection or title generation fails and the run
+        # degrades to a fallback; read after generate_chapters() so a
+        # degraded run doesn't look like a normal short episode.
+        self._topic_detection_failed: bool = False
+        self._title_generation_failed: bool = False
+        self.chapters_degraded: bool = False
+        self.chapters_degradation_reason: Optional[str] = None
 
     @property
     def _llm_client(self) -> Optional[LLMClient]:
@@ -174,11 +263,16 @@ class ChaptersGenerator:
         end_time: float,
         num_splits: int,
         episode_description: str = None,
+        hints: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         """Use the LLM to detect topic boundaries in a transcript range.
 
+        hints: optional candidate boundaries derived from detected ad/segment
+        markers (see build_segment_hints). Empty/None leaves the prompt unchanged.
+
         Returns list of {'original_time': float, 'title': str}.
         """
+        hints_block = _format_hints_block(hints or [])
         description_block = ""
         if episode_description and episode_description.strip():
             anchors = _parse_description_anchors(episode_description)
@@ -215,7 +309,7 @@ Example:
 05:30 Discussion of AI Trends
 12:45 New Product Announcements
 
-Only include clear topic transitions, not minor tangents. Skip the very beginning since that's already a chapter.{description_block}
+Only include clear topic transitions, not minor tangents. Skip the very beginning since that's already a chapter.{description_block}{hints_block}
 
 Transcript:
 {transcript}"""
@@ -239,6 +333,7 @@ Transcript:
             )
             if response is None:
                 logger.error(f"Failed to detect topic boundaries: {last_error}")
+                self._topic_detection_failed = True
                 return []
 
             result_text = response.content.strip()
@@ -281,6 +376,7 @@ Transcript:
 
         except Exception as e:
             logger.error(f"Failed to detect topic boundaries: {e}")
+            self._topic_detection_failed = True
             return []
 
     def get_transcript_excerpt(
@@ -345,6 +441,7 @@ Transcript:
 
         except Exception as e:
             logger.error(f"Failed to generate chapter titles: {e}")
+            self._title_generation_failed = True
             return self._apply_generic_titles(chapters)
 
         return chapters
@@ -510,6 +607,8 @@ Transcript:
         episode_title: str = "Unknown",
         episode_id: Optional[str] = None,
         replacement_duration: float = 0.0,
+        segment_markers: Optional[List[Dict]] = None,
+        marker_cuts: Optional[List[Dict]] = None,
     ) -> Dict:
         """Generate Podcasting 2.0 chapters from transcript segments.
 
@@ -528,12 +627,26 @@ Transcript:
                 timeline before detection runs.
             podcast_name: Podcast name (used for title generation).
             episode_title: Episode title (used for title generation).
+            segment_markers: Optional list of detected ad/segment markers
+                (each with 'start', 'end', 'category', 'action_applied') used
+                to build topic-boundary hints (see build_segment_hints). None
+                or empty leaves the topic-detection prompt unchanged.
+            marker_cuts: Applied cut list used to map segment_markers onto
+                the processed timeline; defaults to `ads_removed`. The
+                regenerate-chapters endpoint must pass this explicitly: its
+                segments are already on the processed timeline, but hints
+                still need the original applied-cut list to map from marker
+                (original-time) coordinates.
 
         Returns:
             {'version': '1.2.0', 'chapters': [{'startTime', 'title'}, ...]}
         """
         logger.info(f"Generating chapters for '{episode_title}'")
         self._episode_id = episode_id
+        self._topic_detection_failed = False
+        self._title_generation_failed = False
+        self.chapters_degraded = False
+        self.chapters_degradation_reason = None
 
         if not segments:
             return {'version': '1.2.0', 'chapters': []}
@@ -542,6 +655,9 @@ Transcript:
             segments = self._adjust_segments_for_ads(segments, ads_removed, replacement_duration)
             if not segments:
                 return {'version': '1.2.0', 'chapters': []}
+
+        hint_cuts = marker_cuts if marker_cuts is not None else ads_removed
+        hints = build_segment_hints(segment_markers, hint_cuts, replacement_duration)
 
         episode_duration = segments[-1].get('end', 0)
 
@@ -569,7 +685,15 @@ Transcript:
                         new_chapters = self._detect_topic_boundaries(
                             transcript_text, 0, episode_duration, num_splits,
                             episode_description=episode_description,
+                            hints=hints,
                         )
+
+                        # A parsed-but-empty result is as much a failure as an
+                        # exception: the episode already qualified for AI
+                        # boundaries (duration and transcript length), so a
+                        # silent empty result must not look like a normal short episode.
+                        if not new_chapters and not self._topic_detection_failed:
+                            self._topic_detection_failed = True
 
                         for ch in new_chapters:
                             chapters.append({
@@ -580,6 +704,7 @@ Transcript:
                             })
                     except Exception as e:
                         logger.warning(f"Failed to detect topic boundaries: {e}")
+                        self._topic_detection_failed = True
 
         chapters.sort(key=lambda x: x['startTime'])
 
@@ -603,6 +728,26 @@ Transcript:
             })
 
         logger.info(f"Generated {len(output_chapters)} chapters")
+
+        if self._topic_detection_failed or self._title_generation_failed:
+            reasons = []
+            if self._topic_detection_failed:
+                reasons.append('chapter topic detection failed')
+            if self._title_generation_failed:
+                reasons.append('chapter title generation failed')
+            reason = '; '.join(reasons)
+            self.chapters_degraded = True
+            self.chapters_degradation_reason = reason
+            if len(output_chapters) <= 1:
+                logger.warning(
+                    f"[{episode_id}] chapters degraded to a single chapter "
+                    f"({reason}); operator-visible fallback, not a normal short episode"
+                )
+            else:
+                logger.warning(
+                    f"[{episode_id}] chapter generation degraded ({reason}); "
+                    f"some chapters may have generic titles or missing boundaries"
+                )
 
         return {
             'version': '1.2.0',

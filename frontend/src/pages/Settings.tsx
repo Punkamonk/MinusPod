@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useSyncFromQuery } from '../hooks/useSyncFromQuery';
-import { useLocation } from 'react-router-dom';
+import { useLocation } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getSettings, updateSettings, resetSettings, resetPrompts, getModels, getWhisperModels, getSystemStatus, runCleanup, getProcessingEpisodes, cancelProcessing, refreshModels, getRetention, updateRetention, getProcessingTimeouts, updateProcessingTimeouts, getAudioSettings, updateAudioSettings } from '../api/settings';
 import { getReviewerSettings, updateReviewerSettings } from '../api/community';
@@ -852,6 +852,9 @@ function Settings() {
         onMaxFeedEpisodesChange={setMaxFeedEpisodes}
         onlyExposeProcessedDefault={onlyExposeProcessedDefault}
         onOnlyExposeProcessedDefaultChange={setOnlyExposeProcessedDefault}
+        segmentCategoryActions={settings?.segmentCategoryActions?.value ?? settings?.defaults?.segmentCategoryActions ?? {}}
+        onSegmentCategoryActionChange={(category, action) =>
+          tunableMutation.mutate({ segmentCategoryActions: { [category]: action } })}
       />
 
       <LLMProviderSection
@@ -899,6 +902,7 @@ function Settings() {
           saveError={stageTunablesMutation.error ? (stageTunablesMutation.error as Error).message : null}
           parallelWindows={settings.adDetectionParallelWindows?.value ?? settings.defaults?.adDetectionParallelWindows ?? 4}
           parallelWindowsDefault={settings.defaults?.adDetectionParallelWindows ?? 4}
+          omitTemperature={settings.omitTemperature?.value ?? settings.defaults?.omitTemperature ?? false}
         />
       )}
 

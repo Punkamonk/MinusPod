@@ -13,6 +13,7 @@ from api import (
 )
 from config import is_pending_review
 from audio_peaks import compute_peaks, PeaksError
+from audio_processor import get_replacement_duration
 from chapters_generator import ChaptersGenerator
 from embedded_chapters import embed_chapters
 from llm_client import start_episode_token_tracking, get_episode_token_totals
@@ -331,21 +332,29 @@ def get_episode(slug, episode_id):
     feed_auth_key = get_feed_auth_key(db)
     key_suffix = f"?key={feed_auth_key}" if feed_auth_key else ""
 
-    # Parse ad markers if present, separating into three buckets:
+    # Parse ad markers if present, separating into four buckets:
     #   pendingReviewMarkers: held_for_review=True and not was_cut (checked FIRST)
-    #   rejectedAdMarkers:    REJECT decision or not was_cut (and not held)
+    #   keptMarkers:          action_applied == 'keep' and not held (deliberate
+    #                         per-category keep; keep resolution clears holds
+    #                         upstream, so this never overlaps pendingReviewMarkers)
+    #   rejectedAdMarkers:    REJECT decision or not was_cut (and not held/kept)
     #   adMarkers:            everything else (accepted cuts)
     ad_markers = []
     rejected_ad_markers = []
     pending_review_markers = []
+    kept_markers = []
     if episode.get('ad_markers_json'):
         try:
             all_markers = json.loads(episode['ad_markers_json'])
             for marker in all_markers:
                 decision = marker.get('validation', {}).get('decision', 'ACCEPT')
                 was_cut = marker.get('was_cut', True)
+                marker['category'] = marker.get('category', 'sponsor')
+                marker['actionApplied'] = marker.get('action_applied')
                 if is_pending_review(marker):
                     pending_review_markers.append(marker)
+                elif marker.get('action_applied') == 'keep':
+                    kept_markers.append(marker)
                 elif decision == 'REJECT' or not was_cut:
                     rejected_ad_markers.append(marker)
                 else:
@@ -402,6 +411,7 @@ def get_episode(slug, episode_id):
         'adMarkers': ad_markers,
         'rejectedAdMarkers': rejected_ad_markers,
         'pendingReviewMarkers': pending_review_markers,
+        'keptMarkers': kept_markers,
         'corrections': corrections,
         'cueDetections': cue_detections,
         'adDetectionStatus': episode.get('ad_detection_status'),
@@ -733,19 +743,35 @@ def regenerate_chapters(slug, episode_id):
     podcast_name = podcast.get('title', slug) if podcast else slug
     episode_title = episode.get('title', 'Unknown')
 
+    # Segment markers and applied cuts (both persisted from the run that
+    # produced this VTT) let chapter regen give the topic detector the same
+    # ad/segment-position hints the pipeline gets. Missing either just falls
+    # back to no hints.
+    segment_markers = None
+    if episode.get('ad_markers_json'):
+        try:
+            segment_markers = json.loads(episode['ad_markers_json'])
+        except (json.JSONDecodeError, TypeError):
+            segment_markers = None
+    marker_cuts = storage.get_applied_cuts(slug, episode_id)
+
     try:
         start_episode_token_tracking()
         chapters_gen = ChaptersGenerator()
 
         try:
             # VTT segments are already ad-adjusted; omit ads_removed so
-            # generate_chapters doesn't double-adjust.
+            # generate_chapters doesn't double-adjust. marker_cuts still maps
+            # segment_markers onto the processed timeline for topic hints.
             chapters = chapters_gen.generate_chapters(
                 segments,
                 episode_description=episode_description,
                 podcast_name=podcast_name,
                 episode_title=episode_title,
                 episode_id=episode_id,
+                replacement_duration=get_replacement_duration(),
+                segment_markers=segment_markers,
+                marker_cuts=marker_cuts,
             )
         finally:
             token_totals = get_episode_token_totals()

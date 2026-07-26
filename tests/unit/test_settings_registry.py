@@ -14,6 +14,10 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
+from config import (
+    SEGMENT_CATEGORIES, DEFAULT_SEGMENT_ACTION,
+    DEFAULT_COMMUNITY_SYNC_CATEGORIES_JSON,
+)
 from database import Database
 from database.settings import (
     AD_RESET_SETTING_KEYS, SETTINGS_REGISTRY,
@@ -48,6 +52,7 @@ SEED_SNAPSHOT = {
     'auto_process_enabled': 'true',
     'chapters_enabled': 'true',
     'chapters_model': 'claude-haiku-4-5-20251001',
+    'community_sync_categories': DEFAULT_COMMUNITY_SYNC_CATEGORIES_JSON,
     'differential_hold_min_seconds': '10',
     'differential_measured_corr_max': '0.60',
     'enable_ad_review': 'false',
@@ -59,6 +64,7 @@ SEED_SNAPSHOT = {
     'min_cut_confidence': '0.80',
     'offline_queue_enabled': 'false',
     'offline_queue_ttl_hours': '48',
+    'omit_temperature': 'false',
     'only_expose_processed_default': 'false',
     'openai_base_url': 'http://localhost:8000/v1',
     'podping_enabled': 'false',
@@ -70,7 +76,8 @@ SEED_SNAPSHOT = {
     'review_model': 'same_as_pass',
     'review_prompt': ('sha256', '897102def672fcfffdfd2500e43cfdb6699aebf650606aee18549a4c033758d3'),
     'rss_refresh_interval_minutes': '15',
-    'system_prompt': ('sha256', 'df48d3c574c5998459ec470905b2518d21dc6da7f014f348d6c92ccc5f358187'),
+    'segment_category_actions': '{}',
+    'system_prompt': ('sha256', 'a15ad2a62cb242d11942e6d71f4f4b88e14c73e1418c50bccea8f08facbf0b92'),
     'transcribe_chunk_overlap_seconds': '30',
     'transcribe_concurrent_chunks': '4',
     'transcribe_max_chunk_seconds': '600',
@@ -139,10 +146,12 @@ EXPECTED_AD_RESET_KEYS = {
 NON_RESETTABLE_KEYS = (
     'enable_ad_review', 'feed_auth_key', 'keep_original_audio',
     'max_feed_episodes', 'offline_queue_enabled', 'offline_queue_ttl_hours',
-    'only_expose_processed_default', 'podping_enabled', 'positional_prior_enabled',
+    'only_expose_processed_default', 'omit_temperature',
+    'podping_enabled', 'positional_prior_enabled',
     'processing_hard_timeout_seconds', 'processing_soft_timeout_seconds',
     'retention_days', 'review_max_boundary_shift', 'review_model',
-    'rss_refresh_interval_minutes',
+    'rss_refresh_interval_minutes', 'segment_category_actions',
+    'community_sync_categories',
     'system_prompt_override', 'verification_prompt_override',
     'review_prompt_override', 'resurrect_prompt_override',
     'transition_threshold_db', 'volume_threshold_db',
@@ -329,6 +338,8 @@ class TestGetDefaults:
             'feedAuthEnabled': False,
             'artworkWatermarkEnabled': False,
             'positionalPriorEnabled': False,
+            'segmentCategoryActions': {cat: DEFAULT_SEGMENT_ACTION for cat in SEGMENT_CATEGORIES},
+            'communitySyncCategories': list(SEGMENT_CATEGORIES),
         }
         payload = {
             spec.payload_key: registry_get_default(key)
@@ -347,11 +358,14 @@ class TestGetDefaults:
         # from it -- preserve that. 2.76.0 added six detection-tuning
         # payload keys (67 -> 73). rssRefreshIntervalMinutes added after
         # (73 -> 74). podpingEnabled added after that (74 -> 75).
+        # segmentCategoryActions added after that (75 -> 76).
+        # omitTemperature added after that (76 -> 77).
+        # communitySyncCategories added after that (77 -> 78).
         payload_keys = {
             spec.payload_key for spec in SETTINGS_REGISTRY.values()
             if spec.payload_key
         }
-        assert len(payload_keys) == 75
+        assert len(payload_keys) == 78
         assert 'audioCuePairOrientWindowSeconds' not in payload_keys
         assert 'audioCuePairMaxBreakFraction' in payload_keys
 

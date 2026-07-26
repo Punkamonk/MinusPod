@@ -58,6 +58,10 @@ Every term the app uses, in plain words, with a link to the part of the docs tha
 
 **Held for Review** - An ad that detection wanted to cut but a per-feed guard (max ad duration, cue-gated approval, or a reviewer contradiction) stopped. The audio stays intact until you approve or dismiss it. [Web Interface > Held for Review](web-interface.md#held-for-review)
 
+## K
+
+**Keep action** - A per-category segment action that leaves a detected span in the audio untouched. A kept marker bypasses validator hold rules and reviewer boundary checks, is dropped instead of re-flagged if pass-2 verification finds it again, and never creates a correction or false-positive text, though it still teaches the pattern learner its category. [How It Works > Segment Categories](how-it-works.md#segment-categories)
+
 ## L
 
 **Low ad yield** - The amber episode badge shown when a run removed far less ad time than the feed's recent average. Usually a lightly-filled DAI download, occasionally a missed ad worth a look. [Web Interface > Processing stats](web-interface.md#processing-stats)
@@ -91,6 +95,15 @@ Every term the app uses, in plain words, with a link to the part of the docs tha
 ## S
 
 **Second scan** - See Verification pass.
+
+**Segment category** - What kind of content a detected marker spans: sponsor, cross-promo, self-promo, interaction, intro, outro, or recap. Each category resolves to an action (remove, beep, or keep), set per feed or globally and defaulting to remove until changed. Intro, outro, and recap are only detected on feeds that opt in via the show-segments toggle; the other four categories are always detected. [How It Works > Segment Categories](how-it-works.md#segment-categories)
+  - Sponsor - Paid ads, including dynamically inserted ones
+  - Cross-promo - Promos for other shows and the network
+  - Self-promo - The show's own Patreon, merch, and subscribe asks
+  - Interaction - Follow, rate, and review reminders
+  - Intro - Opening theme and welcome
+  - Outro - Closing credits and sign-off
+  - Recap - Previews and coming-up bumpers
 
 **Silence snap** - Nudging a cut boundary to the nearest silence so the edit lands between words instead of inside one. [Audio Cues > Silence snap](audio-cues.md#silence-snap)
 

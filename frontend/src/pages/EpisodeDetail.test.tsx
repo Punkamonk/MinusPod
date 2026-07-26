@@ -15,8 +15,8 @@ import EpisodeDetail from './EpisodeDetail';
 import EpisodeList from '../components/EpisodeList';
 import type { Episode, EpisodeDetail as EpisodeDetailType } from '../api/types';
 
-// react-router-dom stubs
-vi.mock('react-router-dom', () => ({
+// react-router stubs
+vi.mock('react-router', () => ({
   useParams: () => ({ slug: 'test-feed', episodeId: 'ep-1' }),
   Link: ({ children, to }: { children: React.ReactNode; to: string }) => (
     <a href={to}>{children}</a>
@@ -70,13 +70,14 @@ vi.mock('../utils/confidence', () => ({
 // Mutable mutation stubs; reassigned per test.
 const mockSubmitCorrection = vi.fn();
 const mockReprocessEpisode = vi.fn();
+const mockRegenerateChapters = vi.fn();
 
 vi.mock('../api/feeds', () => ({
   getEpisode: vi.fn(),
   getFeed: vi.fn(),
   getOriginalTranscript: vi.fn(),
   reprocessEpisode: (...args: unknown[]) => mockReprocessEpisode(...args),
-  regenerateChapters: vi.fn(),
+  regenerateChapters: (...args: unknown[]) => mockRegenerateChapters(...args),
   episodeOriginalUrl: (slug: string, episodeId: string) =>
     `/api/v1/feeds/${slug}/episodes/${episodeId}/original.mp3`,
 }));
@@ -758,5 +759,202 @@ describe('Detected ads: inline audition', () => {
     }));
     expect(await screen.findByText('Detected Ads (1)')).not.toBeNull();
     expect(screen.queryByRole('button', { name: 'Play this ad' })).toBeNull();
+  });
+});
+
+describe('Segment category chips (#565)', () => {
+  it('shows the category label on a detected ad marker', async () => {
+    renderDetail(makeEpisode({
+      pendingReviewMarkers: [],
+      adMarkers: [{ start: 10, end: 40, confidence: 0.9, detection_stage: 'claude', category: 'cross_promo' }],
+    }));
+    expect(await screen.findByText('Detected Ads (1)')).not.toBeNull();
+    expect(screen.getByText('Cross-promo')).not.toBeNull();
+  });
+
+  it('shows a muted Kept badge when actionApplied is keep', async () => {
+    renderDetail(makeEpisode({
+      pendingReviewMarkers: [],
+      adMarkers: [{ start: 10, end: 40, confidence: 0.9, detection_stage: 'claude', category: 'sponsor', actionApplied: 'keep' }],
+    }));
+    expect(await screen.findByText('Detected Ads (1)')).not.toBeNull();
+    expect(screen.getByText('Kept')).not.toBeNull();
+  });
+
+  it('omits the Kept badge when actionApplied is remove', async () => {
+    renderDetail(makeEpisode({
+      pendingReviewMarkers: [],
+      adMarkers: [{ start: 10, end: 40, confidence: 0.9, detection_stage: 'claude', category: 'sponsor', actionApplied: 'remove' }],
+    }));
+    expect(await screen.findByText('Detected Ads (1)')).not.toBeNull();
+    expect(screen.queryByText('Kept')).toBeNull();
+  });
+
+  it('shows the category label on a Held for Review row', async () => {
+    renderDetail(makeEpisode({
+      pendingReviewMarkers: [{ ...heldMarker, category: 'self_promo' }],
+    }));
+    expect(await screen.findByTestId('held-for-review-section')).not.toBeNull();
+    expect(screen.getByText('Self-promo')).not.toBeNull();
+  });
+
+  it('shows the category label and Kept badge on a Detections Not Cut row', async () => {
+    renderDetail(makeEpisode({
+      pendingReviewMarkers: [],
+      rejectedAdMarkers: [{
+        start: 5, end: 20, confidence: 0.4, category: 'interaction', actionApplied: 'keep',
+      }],
+    }));
+    expect(await screen.findByText('Detections Not Cut (1)')).not.toBeNull();
+    expect(screen.getByText('Interaction')).not.toBeNull();
+    expect(screen.getByText('Kept')).not.toBeNull();
+  });
+});
+
+describe('Kept segments section (2.78.3)', () => {
+  it('renders a row with the category and Kept badge when keptMarkers is populated', async () => {
+    renderDetail(makeEpisode({
+      pendingReviewMarkers: [],
+      keptMarkers: [{ start: 127.8, end: 140.2, confidence: 0.9, category: 'intro', actionApplied: 'keep' }],
+    }));
+    expect(await screen.findByTestId('kept-segments-section')).not.toBeNull();
+    expect(screen.getByText('Kept segments')).not.toBeNull();
+    expect(screen.getByText('Intro')).not.toBeNull();
+    expect(screen.getByText('Kept')).not.toBeNull();
+  });
+
+  it('renders nothing when keptMarkers is empty', async () => {
+    renderDetail(makeEpisode({ pendingReviewMarkers: [], keptMarkers: [] }));
+    await waitFor(() => {
+      expect(screen.getByText('Test Episode')).not.toBeNull();
+    });
+    expect(screen.queryByTestId('kept-segments-section')).toBeNull();
+    expect(screen.queryByText('Kept segments')).toBeNull();
+  });
+
+  it('renders nothing when keptMarkers is absent', async () => {
+    renderDetail(makeEpisode({ pendingReviewMarkers: [], keptMarkers: undefined }));
+    await waitFor(() => {
+      expect(screen.getByText('Test Episode')).not.toBeNull();
+    });
+    expect(screen.queryByTestId('kept-segments-section')).toBeNull();
+  });
+
+  it('does not also render kept segments under Detections Not Cut', async () => {
+    renderDetail(makeEpisode({
+      pendingReviewMarkers: [],
+      keptMarkers: [{ start: 1562.5, end: 1600.0, confidence: 0.9, category: 'self_promo', actionApplied: 'keep' }],
+      rejectedAdMarkers: [],
+    }));
+    expect(await screen.findByTestId('kept-segments-section')).not.toBeNull();
+    expect(screen.queryByText(/Detections Not Cut/)).toBeNull();
+  });
+});
+
+describe('Correction submit error toast (#565)', () => {
+  beforeEach(() => {
+    mockSubmitCorrection.mockReset();
+    mockReprocessEpisode.mockReset();
+  });
+
+  it('surfaces the backend 409 message when a kept marker is corrected', async () => {
+    const user = userEvent.setup();
+    renderDetail(makeEpisode({ hasOriginalAudio: true }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('dismiss-0')).toBeDefined();
+    });
+
+    mockSubmitCorrection.mockRejectedValueOnce(
+      new Error('This segment is kept for this feed and cannot be corrected'),
+    );
+    await user.click(screen.getByTestId('dismiss-0'));
+
+    expect(await screen.findByText(
+      'This segment is kept for this feed and cannot be corrected',
+    )).not.toBeNull();
+  });
+
+  it('dismissing the toast clears it', async () => {
+    const user = userEvent.setup();
+    renderDetail(makeEpisode({ hasOriginalAudio: true }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('dismiss-0')).toBeDefined();
+    });
+    mockSubmitCorrection.mockRejectedValueOnce(new Error('Conflict'));
+    await user.click(screen.getByTestId('dismiss-0'));
+    await screen.findByText('Conflict');
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByText('Conflict')).toBeNull();
+  });
+});
+
+describe('Regenerate Chapters: progress and result feedback', () => {
+  beforeEach(() => {
+    mockRegenerateChapters.mockReset();
+  });
+
+  async function openMenuAndRegenerate(user: ReturnType<typeof userEvent.setup>) {
+    await screen.findByText('Test Episode');
+    await user.click(screen.getByRole('button', { name: 'Reprocess' }));
+    await user.click(screen.getByText('Regenerate Chapters'));
+  }
+
+  it('shows the progress text once the menu closes while the call is pending', async () => {
+    const user = userEvent.setup();
+    let resolveRegenerate: () => void = () => {};
+    mockRegenerateChapters.mockImplementation(
+      () => new Promise<void>((resolve) => { resolveRegenerate = resolve; }),
+    );
+    renderDetail(makeEpisode({ pendingReviewMarkers: [], transcriptVttAvailable: true }));
+
+    await openMenuAndRegenerate(user);
+
+    // The menu (and its "Regenerate Chapters" item) unmounted; the progress
+    // text renders outside it, so this is the only remaining match.
+    expect(await screen.findByText('Regenerating chapters...')).not.toBeNull();
+
+    resolveRegenerate();
+  });
+
+  it('shows a confirmation once regeneration succeeds', async () => {
+    const user = userEvent.setup();
+    mockRegenerateChapters.mockResolvedValue({});
+    renderDetail(makeEpisode({ pendingReviewMarkers: [], transcriptVttAvailable: true }));
+
+    await openMenuAndRegenerate(user);
+
+    expect(await screen.findByText('Chapters regenerated.')).not.toBeNull();
+  });
+
+  it('surfaces the API error message when regeneration fails', async () => {
+    const user = userEvent.setup();
+    mockRegenerateChapters.mockRejectedValueOnce(new Error('LLM request timed out'));
+    renderDetail(makeEpisode({ pendingReviewMarkers: [], transcriptVttAvailable: true }));
+
+    await openMenuAndRegenerate(user);
+
+    expect(await screen.findByText('LLM request timed out')).not.toBeNull();
+  });
+
+  it('keeps the dropdown item disabled while regeneration is pending', async () => {
+    const user = userEvent.setup();
+    let resolveRegenerate: () => void = () => {};
+    mockRegenerateChapters.mockImplementation(
+      () => new Promise<void>((resolve) => { resolveRegenerate = resolve; }),
+    );
+    renderDetail(makeEpisode({ pendingReviewMarkers: [], transcriptVttAvailable: true }));
+
+    await openMenuAndRegenerate(user);
+    await screen.findByText('Regenerating chapters...');
+
+    // Reopen the menu; a user who reopens it mid-flight should see it's busy.
+    await user.click(screen.getByRole('button', { name: 'Reprocess' }));
+    const menuItem = screen.getByText('Regenerate Chapters').closest('button');
+    expect(menuItem).toHaveProperty('disabled', true);
+
+    resolveRegenerate();
   });
 });

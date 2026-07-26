@@ -1,4 +1,5 @@
 """Tests for messages_create extensions: reasoning_effort + per-pass fallback."""
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +16,8 @@ from llm_capabilities import (
 def _reset_state():
     with llm_capabilities._fallback_lock:
         llm_capabilities._fallback_state.clear()
+    with llm_capabilities._learned_no_temperature_lock:
+        llm_capabilities._learned_no_temperature_models.clear()
 
 
 def _make_anthropic_response(text="ok"):
@@ -349,3 +352,295 @@ class TestAnthropicTemperatureOmission:
 
         kwargs = mock_sdk.messages.create.call_args.kwargs
         assert kwargs["temperature"] == 0.2
+
+
+class TestAnthropicTemperatureRejectionRetry:
+    """A model that 400s specifically because it rejects `temperature` must
+    have the retry omit temperature, not substitute a default value that
+    400s identically (#530: chapter_generation retried with temperature=0.1
+    and failed the same way in the same second)."""
+
+    def _temperature_rejection_error(self, status_code=400):
+        return _FakeAPIError(
+            status_code,
+            "Error code: 400 ... '`temperature` is deprecated for this model.'",
+        )
+
+    def test_retry_omits_temperature_entirely(self):
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        mock_sdk.messages.create.side_effect = [
+            self._temperature_rejection_error(),
+            _make_anthropic_response(),
+        ]
+        client._client = mock_sdk
+
+        client.messages_create(
+            model="claude-unlisted-model",
+            max_tokens=300,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.1,
+            episode_id="ep1",
+            pass_name="chapter_generation",
+        )
+
+        assert mock_sdk.messages.create.call_count == 2
+        retry_kwargs = mock_sdk.messages.create.call_args_list[1].kwargs
+        assert "temperature" not in retry_kwargs
+
+    def test_retry_works_even_without_a_tracked_pass(self):
+        # No episode_id/pass_name: the general tunables-fallback path is
+        # gated on pass_name, but the temperature-omission fix must not be.
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        mock_sdk.messages.create.side_effect = [
+            self._temperature_rejection_error(),
+            _make_anthropic_response(),
+        ]
+        client._client = mock_sdk
+
+        client.messages_create(
+            model="claude-unlisted-model",
+            max_tokens=300,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.1,
+        )
+
+        assert mock_sdk.messages.create.call_count == 2
+        retry_kwargs = mock_sdk.messages.create.call_args_list[1].kwargs
+        assert "temperature" not in retry_kwargs
+
+    def test_model_is_remembered_for_subsequent_calls(self):
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        mock_sdk.messages.create.side_effect = [
+            self._temperature_rejection_error(),
+            _make_anthropic_response(),
+            _make_anthropic_response(),
+        ]
+        client._client = mock_sdk
+
+        client.messages_create(
+            model="claude-unlisted-model", max_tokens=300, system="sys",
+            messages=[{"role": "user", "content": "hi"}], temperature=0.1,
+        )
+        client.messages_create(
+            model="claude-unlisted-model", max_tokens=300, system="sys",
+            messages=[{"role": "user", "content": "hi"}], temperature=0.1,
+        )
+
+        assert mock_sdk.messages.create.call_count == 3
+        # Third call (second messages_create, no retry needed) never sends temperature.
+        third_call_kwargs = mock_sdk.messages.create.call_args_list[2].kwargs
+        assert "temperature" not in third_call_kwargs
+
+    def test_non_temperature_400_still_retries_with_defaults(self):
+        # No regression: a plain tunable-rejection 400 (e.g. max_tokens too
+        # large) still goes through the general fallback path with defaults.
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        mock_sdk.messages.create.side_effect = [
+            _FakeAPIError(400, "max_tokens too large"),
+            _make_anthropic_response(),
+        ]
+        client._client = mock_sdk
+
+        client.messages_create(
+            model="claude-unlisted-model",
+            max_tokens=99999,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.5,
+            episode_id="ep1",
+            pass_name=PASS_AD_DETECTION_1,
+        )
+
+        assert mock_sdk.messages.create.call_count == 2
+        retry_kwargs = mock_sdk.messages.create.call_args_list[1].kwargs
+        assert retry_kwargs["max_tokens"] == 4096
+        assert retry_kwargs["temperature"] == 0.0
+        # claude-unlisted-model was never marked as omitting temperature by
+        # an unrelated max_tokens rejection.
+        assert is_fallback_set("ep1", PASS_AD_DETECTION_1) is True
+
+
+class TestAnthropicJsonSchemaStructuredOutput:
+    """response_format={"type": "json_schema", ...} forces a tool call so the
+    Messages API validates the response against the schema, instead of the
+    prompt-injected instructions json_object relies on (#565 follow-up,
+    category repair pass)."""
+
+    def test_forces_tool_call_and_extracts_tool_input_as_json_content(self):
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {"categories": [{"index": 0, "category": "sponsor"}]}
+        response = MagicMock()
+        response.content = [tool_block]
+        response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        response.stop_reason = "tool_use"
+        mock_sdk.messages.create.return_value = response
+        client._client = mock_sdk
+
+        result = client.messages_create(
+            model="claude-sonnet-5",
+            max_tokens=512,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "seg", "schema": {"type": "object"}},
+            },
+        )
+
+        kwargs = mock_sdk.messages.create.call_args.kwargs
+        assert kwargs["tools"] == [{
+            "name": "seg",
+            "description": "Return the structured result.",
+            "input_schema": {"type": "object"},
+        }]
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "seg"}
+        assert json.loads(result.content) == {
+            "categories": [{"index": 0, "category": "sponsor"}]}
+
+    def test_missing_tool_use_block_yields_empty_content_not_a_crash(self):
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        text_block = MagicMock()
+        text_block.type = "text"
+        response = MagicMock()
+        response.content = [text_block]
+        response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        response.stop_reason = "end_turn"
+        mock_sdk.messages.create.return_value = response
+        client._client = mock_sdk
+
+        result = client.messages_create(
+            model="claude-sonnet-5", max_tokens=512, system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "seg", "schema": {"type": "object"}},
+            },
+        )
+
+        assert result.content == ""
+
+    def test_json_object_request_never_sets_tools(self):
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        mock_sdk.messages.create.return_value = _make_anthropic_response()
+        client._client = mock_sdk
+
+        client.messages_create(
+            model="claude-sonnet-5", max_tokens=512, system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            response_format={"type": "json_object"},
+        )
+
+        kwargs = mock_sdk.messages.create.call_args.kwargs
+        assert "tools" not in kwargs
+        assert "tool_choice" not in kwargs
+
+
+class TestAnthropicExtendedThinkingTextExtraction:
+    """Extended-thinking responses (temperature omitted, thinking enabled)
+    put a ThinkingBlock first in response.content; the real answer is in a
+    later TextBlock. content[0].text blows up with AttributeError since
+    ThinkingBlock has no .text attribute (regression behind Verification
+    Window failures on 2.78.5)."""
+
+    def _thinking_block(self, thinking="internal reasoning..."):
+        block = MagicMock(spec=['type', 'thinking'])
+        block.type = 'thinking'
+        block.thinking = thinking
+        return block
+
+    def _redacted_thinking_block(self):
+        block = MagicMock(spec=['type', 'data'])
+        block.type = 'redacted_thinking'
+        block.data = 'encrypted-blob'
+        return block
+
+    def _text_block(self, text):
+        block = MagicMock(spec=['type', 'text'])
+        block.type = 'text'
+        block.text = text
+        return block
+
+    def _response_with_content(self, blocks):
+        response = MagicMock()
+        response.content = blocks
+        response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        response.stop_reason = "end_turn"
+        return response
+
+    def _call(self, client, mock_sdk):
+        return client.messages_create(
+            model="claude-opus-5", max_tokens=512, system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+    def test_thinking_then_text_extracts_text_block_payload(self):
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        mock_sdk.messages.create.return_value = self._response_with_content([
+            self._thinking_block(),
+            self._text_block('[{"start": 10.0, "end": 45.0}]'),
+        ])
+        client._client = mock_sdk
+
+        result = self._call(client, mock_sdk)
+
+        assert result.content == '[{"start": 10.0, "end": 45.0}]'
+
+    def test_thinking_only_response_yields_empty_string_not_a_crash(self):
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        mock_sdk.messages.create.return_value = self._response_with_content([
+            self._thinking_block(),
+        ])
+        client._client = mock_sdk
+
+        result = self._call(client, mock_sdk)
+
+        assert result.content == ""
+
+    def test_plain_single_text_block_unchanged(self):
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        mock_sdk.messages.create.return_value = self._response_with_content([
+            self._text_block("ok"),
+        ])
+        client._client = mock_sdk
+
+        result = self._call(client, mock_sdk)
+
+        assert result.content == "ok"
+
+    def test_redacted_thinking_block_is_skipped(self):
+        from llm_client import AnthropicClient
+        client = AnthropicClient(api_key="dummy")
+        mock_sdk = MagicMock()
+        mock_sdk.messages.create.return_value = self._response_with_content([
+            self._redacted_thinking_block(),
+            self._text_block("final answer"),
+        ])
+        client._client = mock_sdk
+
+        result = self._call(client, mock_sdk)
+
+        assert result.content == "final answer"

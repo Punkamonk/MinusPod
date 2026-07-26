@@ -120,24 +120,95 @@ def translate_reasoning_effort(
 _ANTHROPIC_NO_SAMPLING_MODELS = (
     "claude-opus-4-7",
     "claude-opus-4-8",
+    "claude-opus-5",
     "claude-sonnet-5",
     "claude-fable-5",
     "claude-mythos-5",
 )
 
+# Per-process memo of models discovered at runtime to reject temperature
+# (keyed by lowercased model id); self-heals model_omits_temperature() for
+# models not yet in _ANTHROPIC_NO_SAMPLING_MODELS.
+_learned_no_temperature_models: set = set()
+_learned_no_temperature_lock = threading.Lock()
 
-def model_omits_temperature(model: Optional[str]) -> bool:
-    """True when the model rejects the temperature parameter (Anthropic's
-    adaptive-thinking generation). Callers must omit temperature from the
-    request for these models."""
+
+def mark_model_omits_temperature(model: str) -> None:
+    """Remember, for the life of this process, that ``model`` rejects
+    temperature (called after a 400; see is_temperature_rejection_error).
+    Later model_omits_temperature() calls return True for this model."""
+    if not model:
+        return
+    with _learned_no_temperature_lock:
+        _learned_no_temperature_models.add(model.lower())
+
+
+def model_omits_temperature(
+    model: Optional[str],
+    operator_override: bool = False,
+) -> bool:
+    """True when temperature must be omitted from the request for ``model``.
+
+    Checked in order, any one sufficient: operator_override (the
+    ``omit_temperature`` setting; resolved by the caller since this module
+    stays DB-free), the static _ANTHROPIC_NO_SAMPLING_MODELS list, then the
+    learned _learned_no_temperature_models memo.
+    """
+    if operator_override:
+        return True
     if not model:
         return False
     m = model.lower()
+    with _learned_no_temperature_lock:
+        if m in _learned_no_temperature_models:
+            return True
     # Trailing (?!\d) guards against a token being a prefix of a longer version,
     # e.g. "claude-opus-4-7" must not match a hypothetical "claude-opus-4-70",
     # and "claude-sonnet-5" must not match "claude-sonnet-50".
     return any(re.search(re.escape(token) + r'(?!\d)', m)
                for token in _ANTHROPIC_NO_SAMPLING_MODELS)
+
+
+# Anthropic is the only provider with a proven, enforced structured-output
+# path (json_schema response_format forces a tool_choice call in
+# AnthropicClient.messages_create, guaranteeing schema-matching output).
+# Other providers front arbitrary/inconsistent backends lacking strict JSON
+# schema mode; extend this set only after verifying a provider's actual contract.
+_JSON_SCHEMA_SUPPORTED_PROVIDERS = frozenset({PROVIDER_ANTHROPIC})
+
+
+def supports_json_schema(provider: str) -> bool:
+    """True when ``provider`` has a proven, enforced structured-output path.
+
+    Only gate on this when the call site needs a guarantee the response
+    matches a schema (e.g. an enum field) and would rather fall back to
+    json_object than risk a false positive on an unverified provider.
+    """
+    return (provider or '').lower() in _JSON_SCHEMA_SUPPORTED_PROVIDERS
+
+
+def is_temperature_rejection_error(error: Exception) -> bool:
+    """True for a 400 whose body indicates the model rejects ``temperature``
+    outright (Anthropic's adaptive-thinking generation). Distinct from
+    is_fallback_eligible_error: identifies this specific case so callers can
+    retry with temperature omitted rather than defaulted, since a defaulted
+    retry 400s identically here.
+    """
+    status = getattr(error, 'status_code', None)
+    if status is None:
+        response = getattr(error, 'response', None)
+        if response is not None:
+            status = getattr(response, 'status_code', None)
+    try:
+        status_int = int(status)
+    except (TypeError, ValueError):
+        return False
+    if status_int != 400:
+        return False
+    text = str(error).lower()
+    if 'temperature' not in text:
+        return False
+    return any(marker in text for marker in ('deprecated', 'unsupported', 'not supported'))
 
 
 def is_fallback_eligible_error(error: Exception) -> bool:

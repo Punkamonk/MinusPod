@@ -1,8 +1,10 @@
 import { useState, useRef, useMemo } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { episodeOriginalUrl, getEpisode, getFeed, getOriginalTranscript, reprocessEpisode, regenerateChapters } from '../api/feeds';
 import { submitCorrection } from '../api/patterns';
+import { getErrorMessage } from '../api/client';
+import { SegmentCategoryBadge, KeptBadge } from '../components/SegmentCategoryBadge';
 import PrevNextLink from '../components/PrevNextLink';
 import LoadingSpinner from '../components/LoadingSpinner';
 import Artwork from '../components/Artwork';
@@ -89,6 +91,9 @@ function EpisodeDetail() {
   const [showEditor, setShowEditor] = useState(false);
   const [createModeRequested, setCreateModeRequested] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
+  // Transient error toast for a rejected correction submit (e.g. a 409 on a
+  // keep-resolved marker); the backend's own message is shown verbatim.
+  const [correctionError, setCorrectionError] = useState<string | null>(null);
   const [showReprocessMenu, setShowReprocessMenu] = useState(false);
   const [editorSelectedAdIndex, setEditorSelectedAdIndex] = useState(0);
   // Held/rejected row currently open in the standalone waveform editor
@@ -152,6 +157,9 @@ function EpisodeDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['episode', slug, episodeId] });
     },
+    onError: (error) => {
+      console.error('Failed to regenerate chapters:', error);
+    },
   });
 
   // Mutation for submitting ad corrections
@@ -186,6 +194,7 @@ function EpisodeDetail() {
     },
     onMutate: () => {
       setSaveStatus('saving');
+      setCorrectionError(null);
       // A saved correction can remove the playing row (and its whole section)
       // on refetch, which would leave the windowed preview playing with no
       // visible owner. Stop it up front.
@@ -203,6 +212,9 @@ function EpisodeDetail() {
     onError: (error) => {
       console.error('Failed to save correction:', error);
       setSaveStatus('error');
+      // A keep-resolved marker (409) or any other rejection: surface the
+      // backend's own message rather than special-casing the status code.
+      setCorrectionError(getErrorMessage(error, 'Failed to save correction'));
       pendingRecutRef.current = false;
       setTimeout(() => setSaveStatus('idle'), 3000);
     },
@@ -377,6 +389,20 @@ function EpisodeDetail() {
         )}
       </div>
 
+      {correctionError && (
+        <div className="mb-4 p-3 rounded-lg bg-destructive/10 text-destructive text-sm flex items-center justify-between gap-3">
+          <span>{correctionError}</span>
+          <button
+            type="button"
+            onClick={() => setCorrectionError(null)}
+            aria-label="Dismiss"
+            className="shrink-0 text-destructive hover:opacity-70"
+          >
+            &times;
+          </button>
+        </div>
+      )}
+
       <div className="bg-card rounded-lg border border-border p-4 sm:p-6 mb-6">
         <div className="flex gap-4">
           <div className="w-16 h-16 sm:w-24 sm:h-24 shrink-0">
@@ -525,6 +551,20 @@ function EpisodeDetail() {
 
         {verificationVerdict && (
           <p className="mt-2 text-xs text-muted-foreground">{verificationVerdict}</p>
+        )}
+
+        {regenerateChaptersMutation.isPending && (
+          <p className="mt-2 text-sm text-muted-foreground flex items-center gap-2">
+            <LoadingSpinner size="sm" inline /> Regenerating chapters...
+          </p>
+        )}
+        {regenerateChaptersMutation.isSuccess && (
+          <p className="mt-2 text-sm text-success">Chapters regenerated.</p>
+        )}
+        {regenerateChaptersMutation.isError && (
+          <p className="mt-2 text-sm text-destructive">
+            {getErrorMessage(regenerateChaptersMutation.error, 'Failed to regenerate chapters')}
+          </p>
         )}
 
         {failureReason && (
@@ -740,6 +780,8 @@ function EpisodeDetail() {
                       ? `${formatTimestamp(segment.reviewer_original_start)} - ${formatTimestamp(segment.reviewer_original_end)}`
                       : `${formatTimestamp(segment.start)} - ${formatTimestamp(segment.end)}`}
                   </span>
+                  {segment.category && <SegmentCategoryBadge category={segment.category} />}
+                  {segment.actionApplied === 'keep' && <KeptBadge />}
                   {segment.detection_stage && DETECTION_STAGE_META[segment.detection_stage] && (
                     <StageBadge stage={segment.detection_stage} />
                   )}
@@ -990,6 +1032,8 @@ function EpisodeDetail() {
                       <span className="font-mono text-sm">
                         {formatTimestamp(segment.start)} - {formatTimestamp(segment.end)}
                       </span>
+                      {segment.category && <SegmentCategoryBadge category={segment.category} />}
+                      {segment.actionApplied === 'keep' && <KeptBadge />}
                       {segment.detection_stage && DETECTION_STAGE_META[segment.detection_stage] && (
                         <StageBadge stage={segment.detection_stage} />
                       )}
@@ -1110,6 +1154,30 @@ function EpisodeDetail() {
         </div>
       )}
 
+      {episode.keptMarkers && episode.keptMarkers.length > 0 && (
+        <div className="bg-card rounded-lg border border-border p-6 mb-6" data-testid="kept-segments-section">
+          <h2 className="text-xl font-semibold text-foreground mb-4">
+            Kept segments
+          </h2>
+          <div className="space-y-3">
+            {episode.keptMarkers.map((segment, index) => (
+              <div
+                key={index}
+                className="p-3 bg-secondary/50 rounded-lg"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-sm">
+                    {formatTimestamp(segment.start)} - {formatTimestamp(segment.end)}
+                  </span>
+                  {segment.category && <SegmentCategoryBadge category={segment.category} />}
+                  <KeptBadge />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {episode.rejectedAdMarkers && episode.rejectedAdMarkers.length > 0 && (
         <div className="mb-6">
           <CollapsibleSection
@@ -1154,6 +1222,8 @@ function EpisodeDetail() {
                           <span className="font-mono text-sm">
                             {formatTimestamp(segment.start)} - {formatTimestamp(segment.end)}
                           </span>
+                          {segment.category && <SegmentCategoryBadge category={segment.category} />}
+                          {segment.actionApplied === 'keep' && <KeptBadge />}
                           <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-red-500/20 text-red-600 dark:text-red-400">
                             Not cut
                           </span>

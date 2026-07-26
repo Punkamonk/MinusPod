@@ -1,16 +1,22 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getNetworks, updateFeed, UpdateFeedPayload, CUE_SCORE_MIN, CUE_SCORE_MAX } from '../../api/feeds';
+import { getNetworks, updateFeed, UpdateFeedPayload, CUE_SCORE_MIN, CUE_SCORE_MAX, rerenderSegments, RerenderSegmentsResult } from '../../api/feeds';
 import { getSettings } from '../../api/settings';
+import { getErrorMessage } from '../../api/client';
 import type { Feed } from '../../api/types';
 import CollapsibleSection, { useCollapsibleOpen } from '../../components/CollapsibleSection';
 import CopyButton from '../../components/CopyButton';
 import { FeedTagsEditor } from '../../components/FeedTagsEditor';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import TriStateSelect from '../../components/TriStateSelect';
+import SegmentActionToggle from '../../components/SegmentActionToggle';
+import {
+  SEGMENT_CATEGORIES, SEGMENT_CATEGORY_LABELS, SEGMENT_CATEGORY_DESCRIPTIONS, DEFAULT_SEGMENT_ACTION,
+  type SegmentCategory, type SegmentAction,
+} from '../../utils/segmentCategory';
 import { WHISPER_LANGUAGES, labelForLanguage } from '../../utils/whisperLanguages';
 import { useSyncFromQuery } from '../../hooks/useSyncFromQuery';
-import { btnPrimary } from '../../components/buttonStyles';
+import { btnPrimary, btnSecondary } from '../../components/buttonStyles';
 
 interface Props {
   feed: Feed;
@@ -84,6 +90,14 @@ function FeedSettingsPanel({ feed, slug }: Props) {
   const [isEditingSourceUrl, setIsEditingSourceUrl] = useState(false);
   const [editSourceUrl, setEditSourceUrl] = useState('');
   const [sourceUrlError, setSourceUrlError] = useState<string | null>(null);
+  const [rerenderResult, setRerenderResult] = useState<RerenderSegmentsResult | null>(null);
+  const [rerenderError, setRerenderError] = useState<string | null>(null);
+  const [segmentActionError, setSegmentActionError] = useState<string | null>(null);
+  // Local source of truth for the per-feed override map, not the `feed`
+  // prop: the PATCH replaces the stored map outright with no server merge,
+  // so building from a stale prop between edits would drop the earlier one.
+  const [segmentOverrides, setSegmentOverrides] =
+    useState<Partial<Record<SegmentCategory, SegmentAction>>>(feed.segmentCategoryActions ?? {});
 
   const { data: networks } = useQuery({
     queryKey: ['networks'],
@@ -124,15 +138,26 @@ function FeedSettingsPanel({ feed, slug }: Props) {
     setSnapLeadInput(s(f.cueSnapLeadOverride));
     setSnapLagInput(s(f.cueSnapLagOverride));
     setMaxAdDurInput(s(f.maxAdDurationOverride));
+    setSegmentOverrides(f.segmentCategoryActions ?? {});
   });
 
   const updateMutation = useMutation({
     mutationFn: (data: UpdateFeedPayload) => updateFeed(slug, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['feed', slug] });
+    onSuccess: (_data, variables) => {
       // Surface a newly-typed custom network in every other feed's dropdown.
       queryClient.invalidateQueries({ queryKey: ['networks'] });
       setIsEditingNetwork(false);
+      if (variables && 'segmentCategoryActions' in variables) {
+        setSegmentActionError(null);
+      }
+    },
+    // Rollback lives in each mutate() call's own onError below (react-query
+    // v5 runs per-call callbacks alongside these), so it can restore the
+    // exact pre-edit snapshot rather than the possibly-stale feed prop.
+    // onSettled always refetches so a failed PATCH still reverts every
+    // other field to server truth.
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['feed', slug] });
     },
   });
 
@@ -150,6 +175,59 @@ function FeedSettingsPanel({ feed, slug }: Props) {
     },
     onError: (e: Error) => setSourceUrlError(e.message),
   });
+
+  // Full-map PATCH: each edit must send the whole override map, built from
+  // segmentOverrides (see above), not the feed prop. Clearing the last
+  // override sends null, not {}, so the feed comes back with no overrides
+  // at all. `prev` snapshots the pre-edit state for rollback in onError.
+  const setSegmentActionOverride = (category: SegmentCategory, action: SegmentAction) => {
+    const prev = segmentOverrides;
+    const next = { ...segmentOverrides, [category]: action };
+    setSegmentOverrides(next);
+    setSegmentActionError(null);
+    updateMutation.mutate({ segmentCategoryActions: next }, {
+      onError: (e) => {
+        setSegmentOverrides(prev);
+        setSegmentActionError(getErrorMessage(e, 'Failed to update segment action'));
+      },
+    });
+  };
+
+  const clearSegmentActionOverride = (category: SegmentCategory) => {
+    const prev = segmentOverrides;
+    const next = { ...segmentOverrides };
+    delete next[category];
+    setSegmentOverrides(next);
+    setSegmentActionError(null);
+    updateMutation.mutate({
+      segmentCategoryActions: Object.keys(next).length > 0 ? next : null,
+    }, {
+      onError: (e) => {
+        setSegmentOverrides(prev);
+        setSegmentActionError(getErrorMessage(e, 'Failed to update segment action'));
+      },
+    });
+  };
+
+  const rerenderMutation = useMutation({
+    mutationFn: () => rerenderSegments(slug),
+    onSuccess: (result) => {
+      setRerenderResult(result);
+      setRerenderError(null);
+      queryClient.invalidateQueries({ queryKey: ['episodes', slug] });
+    },
+    onError: (e: unknown) => {
+      setRerenderResult(null);
+      setRerenderError(getErrorMessage(e, 'Re-render failed'));
+    },
+  });
+
+  const handleRerenderClick = () => {
+    if (!window.confirm(
+      'Re-render all processed episodes of this feed using the current segment actions? Episodes without a retained original are skipped.',
+    )) return;
+    rerenderMutation.mutate();
+  };
 
   const startEditingSourceUrl = () => {
     setEditSourceUrl(feed.sourceUrl);
@@ -417,7 +495,7 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                   </button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  The original feed MinusPod pulls episodes from -- not the URL you subscribe to.
+                  The original feed MinusPod pulls episodes from. Not the URL you subscribe to.
                 </p>
               </div>
             )}
@@ -453,7 +531,7 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                 value={feed.detectionMode || 'blacklist'}
                 onChange={(e) => updateMutation.mutate({ detectionMode: e.target.value })}
                 disabled={updateMutation.isPending}
-                className="px-2 py-1.5 text-sm bg-secondary border border-border rounded flex-1 sm:flex-none min-w-0 disabled:opacity-50"
+                className="px-2 py-1.5 text-sm bg-secondary border border-border rounded self-start min-w-0 max-w-full disabled:opacity-50"
               >
                 <option value="blacklist">Remove ads (default)</option>
                 <option value="keep_content">Keep content only (experimental)</option>
@@ -470,8 +548,8 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                 ? feed.processingMode === 'standard'
                 : feed.skipAdDetection !== true && feed.detectionMode !== 'keep_content') && (
                 <p className="text-xs text-muted-foreground">
-                  Keep content only asks the model to mark what is show content and
-                  removes the rest. Episodes fall back to normal ad removal when the
+                  Keep content mode asks the model to mark the show&apos;s content and
+                  removes everything else. Falls back to normal ad removal if the
                   labeling fails safety checks.
                 </p>
               )}
@@ -496,7 +574,7 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                 value={feed.chaptersMode || 'auto'}
                 onChange={(e) => updateMutation.mutate({ chaptersMode: e.target.value as 'auto' | 'generate' | 'off' })}
                 disabled={updateMutation.isPending}
-                className="px-2 py-1.5 text-sm bg-secondary border border-border rounded flex-1 sm:flex-none min-w-0 disabled:opacity-50"
+                className="px-2 py-1.5 text-sm bg-secondary border border-border rounded self-start min-w-0 max-w-full disabled:opacity-50"
                 aria-label="Chapters"
               >
                 <option value="auto">Auto</option>
@@ -504,11 +582,9 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                 <option value="off">Off</option>
               </select>
               <p className="text-xs text-muted-foreground">
-                Auto keeps the podcast&apos;s own chapters, with timestamps shifted to
-                match the ad-free audio, and falls back to generated chapters when an
-                episode has too few of its own. Always generate replaces the
-                podcast&apos;s chapters with generated ones. Off leaves chapters
-                untouched.
+                Auto keeps the podcast&apos;s own chapters with timestamps shifted to
+                the ad-free audio, and generates chapters when an episode has too
+                few. Always generate replaces them; Off leaves them untouched.
               </p>
             </div>
           </div>
@@ -571,6 +647,102 @@ function FeedSettingsPanel({ feed, slug }: Props) {
               <FeedTagsEditor slug={slug} />
             </div>
           </div>
+
+          {/* Segment actions (issue #565): per-feed remove/beep/keep overrides,
+              show-segment detection, and the bulk re-render trigger. */}
+          <CollapsibleSection
+            title="Segment actions"
+            subtitle="Per-feed overrides, show-segment detection, and re-rendering already-processed episodes"
+            defaultOpen={false}
+            storageKey={`feed-segment-actions-${slug}`}
+          >
+            <div className="flex flex-col gap-3 pt-1">
+              <p className="text-sm text-muted-foreground">
+                Choose what happens to each kind of detected segment. Remove cuts it out, Beep replaces it with a tone, Keep leaves it in.
+              </p>
+              <div className="space-y-2">
+                {SEGMENT_CATEGORIES.map((category) => {
+                  const override = segmentOverrides[category];
+                  const globalValue = settings?.segmentCategoryActions?.value?.[category] ?? DEFAULT_SEGMENT_ACTION;
+                  const effective = override ?? globalValue;
+                  return (
+                    <div key={category} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-3 text-sm">
+                      <div className="min-w-0">
+                        <span className="text-muted-foreground block">{SEGMENT_CATEGORY_LABELS[category]}</span>
+                        <span className="text-xs text-muted-foreground/70 block">{SEGMENT_CATEGORY_DESCRIPTIONS[category]}</span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <SegmentActionToggle
+                          value={effective}
+                          muted={override === undefined}
+                          disabled={updateMutation.isPending}
+                          ariaLabel={`${SEGMENT_CATEGORY_LABELS[category]} action`}
+                          onChange={(action) => setSegmentActionOverride(category, action)}
+                        />
+                        {override === undefined ? (
+                          <span className="px-2 py-0.5 rounded text-xs font-medium bg-secondary text-muted-foreground">
+                            Inherit
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => clearSegmentActionOverride(category)}
+                            disabled={updateMutation.isPending}
+                            className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {segmentActionError && <p className="text-xs text-destructive">{segmentActionError}</p>}
+
+              {/* Show-segment detection (issue #565): off by default. */}
+              <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm pt-2 border-t border-border">
+                <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-1.5">Show segments:</span>
+                <div className="flex flex-col gap-1 flex-1 min-w-0">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <ToggleSwitch
+                      checked={feed.detectShowSegments === true}
+                      onChange={(v) => updateMutation.mutate({ detectShowSegments: v })}
+                      disabled={updateMutation.isPending}
+                      ariaLabel="Detect show segments"
+                    />
+                    <span>Detect show segments</span>
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    Finds the show&apos;s intro, outro and credits, and preview bumpers so you
+                    can keep or cut them by category. Rough edges where music dominates.
+                  </p>
+                </div>
+              </div>
+
+              {/* Bulk re-render (issue #565): apply the current segment
+                  actions to every already-processed episode. */}
+              <div className="pt-2 border-t border-border flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={handleRerenderClick}
+                  disabled={rerenderMutation.isPending}
+                  className={`self-start whitespace-nowrap px-3 py-1.5 text-sm rounded ${btnSecondary} disabled:opacity-50 transition-colors`}
+                >
+                  {rerenderMutation.isPending ? 'Re-rendering...' : 'Re-render episodes'}
+                </button>
+                <p className="text-xs text-muted-foreground">
+                  Applies the current segment actions to every processed episode with a retained original.
+                </p>
+                {rerenderResult && (
+                  <p className="text-xs text-muted-foreground">
+                    {rerenderResult.queued} episode{rerenderResult.queued === 1 ? '' : 's'} queued, {rerenderResult.skipped} skipped.
+                  </p>
+                )}
+                {rerenderError && <p className="text-xs text-destructive">{rerenderError}</p>}
+              </div>
+            </div>
+          </CollapsibleSection>
 
           {/* Cue tuning overrides (collapsible, advanced knobs) */}
           <CollapsibleSection

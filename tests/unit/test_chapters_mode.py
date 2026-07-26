@@ -62,7 +62,7 @@ def _db(chapters_mode=None, chapters_enabled=None, upstream_chapters_url=None):
 
 
 def _run(monkeypatch, db, publisher_chapters, generator_chapters=None, podcast_row=None,
-         original_duration=None, fetch_return=None):
+         original_duration=None, fetch_return=None, run_stats=None, markers=None):
     """Invoke the real _generate_assets with all IO seams mocked, returning
     (storage_mock, probe_mock, generator_class_mock, embed_mock, fetch_mock)."""
     storage_mock = MagicMock()
@@ -93,6 +93,7 @@ def _run(monkeypatch, db, publisher_chapters, generator_chapters=None, podcast_r
         podcast_name='Pod', episode_title='Title', regenerate_chapters=True,
         audio_path='/tmp/fake-processed.mp3', audio_duration=100.0,
         podcast_row=podcast_row, original_duration=original_duration,
+        run_stats=run_stats, markers=markers,
     )
     return storage_mock, probe_mock, generator_class, embed_mock, fetch_mock
 
@@ -126,6 +127,44 @@ def test_auto_with_zero_publisher_chapters_falls_back_to_generate(monkeypatch):
 
     generator_class.return_value.generate_chapters.assert_called_once()
     storage_mock.save_chapters_and_applied_cuts.assert_called_once()
+
+
+def test_generator_chapters_degraded_flag_propagates_to_run_stats(monkeypatch):
+    """chapters_gen.chapters_degraded (set when topic detection fails or
+    yields an unusable result) must reach run_stats so it survives into
+    processing_stats_json, per the wiring in _generate_assets."""
+    db = _db(chapters_mode='generate')
+    storage_mock = MagicMock()
+    transcript_gen_class = MagicMock()
+    transcript_gen_class.return_value.compute_final_segments.return_value = []
+    transcript_gen_class.return_value.generate_text.return_value = None
+
+    generator_class = MagicMock()
+    generator_class.return_value.generate_chapters.return_value = {
+        'chapters': [{'startTime': 1, 'title': 'Introduction'}]
+    }
+    generator_class.return_value.chapters_degraded = True
+    generator_class.return_value.chapters_degradation_reason = 'chapter topic detection failed'
+
+    monkeypatch.setattr(processing, 'db', db)
+    monkeypatch.setattr(processing, 'storage', storage_mock)
+    monkeypatch.setattr(processing, 'probe_chapters', MagicMock(return_value=[]))
+    monkeypatch.setattr(processing, 'embed_chapters', MagicMock())
+    monkeypatch.setattr(processing, 'fetch_upstream_chapters', MagicMock(return_value=None))
+    monkeypatch.setattr(processing, 'get_replacement_duration', lambda: 2.0)
+    monkeypatch.setattr('transcript_generator.TranscriptGenerator', transcript_gen_class)
+    monkeypatch.setattr(chapters_generator, 'ChaptersGenerator', generator_class)
+
+    run_stats = {}
+    processing._generate_assets(
+        'testslug', 'ep1', segments=[], all_cuts=[], episode_description='desc',
+        podcast_name='Pod', episode_title='Title', regenerate_chapters=True,
+        audio_path='/tmp/fake-processed.mp3', audio_duration=100.0,
+        run_stats=run_stats,
+    )
+
+    assert run_stats['chapters_degraded'] is True
+    assert run_stats['chapters_degraded_reason'] == 'chapter topic detection failed'
 
 
 def test_auto_with_one_publisher_chapter_falls_back_to_generate(monkeypatch):
@@ -270,3 +309,52 @@ def test_fetched_chapters_below_threshold_after_remap_falls_to_generator(monkeyp
     fetch_mock.assert_called_once()
     generator_class.return_value.generate_chapters.assert_called_once()
     storage_mock.save_chapters_and_applied_cuts.assert_called_once()
+
+
+# ---------- Segment-marker hints (ad-break boundary hints) ----------
+
+def test_markers_reach_generator_as_segment_markers_kwarg(monkeypatch):
+    """_generate_assets threads its markers argument through to
+    ChaptersGenerator.generate_chapters as segment_markers: only reachable
+    on the AI-generation branch (mode 'generate' here, no publisher/upstream
+    chapters to preserve)."""
+    db = _db(chapters_mode='generate')
+    markers = [{'start': 10.0, 'end': 20.0, 'action_applied': 'remove', 'category': 'sponsor'}]
+    storage_mock, probe_mock, generator_class, embed_mock, fetch_mock = _run(
+        monkeypatch, db, publisher_chapters=[], markers=markers)
+
+    generator_class.return_value.generate_chapters.assert_called_once()
+    kwargs = generator_class.return_value.generate_chapters.call_args.kwargs
+    assert kwargs['segment_markers'] is markers
+
+
+def test_markers_not_passed_when_publisher_chapters_preserved(monkeypatch):
+    """Auto mode preserving embedded publisher chapters never calls the
+    generator at all, so markers can never reach a hints prompt on that
+    path regardless of what is passed in."""
+    db = _db(chapters_mode='auto')
+    publisher = [
+        {'start': 0.0, 'end': 30.0, 'title': 'Intro'},
+        {'start': 100.0, 'end': 200.0, 'title': 'Body'},
+    ]
+    markers = [{'start': 10.0, 'end': 20.0, 'action_applied': 'remove', 'category': 'sponsor'}]
+    storage_mock, probe_mock, generator_class, embed_mock, fetch_mock = _run(
+        monkeypatch, db, publisher, markers=markers)
+
+    generator_class.return_value.generate_chapters.assert_not_called()
+
+
+def test_markers_not_passed_when_upstream_json_preserved(monkeypatch):
+    """Same guarantee for the upstream podcast:chapters JSON preserve path."""
+    db = _db(chapters_mode='auto', upstream_chapters_url='https://pub.example.com/ch.json')
+    fetched = [
+        {'startTime': 5, 'title': 'Cold Open'},
+        {'startTime': 50, 'title': 'Segment Two'},
+    ]
+    markers = [{'start': 10.0, 'end': 20.0, 'action_applied': 'remove', 'category': 'sponsor'}]
+    storage_mock, probe_mock, generator_class, embed_mock, fetch_mock = _run(
+        monkeypatch, db, publisher_chapters=[], original_duration=100.0,
+        fetch_return=fetched, markers=markers)
+
+    fetch_mock.assert_called_once()
+    generator_class.return_value.generate_chapters.assert_not_called()

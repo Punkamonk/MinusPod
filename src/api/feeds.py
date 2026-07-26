@@ -1,4 +1,5 @@
 """Feed routes: /feeds/* endpoints."""
+import json
 import logging
 import os
 import re
@@ -22,6 +23,7 @@ from processing_queue import ProcessingQueue
 from config import (
     FEED_REFRESH_FAILURE_ALERT_THRESHOLD,
     VALID_CHAPTERS_MODES,
+    SEGMENT_CATEGORIES, SEGMENT_ACTIONS,
     differential_fetch_effective,
     resolve_feed_processing_mode,
 )
@@ -30,9 +32,11 @@ from positional_prior import compute_ad_distribution
 # Module import (not `from rss_parser import RSSParser`) so tests patching
 # rss_parser.RSSParser take effect at call time.
 import rss_parser
+from utils.constants import EpisodeStatus
 from utils.language import LANGUAGE_CODE_RE
 from utils.opml import build_opml_xml, modified_feed_url
 from database.podcasts import EPISODE_STATUSES
+from utils.time import utc_now_iso
 from utils.url import validate_url, SSRFError
 from utils.validation import is_valid_slug
 
@@ -168,6 +172,40 @@ def _normalize_chapters_mode(value):
     return None, f"chaptersMode must be one of: {', '.join(sorted(VALID_CHAPTERS_MODES))}"
 
 
+def _normalize_segment_category_actions(value):
+    """Validate a per-feed segmentCategoryActions override (issue #565).
+
+    None clears the override (stored NULL). Every key must be a known
+    category and every value a known action; the partial map is stored
+    as-is, unresolved keys fall through to the global setting at resolve
+    time.
+    """
+    if value is None:
+        return None, None
+    if not isinstance(value, dict):
+        return None, 'segmentCategoryActions must be an object or null'
+    for cat, action in value.items():
+        if cat not in SEGMENT_CATEGORIES:
+            return None, f"segmentCategoryActions: unknown category '{cat}'"
+        if action not in SEGMENT_ACTIONS:
+            return None, f"segmentCategoryActions: unknown action '{action}' for '{cat}'"
+    return json.dumps(value), None
+
+
+def _deserialize_segment_category_actions(raw):
+    """Parse the stored segment_category_actions JSON back for API responses.
+
+    Returns the partial map as stored, or None if unset/unparsable.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 from config import AUDIO_CUE_SCORE_MAX, AUDIO_CUE_SCORE_MIN
 
 _CUE_SCORE_MIN = AUDIO_CUE_SCORE_MIN
@@ -218,6 +256,7 @@ _NULLABLE_BOOL_FIELDS = [
     ('differentialFetchEnabled', 'differential_fetch_enabled'),
     ('passthroughEnabled', 'passthrough_enabled'),
     ('skipAdDetection', 'skip_ad_detection'),
+    ('detectShowSegments', 'detect_show_segments'),
 ]
 
 def _cue_override_fields(podcast) -> dict:
@@ -300,6 +339,8 @@ def _podcast_base_json(podcast, feed_url) -> dict:
         'titleOverride': podcast.get('title_override'),
         'detectionMode': podcast.get('detection_mode'),
         'chaptersMode': podcast.get('chapters_mode'),
+        'segmentCategoryActions': _deserialize_segment_category_actions(
+            podcast.get('segment_category_actions')),
         'processingMode': resolve_feed_processing_mode(podcast),
         **_cue_override_fields(podcast),
         'sourceUrl': podcast['source_url'],
@@ -756,6 +797,13 @@ def update_feed(slug):
             return error_response(chapters_err, 400)
         updates['chapters_mode'] = chapters_val
 
+    if 'segmentCategoryActions' in data:
+        actions_val, actions_err = _normalize_segment_category_actions(
+            data['segmentCategoryActions'])
+        if actions_err:
+            return error_response(actions_err, 400)
+        updates['segment_category_actions'] = actions_val
+
     for json_key, db_col, lo, hi in _CUE_FLOAT_OVERRIDE_FIELDS:
         if json_key in data:
             v, err = _normalize_cue_float_override(data[json_key], json_key, lo, hi)
@@ -1146,3 +1194,87 @@ def update_feed_tags(slug):
 
     db.set_podcast_tags(slug, user_tags=user_tags)
     return json_response(db.get_podcast_tags(slug))
+
+
+@api.route('/feeds/<slug>/rerender-segments', methods=['POST'])
+@limiter.limit("5 per minute")
+@log_request
+def rerender_segments(slug):
+    """Re-cut every processed episode of a feed against the current
+    segment-category action maps (issue #565).
+
+    Reuses the single-episode recut path (_recut_episode re-resolves
+    actions against the current maps), so there is only one recut queue
+    in the codebase. Episodes not in 'processed' status aren't candidates;
+    a processed episode failing the same preconditions as the
+    single-episode recut (no retained original, no saved transcript
+    segments, no ad detections) counts as skipped.
+    """
+    db = get_database()
+
+    podcast = db.get_podcast_by_slug(slug)
+    if not podcast:
+        return error_response('Feed not found', 404)
+
+    from api.episodes import _check_recut_preconditions
+    from main_app.processing import start_background_processing
+
+    # get_episodes defaults to a 50-row page; a feed's processed backlog can
+    # exceed that, so ask for effectively "all" (storage.py uses the same
+    # convention for its own bulk full-feed reads).
+    episodes, _total = db.get_episodes(
+        slug, status=EpisodeStatus.PROCESSED.value, limit=10000)
+
+    queued = 0
+    skipped = 0
+    for row in episodes:
+        episode_id = row['episode_id']
+        # get_episodes only selects columns off `episodes`; ad_markers_json
+        # lives in episode_details and the precondition check needs it, so
+        # re-fetch the full joined row per episode.
+        episode = db.get_episode(slug, episode_id)
+        if not episode:
+            skipped += 1
+            continue
+        if episode.get('status') == EpisodeStatus.PROCESSING.value:
+            skipped += 1
+            continue
+        if _check_recut_preconditions(db, slug, episode_id, episode) is not None:
+            skipped += 1
+            continue
+
+        try:
+            db.upsert_episode(
+                slug, episode_id,
+                status=EpisodeStatus.PENDING.value,
+                reprocess_mode='recut',
+                reprocess_requested_at=utc_now_iso(),
+                retry_count=0,
+                error_message=None,
+            )
+            started, _reason = start_background_processing(
+                slug, episode_id,
+                episode.get('original_url'),
+                episode.get('title', 'Unknown'),
+                podcast.get('title', slug),
+                episode.get('description'),
+                None,
+                episode.get('published_at'),
+            )
+            if not started:
+                db.upsert_episode_for_processing(
+                    slug, episode_id, episode.get('original_url'),
+                    episode.get('title', 'Unknown'),
+                    episode.get('published_at'), episode.get('description'),
+                )
+                get_status_service().queue_episode(
+                    slug, episode_id, episode.get('title', 'Unknown'),
+                    podcast.get('title', slug))
+            queued += 1
+        except Exception:
+            logger.exception(
+                f"[{slug}:{episode_id}] Failed to queue segment re-render recut")
+            skipped += 1
+
+    logger.info(f"Rerender-segments {slug}: {queued} queued, {skipped} skipped")
+    return json_response({'queued': queued, 'skipped': skipped})

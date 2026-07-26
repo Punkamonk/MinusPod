@@ -24,6 +24,7 @@ from config import (
     AD_CONTENT_PHONE_PATTERNS,
     MIN_KEYWORD_LENGTH, MIN_UNCOVERED_TAIL_DURATION,
     TERMINAL_SNAP_EOF_TOLERANCE_SECONDS,
+    DEFAULT_SEGMENT_ACTION, normalize_segment_category,
 )
 
 logger = logging.getLogger('podcast.claude')
@@ -998,7 +999,60 @@ def _content_duration_in_range(segments: List[Dict], range_start: float, range_e
     return total
 
 
-def deduplicate_window_ads(all_ads: List[Dict], merge_threshold: float = 5.0) -> List[Dict]:
+def resolve_category_action(category, action_map: Dict[str, str]) -> str:
+    """Resolve a marker's category to its feed-configured action.
+
+    Only call with a non-None action_map; callers with no map treat every
+    category as the same action and never call this.
+    """
+    return action_map.get(normalize_segment_category(category), DEFAULT_SEGMENT_ACTION)
+
+
+def split_conflicting_action_span(last: Dict, current: Dict) -> tuple:
+    """Resolve two adjacent-or-overlapping ads whose resolved actions differ:
+    never merge a keep-resolving detection into a remove-resolving one, and
+    never let a span fully nested inside the other collapse to nothing.
+
+    Returns ``(updated_last_or_None, new_entries)``: ``new_entries`` replaces
+    ``current`` in the merged list; ``updated_last`` (None when fully
+    consumed) replaces ``last``.
+
+    - No true overlap: both survive untouched.
+    - ``current`` fully nested in ``last``: split ``last`` around it so both
+      pieces and the nested span survive.
+    - ``current`` extends past ``last``'s end: clamp its start forward past
+      ``last``'s end so the two spans never double-cut the same audio.
+    """
+    if current['start'] >= last['end']:
+        return last, [current.copy()]
+
+    if current['end'] <= last['end']:
+        # Splitting last invalidates any merged_distinct_ads/
+        # merged_protected_start/end bookkeeping from an earlier fold: those
+        # bounds describe last's original range and may not fit either
+        # narrower piece. Strip them so ad_reviewer's expand-only protection
+        # can't float a boundary back out to a stale bound and re-absorb
+        # audio this split just carved away.
+        before = {k: v for k, v in last.items()
+                  if k not in ('merged_distinct_ads', 'merged_protected_start',
+                               'merged_protected_end')}
+        before['end'] = current['start']
+        after = dict(before)
+        after['start'] = current['end']
+        after['end'] = last['end']
+        new_last = before if before['start'] < before['end'] else None
+        entries = [current.copy()]
+        if after['start'] < after['end']:
+            entries.append(after)
+        return new_last, entries
+
+    clamped = current.copy()
+    clamped['start'] = last['end']
+    return last, [clamped]
+
+
+def deduplicate_window_ads(all_ads: List[Dict], merge_threshold: float = 5.0,
+                           action_map: Optional[Dict[str, str]] = None) -> List[Dict]:
     """Deduplicate and merge ads detected across multiple windows.
 
     When the same ad spans two windows, both windows may detect it.
@@ -1007,6 +1061,12 @@ def deduplicate_window_ads(all_ads: List[Dict], merge_threshold: float = 5.0) ->
     Args:
         all_ads: Combined list of ads from all windows
         merge_threshold: Seconds within which ads are considered overlapping
+        action_map: Feed's resolved category->action map (see
+            ``AdDetector._resolve_segment_action_map``). When given, gates
+            the merge so two raw window detections whose categories resolve
+            to different actions are never fused into one marker before
+            categories are normalized. None treats every category as the
+            same action, unchanged.
 
     Returns:
         Deduplicated list with overlapping ads merged
@@ -1025,6 +1085,24 @@ def deduplicate_window_ads(all_ads: List[Dict], merge_threshold: float = 5.0) ->
 
         # Check for overlap (ads within threshold seconds are considered overlapping)
         if current['start'] <= last['end'] + merge_threshold:
+            same_action = (
+                action_map is None
+                or resolve_category_action(last.get('category'), action_map)
+                   == resolve_category_action(current.get('category'), action_map)
+            )
+            if not same_action:
+                new_last, new_entries = split_conflicting_action_span(last, current)
+                if new_last is None:
+                    merged.pop()
+                else:
+                    merged[-1] = new_last
+                merged.extend(new_entries)
+                logger.debug(
+                    f"Not merging {last.get('category')!r} and "
+                    f"{current.get('category')!r} (different resolved "
+                    f"actions) at window-dedup"
+                )
+                continue
             # Non-overlapping spans (touching or gapped) are distinct ads
             # chained together, not the same ad re-detected across an
             # overlapping window. LLM ad breaks are often exactly contiguous

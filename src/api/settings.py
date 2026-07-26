@@ -32,6 +32,9 @@ from config import (
     MAX_ARTWORK_BYTES_MIN, MAX_ARTWORK_BYTES_MAX, MAX_RSS_BYTES_MIN,
     MAX_AUDIO_DOWNLOAD_MB_MIN,
     PODCAST_SEARCH_PROVIDERS,
+    SEGMENT_CATEGORIES, SEGMENT_ACTIONS,
+    resolve_segment_category_actions_map,
+    resolve_community_sync_categories,
 )
 # Safe despite api/__init__ importing settings before podcast_search:
 # podcast_search only pulls names api/__init__ defines before its submodule
@@ -229,6 +232,17 @@ def get_settings():
 
     podping_enabled = coerce_bool_setting(_setting_value(
         settings, 'podping_enabled', registry_default('podping_enabled')))
+
+    omit_temperature = coerce_bool_setting(_setting_value(
+        settings, 'omit_temperature', registry_default('omit_temperature')))
+
+    segment_category_actions = resolve_segment_category_actions_map(
+        _setting_value(settings, 'segment_category_actions',
+                       registry_default('segment_category_actions')))
+
+    community_sync_categories = resolve_community_sync_categories(
+        _setting_value(settings, 'community_sync_categories',
+                       registry_default('community_sync_categories')))
 
     # Get min cut confidence (ad detection aggressiveness)
     try:
@@ -467,6 +481,10 @@ def get_settings():
         'rssRefreshIntervalMinutes': _sv(
             'rss_refresh_interval_minutes', rss_refresh_interval_minutes),
         'podpingEnabled': _sv('podping_enabled', podping_enabled),
+        'segmentCategoryActions': _sv(
+            'segment_category_actions', segment_category_actions),
+        'communitySyncCategories': _sv(
+            'community_sync_categories', community_sync_categories),
         'onlyExposeProcessedDefault': _sv(
             'only_expose_processed_default', only_expose_processed_default),
         'artworkWatermarkEnabled': _sv(
@@ -480,6 +498,7 @@ def get_settings():
         'chaptersModel': _sv('chapters_model', chapters_model),
         'minCutConfidence': _sv('min_cut_confidence', min_cut_confidence),
         'llmProvider': _sv('llm_provider', llm_provider),
+        'omitTemperature': _sv('omit_temperature', omit_temperature),
         'openaiBaseUrl': _sv('openai_base_url', openai_base_url),
         'pricingSourceMode': _sv('pricing_source_mode', pricing_source_mode),
         'openrouterApiKeyConfigured': openrouter_api_key_configured,
@@ -598,6 +617,8 @@ def update_ad_detection_settings():
         _apply_stage_tunables,
         _apply_ad_merge_fields,
         _apply_detection_tuning_fields,
+        _apply_segment_category_actions,
+        _apply_community_sync_categories,
     )
     for phase in phases:
         err = phase(db, data)
@@ -775,6 +796,11 @@ def _apply_processing_flags(db, data):
         value = 'true' if data['chaptersEnabled'] else 'false'
         db.set_setting('chapters_enabled', value, is_default=False)
         logger.info(f"Updated chapters generation to: {value}")
+
+    if 'omitTemperature' in data:
+        value = 'true' if data['omitTemperature'] else 'false'
+        db.set_setting('omit_temperature', value, is_default=False)
+        logger.info(f"Updated omit_temperature to: {value}")
     return None
 
 
@@ -794,6 +820,61 @@ def _apply_feed_refresh_fields(db, data):
         value = 'true' if data['podpingEnabled'] else 'false'
         db.set_setting('podping_enabled', value, is_default=False)
         logger.info(f"Updated podping listener to: {value}")
+    return None
+
+
+def _apply_segment_category_actions(db, data):
+    """Merge a partial segmentCategoryActions map over the stored global map.
+
+    Every key must be a known segment category and every value a known
+    action; the merged full map (not just the partial payload) is persisted
+    so later reads never need to fall back through a partial global row.
+    """
+    if 'segmentCategoryActions' in data:
+        value = data['segmentCategoryActions']
+        if not isinstance(value, dict):
+            return error_response('segmentCategoryActions must be an object', 400)
+        for cat, action in value.items():
+            if cat not in SEGMENT_CATEGORIES:
+                return error_response(
+                    f"segmentCategoryActions: unknown category '{cat}'", 400)
+            if action not in SEGMENT_ACTIONS:
+                return error_response(
+                    f"segmentCategoryActions: unknown action '{action}' for '{cat}'", 400)
+        merged = resolve_segment_category_actions_map(
+            db.get_setting('segment_category_actions'))
+        merged.update(value)
+        db.set_setting('segment_category_actions', json.dumps(merged), is_default=False)
+        logger.info(f"Updated segment category actions: {merged}")
+    return None
+
+
+def validate_community_sync_categories(value) -> tuple:
+    """Validate a communitySyncCategories/categories payload list.
+
+    Returns (categories, error_message); categories is None when
+    error_message is set. Shared by the ad-detection PUT phase below and
+    the dedicated /settings/community-sync PUT so both reject the same
+    malformed input the same way.
+    """
+    if not isinstance(value, list):
+        return None, 'communitySyncCategories must be a list'
+    for cat in value:
+        if cat not in SEGMENT_CATEGORIES:
+            return None, f"communitySyncCategories: unknown category '{cat}'"
+    # Dedupe while keeping SEGMENT_CATEGORIES order, so the stored JSON list
+    # is deterministic regardless of client submission order.
+    return [c for c in SEGMENT_CATEGORIES if c in value], None
+
+
+def _apply_community_sync_categories(db, data):
+    """Persist the global community-sync per-category accept list."""
+    if 'communitySyncCategories' in data:
+        categories, err = validate_community_sync_categories(data['communitySyncCategories'])
+        if err is not None:
+            return error_response(err, 400)
+        db.set_setting('community_sync_categories', json.dumps(categories), is_default=False)
+        logger.info(f"Updated community sync categories: {categories}")
     return None
 
 
@@ -2069,15 +2150,20 @@ def test_webhook(webhook_id):
         return error_response('Webhook not found', 404)
 
     try:
-        success = fire_test_event(target)
+        results = fire_test_event(target)
+        delivered_count = sum(1 for r in results if r['delivered'])
+        total = len(results)
+        plural = '' if total == 1 else 's'
         return json_response({
-            'success': success,
-            'message': 'Test webhook delivered' if success else 'Test webhook failed to deliver',
+            'success': delivered_count == total,
+            'results': results,
+            'message': f'{delivered_count} of {total} test payload{plural} delivered',
         })
     except Exception as e:
         logger.error(f"Webhook test failed for {webhook_id}: {e}")
         return json_response({
             'success': False,
+            'results': [],
             'message': 'webhook test failed; see server logs for details',
         })
 
@@ -2292,6 +2378,14 @@ def update_reviewer_settings():
 
 # ========== Community-pattern sync settings ==========
 
+def _community_category_breakdown(db) -> Dict[str, int]:
+    """Per-category counts of currently-active (synced) community patterns."""
+    breakdown = {cat: 0 for cat in SEGMENT_CATEGORIES}
+    for pattern in db.get_patterns_by_source('community', active_only=True):
+        breakdown[pattern.get('category', 'sponsor')] += 1
+    return breakdown
+
+
 @api.route('/settings/community-sync', methods=['GET'])
 @log_request
 def get_community_sync_settings():
@@ -2305,6 +2399,9 @@ def get_community_sync_settings():
         'lastError': db.get_setting('community_sync_last_error') or None,
         'manifestVersion': db.get_setting('community_sync_manifest_version') or None,
         'lastSummary': db.get_setting('community_sync_last_summary') or None,
+        'categories': resolve_community_sync_categories(
+            db.get_setting('community_sync_categories')),
+        'categoryBreakdown': _community_category_breakdown(db),
     })
 
 
@@ -2313,7 +2410,9 @@ def get_community_sync_settings():
 def update_community_sync_settings():
     """Update community-pattern sync settings.
 
-    Body: {enabled?: bool, cron?: str}. Cron expression is validated.
+    Body: {enabled?: bool, cron?: str, categories?: string[]}. Cron
+    expression is validated; categories must be a subset of the known
+    segment categories.
     """
     from utils.cron import is_valid_expression
     db = get_database()
@@ -2325,6 +2424,12 @@ def update_community_sync_settings():
         if not is_valid_expression(cron):
             return error_response(f'invalid cron expression: {cron}', 400)
         db.set_setting('community_sync_cron', cron)
+    if 'categories' in data:
+        categories, err = validate_community_sync_categories(data['categories'])
+        if err is not None:
+            return error_response(err, 400)
+        db.set_setting('community_sync_categories', json.dumps(categories), is_default=False)
+        logger.info(f"Updated community sync categories: {categories}")
     return get_community_sync_settings()
 
 

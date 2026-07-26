@@ -9,6 +9,182 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
+## [2.79.0] - 2026-07-25
+
+### Added
+
+- Community pattern categories are visible and controllable. Patterns show
+  their segment category in the patterns list and API, the community
+  settings section breaks down how many synced patterns fall in each
+  category, and checkboxes there choose which categories to accept.
+  Unchecking one deactivates its already-synced community patterns rather
+  than deleting them, and re-checking restores them on the next sync.
+  Locally created patterns are never touched. All seven categories are
+  accepted by default, so syncing behaves as before until changed.
+- Chapter generation receives the detected ad and segment positions as
+  boundary hints. Ads usually sit between show segments, so the seam where
+  one was cut is a likely topic change; the model treats these as candidate
+  boundaries and still needs the transcript to support a real change.
+  Feeds whose chapters come from the publisher or an embedded track are
+  unaffected.
+
+## [2.78.7] - 2026-07-25
+
+### Fixed
+
+- The Detection and Chapters dropdowns on the feed settings page size to
+  their content like the dropdowns above and below them. They sat in a
+  column layout that stretched them to the panel width, and the earlier
+  attempt only capped that stretch instead of stopping it.
+
+- Documentation now states plainly that segment categories are configured
+  per feed, that intro, outro, and recap are only detected when a feed
+  opts in, and that an existing prompt override forcing intro or outro
+  removal should be removed.
+
+## [2.78.6] - 2026-07-25
+
+### Fixed
+
+
+- Anthropic responses that begin with a thinking block no longer fail to
+  parse. The reader took the first content block and asked for its text;
+  with extended thinking that block has none, so verification windows and
+  chapter calls failed with "'ThinkingBlock' object has no attribute
+  'text'". It now takes the first text block and skips thinking blocks,
+  matching how the tool-use path already reads responses.
+- A single chapter produced by topic detection that returned nothing
+  usable is now flagged as degraded. Detection that fails outright was
+  already caught; a response that parses to zero boundaries was not, so a
+  90-minute episode could ship one chapter and look finished.
+
+## [2.78.5] - 2026-07-25
+
+### Fixed
+
+- Chapter generation no longer produces a single whole-episode chapter when
+  the model rejects the temperature parameter. Opus 5 joins the list of
+  models that never receive it, and the retry after a rejection now omits
+  the parameter instead of resending a default value, which could never
+  succeed. A rejection is also remembered for the rest of the run, so a
+  model MinusPod has not seen before costs one failed call rather than
+  every call. Chapter degradation is recorded in the run's processing
+  stats and logged, instead of passing silently as a finished episode.
+- The app version is resolved through a path-independent accessor. A
+  module-level import of the root version file crashed every worker at
+  boot in 2.78.4, because the container puts only the source directory on
+  the import path. A new test imports the boot-path modules under
+  container-equivalent conditions so this class of failure fails in CI,
+  and the release flow documents a container smoke check before push.
+- Regenerating chapters shows progress and a result. The control sits in a
+  menu that closes on click, so the pending state was never visible and
+  neither success nor failure was reported.
+
+### Added
+
+- A "Do not send temperature" toggle beside the stage temperature controls
+  (`omitTemperature`), for models that reject the parameter outright. The
+  per-stage temperature inputs grey out while it is on.
+
+## [2.78.4] - 2026-07-25
+
+### Added
+
+- The processing history table shows which MinusPod version processed
+  each run, so a run's results can be tied to the code that produced it.
+  Rows recorded before this release show a dash.
+
+## [2.78.3] - 2026-07-25
+
+### Fixed
+
+- Kept segments now appear in their own Kept segments section on the
+  episode page. They were being listed as rejected detections, which read
+  as though the keep setting had failed.
+
+## [2.78.2] - 2026-07-25
+
+### Fixed
+
+- Detection now repairs missing segment categories with a follow-up call.
+  When a feed uses per-category actions (or has show-segments detection on)
+  and the LLM leaves one or more found segments without a category, a
+  second call asks only for those categories before they default to
+  sponsor. It runs at most once per affected window, and never runs for a
+  feed on default (remove-everything) actions.
+
+- Categorized segments now survive the stages that run before the
+  action-gated merge. Window-level deduplication and the pattern-coverage
+  drop both discarded a detection's category, so an intro or outro set to
+  keep could be folded into an adjacent sponsor cut and removed anyway.
+  Both stages now respect the feed's per-category actions, and a span
+  fully contained inside a conflicting one is split around rather than
+  collapsed.
+
+- Feed settings: shorter labels on the show-segment toggle and the
+  re-render button, with the detail moved to helper text, so neither
+  wraps into a slab on narrow screens.
+
+## [2.78.1] - 2026-07-24
+
+### Changed
+
+- The webhook reference now documents the Feed Refresh Failed event:
+  when it fires (3 consecutive upstream fetch failures), its payload
+  variables, and a default payload example. The event is not new; only
+  the docs were missing it.
+
+- Feed settings panel: the Detection and Chapters selects no longer stretch
+  to the panel's full width, each segment-category row in the actions
+  matrix (feed and global) now shows a muted one-line description of what
+  the category covers, and the show-segments, source feed, detection mode,
+  and chapters helper text is clearer.
+
+- The webhook test button now sends one sample payload per subscribed event
+  type instead of always sending an Episode Processed sample.
+
+- Detection prompt: "category" is now required right next to the JSON schema
+  line, not only in a later block, with a non-sponsor worked example and a
+  matching category example inside the show-segments section. When a feed
+  with non-default segment actions or show-segments detection enabled still
+  gets category-less LLM responses, the detector now logs one warning per
+  run naming the feed and the count affected, since those responses silently
+  default to sponsor and can skip the feed's configured actions.
+
+## [2.78.0] - 2026-07-24
+
+### Added
+
+- Segment categories: every detected marker now carries a category (sponsor,
+  cross_promo, self_promo, interaction, and opt-in intro, outro, recap) and
+  each category resolves to an action (remove, beep, keep). Resolution
+  checks a per-feed override first, then the global default, then falls
+  back to remove. Configure the global map at Settings > Global Defaults >
+  "Segment actions", and per-feed overrides on the feed settings page under
+  the same heading, where each category starts inherited from the global
+  map until touched. Every category defaults to remove, so existing feeds
+  cut exactly as before until an action is changed. A kept marker stays in
+  the audio, bypasses validator holds and reviewer boundary checks, is
+  dropped instead of re-flagged when pass-2 verification finds it again,
+  and is excluded from the "Detections Not Cut" count, while still teaching
+  the pattern learner its category. Opt a feed into intro/outro/recap
+  detection with the "Detect intro, outro, and housekeeping segments"
+  toggle on its settings page, off by default; the other four categories
+  are always detected. A "Re-render episodes with current segment actions"
+  button on the feed settings page recuts a feed's already-processed
+  episodes against the current action maps. See [How It Works > Segment
+  Categories](docs/how-it-works.md#segment-categories) and [Configuration >
+  Segment Categories](docs/configuration.md#segment-categories) (#565).
+
+### Fixed
+
+- Both the GPU and CPU images' `org.opencontainers.image.version` OCI label
+  now reflects the running MinusPod version instead of inheriting `26.04`
+  from the `ubuntu:26.04` base image (#576).
+- react-router-dom was retired upstream; we now depend on react-router v8
+  directly, fixing GHSA-qwww-vcr4-c8h2. The temporary npm audit allowlist is
+  removed (#578).
+
 ## [2.77.1] - 2026-07-24
 
 ### Added

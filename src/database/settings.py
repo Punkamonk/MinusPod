@@ -28,6 +28,8 @@ from config import (
     AUDIO_CUE_PAIR_ORIENT_WINDOW_SECONDS,
     SILENCE_SNAP_NOISE_DB, SILENCE_SNAP_MIN_DURATION_SECONDS,
     SILENCE_SNAP_MAX_DISTANCE_SECONDS,
+    resolve_segment_category_actions_map,
+    resolve_community_sync_categories, DEFAULT_COMMUNITY_SYNC_CATEGORIES_JSON,
 )
 from secrets_crypto import (
     CryptoUnavailableError, decrypt, encrypt, is_ciphertext,
@@ -144,6 +146,16 @@ def _payload_max_audio_download_mb() -> int:
                               floor=MAX_AUDIO_DOWNLOAD_MB_MIN, settings={})
 
 
+def _payload_segment_category_actions() -> Dict[str, str]:
+    return resolve_segment_category_actions_map(
+        registry_default('segment_category_actions'))
+
+
+def _payload_community_sync_categories() -> List[str]:
+    return resolve_community_sync_categories(
+        registry_default('community_sync_categories'))
+
+
 @dataclass(frozen=True)
 class SettingSpec:
     """One global setting.
@@ -255,6 +267,19 @@ SETTINGS_REGISTRY: Dict[str, SettingSpec] = {
     'max_feed_episodes': SettingSpec(
         default='300', seeded=True, resettable=False,
         payload_key='maxFeedEpisodes', payload_kind='int'),
+    # Global per-category segment action overrides (issue #565): JSON map of
+    # category -> action; unset categories fall back to DEFAULT_SEGMENT_ACTION.
+    'segment_category_actions': SettingSpec(
+        default='{}', seeded=True, resettable=False,
+        payload_key='segmentCategoryActions',
+        payload_factory=_payload_segment_category_actions),
+    # Per-category community-sync acceptance: JSON list of accepted
+    # categories. Default is every SEGMENT_CATEGORIES entry so an upgrade
+    # with an unset row imports exactly as before this setting existed.
+    'community_sync_categories': SettingSpec(
+        default=DEFAULT_COMMUNITY_SYNC_CATEGORIES_JSON, seeded=True,
+        resettable=False, payload_key='communitySyncCategories',
+        payload_factory=_payload_community_sync_categories),
     'rss_refresh_interval_minutes': SettingSpec(
         default='15', seeded=True, resettable=False,
         payload_key='rssRefreshIntervalMinutes', payload_kind='int'),
@@ -348,6 +373,12 @@ SETTINGS_REGISTRY: Dict[str, SettingSpec] = {
         payload_key='minContentBetweenAdsSeconds', payload_kind='float'),
 
     # -- LLM provider (env-backed keys resolve via ENV_BACKED_SETTINGS) --
+    # Operator override: skip temperature on every LLM call, taking precedence
+    # over _ANTHROPIC_NO_SAMPLING_MODELS and the learned-rejection memo in
+    # llm_capabilities.model_omits_temperature(), for models newly rejecting it.
+    'omit_temperature': SettingSpec(
+        default='false', seeded=True, resettable=False,
+        payload_key='omitTemperature', payload_kind='bool'),
     'llm_provider': SettingSpec(
         env_backed=True, seeded=True,
         in_ad_reset=True, payload_key='llmProvider',

@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.77.1
+  version: 2.79.0
   contact:
     name: MinusPod
   license:
@@ -663,6 +663,19 @@ paths:
                     - boolean
                     - 'null'
                   description: Per-feed override. true hides non-processed episodes; false shows everything; null falls back to the global onlyExposeProcessedDefault setting.
+                segmentCategoryActions:
+                  type:
+                    - object
+                    - 'null'
+                  additionalProperties:
+                    type: string
+                    enum: [remove, beep, keep]
+                  description: Per-feed segment-category action overrides (issue #565). A partial map; only the listed categories override the resolved global default, unlisted categories still inherit. The stored map is replaced outright by each PATCH, not merged, so send the full set of overrides you want kept. Null clears every override back to inherit.
+                detectShowSegments:
+                  type:
+                    - boolean
+                    - 'null'
+                  description: Per-feed opt-in to detect intro, outro, and recap/housekeeping segments in addition to the always-detected ad-side categories. Null and false both mean off, the default.
       responses:
         '200':
           description: Feed updated successfully
@@ -3555,6 +3568,22 @@ paths:
                 podpingEnabled:
                   type: boolean
                   description: Opt-in listener that polls public Hive API nodes for Podping publish notifications and refreshes a matching feed immediately. Off by default.
+                segmentCategoryActions:
+                  type: object
+                  additionalProperties:
+                    type: string
+                    enum: [remove, beep, keep]
+                  description: Partial global segment-category action map (issue #565). Merged over the stored global map; a category omitted here keeps its current global action. Every category defaults to remove, so an install upgrades with byte-identical behavior until an action is changed.
+                  example: {sponsor: remove, cross_promo: keep, self_promo: beep}
+                communitySyncCategories:
+                  type: array
+                  items:
+                    type: string
+                    enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
+                  description: |
+                    Segment categories accepted from community pattern sync. Default is
+                    every category, so an install upgrades with unchanged sync behavior
+                    until a category is unchecked. Replaces the stored list outright.
                 artworkWatermarkEnabled:
                   type: boolean
                   description: When true, the served feed's channel cover art gets a MinusPod badge overlaid so the filtered feed is distinct in a podcast app (issue #420). Off by default.
@@ -3615,6 +3644,14 @@ paths:
                   description: LLM provider to use (anthropic, openrouter, openai-compatible, ollama)
                   enum: [anthropic, openai-compatible, ollama, openrouter]
                   example: anthropic
+                omitTemperature:
+                  type: boolean
+                  description: |
+                    Operator override: when true, omit the temperature parameter from every
+                    LLM call, for every model, regardless of the built-in list of models known
+                    to reject it or anything learned at runtime from a prior rejection. Use
+                    ahead of a newly-released model that rejects temperature, without waiting
+                    for a failed call or a code change. Off by default.
                 openaiBaseUrl:
                   type: string
                   description: Base URL for OpenAI-compatible API endpoint (only used when provider is not anthropic)
@@ -4810,7 +4847,7 @@ paths:
         - Settings
       summary: Test a webhook
       description: |
-        Send a test event to a webhook endpoint to verify it is reachable and correctly configured. Rate limited to 10/min.
+        Send one test payload per event the webhook is subscribed to, matching each event's real payload shape (`test: true` set on every payload). Falls back to a single Episode Processed sample when the webhook's event list is empty. Rate limited to 10/min.
       operationId: testWebhook
       parameters:
         - $ref: '#/components/parameters/webhook_id'
@@ -4824,8 +4861,19 @@ paths:
                 properties:
                   success:
                     type: boolean
+                    description: 'true only when every event delivered'
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        event:
+                          type: string
+                        delivered:
+                          type: boolean
                   message:
                     type: string
+                    description: 'Summary, e.g. "3 of 3 test payloads delivered"'
         '404':
           $ref: '#/components/responses/NotFound'
         '429':
@@ -5354,6 +5402,35 @@ paths:
         '400':
           description: Unknown or invalid tag(s)
 
+  /feeds/{slug}/rerender-segments:
+    post:
+      summary: Re-cut every processed episode of a feed against the current segment-category action maps
+      description: >
+        Queues the existing per-episode recut (reprocess_mode=recut) for every
+        processed episode of the feed that still has a retained original,
+        saved transcript segments, and ad detections. Each recut re-resolves
+        segment-category actions against the current per-feed/global maps, so
+        this is the bulk trigger for applying a changed segment-category
+        setting to already-processed episodes.
+      tags: [Feeds]
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Recut queued for qualifying episodes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued:  { type: integer }
+                  skipped: { type: integer }
+        '404':
+          description: Feed not found
+
   /sponsors/{sponsor_id}/tags:
     put:
       summary: Update a sponsor's tags
@@ -5449,6 +5526,15 @@ paths:
               properties:
                 enabled: { type: boolean }
                 cron: { type: string }
+                categories:
+                  type: array
+                  items:
+                    type: string
+                    enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
+                  description: |
+                    Segment categories to accept from community sync. Unchecking a
+                    category deactivates (not deletes) its already-synced community
+                    patterns; re-checking it reactivates them on the next sync.
       responses:
         '200':
           description: Updated settings
@@ -7012,6 +7098,20 @@ components:
           type: string
           nullable: true
           description: JSON-encoded summary of the last sync (counts + manifest version)
+        categories:
+          type: array
+          items:
+            type: string
+            enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
+          description: |
+            Segment categories this install accepts from community sync
+            (community_sync_categories setting). Default is every category, so
+            an upgrade with this never configured syncs exactly as before.
+        categoryBreakdown:
+          type: object
+          description: Count of currently-active (synced) community patterns per category.
+          additionalProperties:
+            type: integer
 
     CommunitySyncSummary:
       type: object
@@ -7021,6 +7121,11 @@ components:
         deleted:  { type: integer }
         skipped:  { type: integer }
         errors:   { type: integer }
+        filtered:
+          type: integer
+          description: >-
+            Entries not inserted/updated because their category is not in
+            community_sync_categories.
         manifest_version: { type: string }
         fetched_at: { type: string }
 
@@ -7355,6 +7460,19 @@ components:
             - boolean
             - 'null'
           description: Per-feed override for hiding upstream episodes whose status is not 'processed' from the served RSS feed. Null means use the global onlyExposeProcessedDefault setting. true/false override the global for this feed (issue #181).
+        segmentCategoryActions:
+          type:
+            - object
+            - 'null'
+          additionalProperties:
+            type: string
+            enum: [remove, beep, keep]
+          description: Per-feed segment-category action overrides (issue #565). Only the overridden categories are present; a category absent here inherits the global default. Null when the feed has no overrides.
+        detectShowSegments:
+          type:
+            - boolean
+            - 'null'
+          description: Whether this feed detects intro, outro, and recap/housekeeping segments in addition to the always-detected ad-side categories. Null and false both mean off, the default.
 
     EpisodeSummary:
       type: object
@@ -7441,6 +7559,11 @@ components:
             pendingReviewMarkers:
               type: array
               description: Ads held for human review (held_for_review=true, not yet cut or dismissed)
+              items:
+                $ref: '#/components/schemas/AdMarker'
+            keptMarkers:
+              type: array
+              description: Segments deliberately left in the audio by a per-category keep action (action_applied=keep, not held for review). Distinct from rejectedAdMarkers, which holds flagged-but-not-kept-on-purpose detections.
               items:
                 $ref: '#/components/schemas/AdMarker'
             cueDetections:
@@ -7734,6 +7857,17 @@ components:
           enum: [first_pass, claude, fingerprint, text_pattern, language, audio_enforced, verification, dai_differential]
           description: Which detection stage found this ad
           example: first_pass
+        category:
+          type: string
+          enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
+          description: What kind of content this span is. LLM detection stages emit it directly; fingerprint, text-pattern, and differential stages default to sponsor. An unknown or missing value falls back to sponsor at marker-save time.
+          example: sponsor
+        actionApplied:
+          type: string
+          nullable: true
+          enum: [remove, beep, keep, null]
+          description: The action resolved for this marker's category at cut time (per-feed override, else global default, else remove). Null for a marker that has not gone through action resolution.
+          example: remove
         approved:
           type: boolean
           description: >-
@@ -8387,6 +8521,31 @@ components:
               type: boolean
             isDefault:
               type: boolean
+        segmentCategoryActions:
+          type: object
+          description: Global segment-category action map (issue #565). Every category defaults to remove.
+          properties:
+            value:
+              type: object
+              additionalProperties:
+                type: string
+                enum: [remove, beep, keep]
+            isDefault:
+              type: boolean
+        communitySyncCategories:
+          type: object
+          description: |
+            Segment categories accepted from community pattern sync (issue #565
+            follow-up). Default is every category, so an upgrade with this never
+            configured syncs exactly as before.
+          properties:
+            value:
+              type: array
+              items:
+                type: string
+                enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
+            isDefault:
+              type: boolean
         artworkWatermarkEnabled:
           type: object
           properties:
@@ -8430,6 +8589,17 @@ components:
             value:
               type: string
               description: Active LLM provider (anthropic, openrouter, openai-compatible, ollama)
+            isDefault:
+              type: boolean
+        omitTemperature:
+          type: object
+          description: |
+            Operator override: when true, temperature is omitted from every LLM call for
+            every model, regardless of the built-in list of models known to reject it or
+            anything learned at runtime from a prior rejection. Off by default.
+          properties:
+            value:
+              type: boolean
             isDefault:
               type: boolean
         openaiBaseUrl:
@@ -8564,6 +8734,18 @@ components:
               type: integer
             podpingEnabled:
               type: boolean
+            omitTemperature:
+              type: boolean
+            segmentCategoryActions:
+              type: object
+              additionalProperties:
+                type: string
+                enum: [remove, beep, keep]
+            communitySyncCategories:
+              type: array
+              items:
+                type: string
+                enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
             artworkWatermarkEnabled:
               type: boolean
             feedAuthEnabled:
@@ -8741,6 +8923,15 @@ components:
         updated_at:
           type: string
           format: date-time
+        category:
+          type: string
+          enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
+          description: |
+            What kind of content this pattern matches (issue #565). A NULL/legacy
+            row normalizes to 'sponsor' when read, so this is always present.
+            Community-shared patterns carry their category through sync; a
+            per-install community_sync_categories setting controls which
+            categories are accepted from community sync.
 
     Network:
       type: object
@@ -8881,6 +9072,11 @@ components:
             - number
             - 'null'
           description: Duration of the downloaded copy this run processed, in seconds. Null for runs recorded before 2.53.0.
+        appVersion:
+          type:
+            - string
+            - 'null'
+          description: MinusPod version that produced this run. Null for runs recorded before 2.78.4.
 
     Sponsor:
       type: object

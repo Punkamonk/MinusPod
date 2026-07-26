@@ -20,6 +20,7 @@ Configuration via environment variables:
         OPENAI_API_KEY: API key if required (default: "not-needed")
 """
 
+import json
 import logging
 import os
 import socket
@@ -54,11 +55,14 @@ from config import (
     PROVIDER_OPENROUTER,
     PROVIDER_OLLAMA,
     PROVIDERS_NON_ANTHROPIC,
+    coerce_bool_setting,
 )
 from llm_capabilities import (
     get_pass_defaults,
     is_fallback_eligible_error,
     is_fallback_set,
+    is_temperature_rejection_error,
+    mark_model_omits_temperature,
     model_omits_temperature,
     set_fallback,
     translate_reasoning_effort,
@@ -221,6 +225,13 @@ def model_matches_provider(model_id: str, provider: str) -> bool:
     return not is_claude_model
 
 
+def _omit_temperature_override() -> bool:
+    """DB-backed operator override (settings.omit_temperature), read through
+    the same short-TTL cache as other provider settings so it isn't a DB
+    read on every call. See llm_capabilities.model_omits_temperature()."""
+    return coerce_bool_setting(_get_cached_setting('omit_temperature'))
+
+
 def get_effective_base_url() -> str:
     """Return the active OpenAI base URL, checking DB first then env var."""
     db_val = _get_cached_setting('openai_base_url')
@@ -326,6 +337,20 @@ def _log_fallback(
     )
 
 
+def _log_temperature_omission(
+    provider_label: str,
+    episode_id: Optional[str],
+    pass_name: Optional[str],
+    model: str,
+    error: Exception,
+) -> None:
+    logger.warning(
+        f"[{episode_id}:{pass_name}] {provider_label} rejected temperature "
+        f"for model={model}: {error}. Retrying with temperature omitted "
+        f"(remembered for the rest of this process)."
+    )
+
+
 class LLMClient(ABC):
     """Abstract base class for LLM clients."""
 
@@ -410,6 +435,22 @@ class LLMClient(ABC):
         try:
             return send_fn(eff_max, eff_temp, eff_reasoning), eff_max, eff_temp, eff_reasoning
         except Exception as e:
+            if is_temperature_rejection_error(e):
+                # The model rejects temperature outright (Anthropic's
+                # adaptive-thinking generation); a default-temperature retry
+                # would 400 identically. Self-heal: mark_model_omits_temperature()
+                # makes model_omits_temperature() return True for `model` from
+                # now on, so re-invoking send_fn here picks that up immediately.
+                _log_temperature_omission(provider_label, episode_id, pass_name, model, e)
+                mark_model_omits_temperature(model)
+                try:
+                    response = send_fn(eff_max, eff_temp, eff_reasoning)
+                except Exception as e2:
+                    if not is_rate_limit_error(e2):
+                        self._record_circuit_breaker(success=False)
+                    raise
+                return response, eff_max, eff_temp, eff_reasoning
+
             will_fallback = _should_fallback_retry(e, episode_id, pass_name)
             if not is_rate_limit_error(e) and not will_fallback:
                 self._record_circuit_breaker(success=False)
@@ -518,13 +559,28 @@ class AnthropicClient(LLMClient):
         self._check_circuit_breaker()
         self._ensure_client()
 
-        # Anthropic doesn't support response_format natively;
-        # inject JSON instructions into the system prompt when requested
+        # Anthropic doesn't support response_format natively; inject JSON
+        # instructions into the system prompt when requested. A 'json_schema'
+        # request forces a tool call below instead; the two are mutually exclusive.
         effective_system = system
         if response_format and response_format.get('type') == 'json_object':
             if '<output_format>' not in system:
                 effective_system = system + _JSON_FORMAT_SYSTEM_INSTRUCTION
                 logger.debug("Added JSON format instructions to system prompt")
+
+        # 'json_schema' forces a tool call so the Messages API validates the
+        # response against the tool's input_schema (gated by
+        # llm_capabilities.supports_json_schema): a real guarantee instead of
+        # prompt-injected instructions the model can ignore.
+        tool_spec = None
+        if response_format and response_format.get('type') == 'json_schema':
+            schema_cfg = response_format.get('json_schema') or {}
+            tool_spec = {
+                "name": schema_cfg.get('name', 'structured_output'),
+                "description": schema_cfg.get(
+                    'description', 'Return the structured result.'),
+                "input_schema": schema_cfg.get('schema', {"type": "object"}),
+            }
 
         # If a previous call in this pass already tripped the fallback flag,
         # use the built-in defaults from llm_capabilities instead of user values.
@@ -532,9 +588,12 @@ class AnthropicClient(LLMClient):
             episode_id, pass_name, max_tokens, temperature, reasoning_effort
         )
 
-        omit_temperature = model_omits_temperature(model)
+        # Operator override (settings.omit_temperature) takes priority over
+        # the static list / learned memo; see model_omits_temperature().
+        omit_temp_override = _omit_temperature_override()
+
         self._log_messages("Anthropic", effective_system, messages, model,
-                           None if omit_temperature else eff_temp, eff_max)
+                           None if model_omits_temperature(model, omit_temp_override) else eff_temp, eff_max)
 
         def _send(tok, tmp, reasoning):
             kw = dict(
@@ -545,9 +604,14 @@ class AnthropicClient(LLMClient):
                 timeout=timeout,
             )
             # Anthropic's adaptive-thinking models reject temperature with a 400.
-            if not omit_temperature:
+            # Re-consulted on every call (not hoisted) so a retry after
+            # mark_model_omits_temperature() picks up the freshly-learned state.
+            if not model_omits_temperature(model, omit_temp_override):
                 kw["temperature"] = tmp
             kw.update(translate_reasoning_effort(PROVIDER_ANTHROPIC, reasoning))
+            if tool_spec is not None:
+                kw["tools"] = [tool_spec]
+                kw["tool_choice"] = {"type": "tool", "name": tool_spec["name"]}
             # 429 is throttling, not a provider failure; 4xx tunable rejections
             # also skip the breaker because the _send_with_fallback wrapper is
             # about to retry. Both are handled in the wrapper.
@@ -563,7 +627,25 @@ class AnthropicClient(LLMClient):
 
         self._record_circuit_breaker(success=True)
 
-        content = (response.content[0].text or "") if response.content else ""
+        if tool_spec is not None:
+            # Forced tool_choice guarantees exactly one tool_use block; its
+            # `input` is the schema-validated answer. Re-serialize to JSON
+            # text since downstream parsing expects a JSON string.
+            content = ""
+            for block in (response.content or []):
+                if getattr(block, 'type', None) == 'tool_use':
+                    content = json.dumps(block.input)
+                    break
+        else:
+            # Extended thinking (temperature omitted) puts a ThinkingBlock or
+            # redacted_thinking block first; the answer is in a later text
+            # block. Find it instead of assuming content[0] is text.
+            content = ""
+            for block in (response.content or []):
+                text = getattr(block, 'text', None)
+                if getattr(block, 'type', None) == 'text' and text is not None:
+                    content = text
+                    break
 
         self._warn_if_truncated(
             getattr(response, 'stop_reason', None), eff_max, model
@@ -698,9 +780,12 @@ class OpenAICompatibleClient(LLMClient):
             episode_id, pass_name, max_tokens, temperature, reasoning_effort
         )
 
-        omit_temperature = model_omits_temperature(model)
+        # Operator override (settings.omit_temperature) takes priority over
+        # the static list / learned memo; see model_omits_temperature().
+        omit_temp_override = _omit_temperature_override()
+
         self._log_messages("OpenAI", system, messages, model,
-                           None if omit_temperature else eff_temp, eff_max)
+                           None if model_omits_temperature(model, omit_temp_override) else eff_temp, eff_max)
 
         # Newer OpenAI models require max_completion_tokens instead of max_tokens.
         # Try cached param first, fallback on error.
@@ -720,7 +805,9 @@ class OpenAICompatibleClient(LLMClient):
             }
             # Anthropic's adaptive-thinking models (e.g. via OpenRouter) reject
             # temperature with a 400; omit it rather than let the request fail.
-            if not omit_temperature:
+            # Re-consulted on every call (not hoisted) so a retry after
+            # mark_model_omits_temperature() picks up the freshly-learned state.
+            if not model_omits_temperature(model, omit_temp_override):
                 kw["temperature"] = tmp
             if response_format:
                 if self._get_json_format_supported() is False:
@@ -901,7 +988,9 @@ class OpenAICompatibleClient(LLMClient):
             "timeout": HTTP_TIMEOUT_API,
         }
         # No-sampling Anthropic models (e.g. via OpenRouter) reject temperature.
-        if not model_omits_temperature(model):
+        # Operator override (settings.omit_temperature) takes priority over
+        # the static list / learned memo; see model_omits_temperature().
+        if not model_omits_temperature(model, _omit_temperature_override()):
             probe_kwargs["temperature"] = 0.0
         try:
             self._client.chat.completions.create(**probe_kwargs)

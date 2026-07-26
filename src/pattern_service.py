@@ -917,6 +917,7 @@ class PatternService:
                     scope='podcast',
                     podcast_id=slug,
                     episode_id=episode_id,
+                    category=ad.get('category'),
                 )
                 if pattern_id:
                     logger.info(
@@ -1081,8 +1082,7 @@ class PatternService:
             elif version <= int(existing.get('version') or 1):
                 return existing['id']
 
-            self.db.update_ad_pattern(
-                existing['id'],
+            update_kwargs = dict(
                 text_template=data['text_template'],
                 intro_variants=data.get('intro_variants') or [],
                 outro_variants=data.get('outro_variants') or [],
@@ -1092,6 +1092,11 @@ class PatternService:
                 source_language=data.get('source_language'),
                 content_hash=content_hash,
             )
+            # Overwrite category only when the payload carries the key: an
+            # old-format payload (no 'category' key) must not null out a stored category.
+            if 'category' in data:
+                update_kwargs['category'] = data.get('category')
+            self.db.update_ad_pattern(existing['id'], **update_kwargs)
             return existing['id']
 
         # Force scope=global. Older bundles (and the 2.4.0 seed files
@@ -1116,5 +1121,6 @@ class PatternService:
             protected_from_sync=0,
             source_language=data.get('source_language'),
             content_hash=content_hash,
+            category=data.get('category'),
         )
         return pattern_id

@@ -184,7 +184,8 @@ TABLE_DDL['ad_patterns'] = """CREATE TABLE IF NOT EXISTS ad_patterns (
     submitted_app_version TEXT,
     protected_from_sync INTEGER NOT NULL DEFAULT 0,
     source_language TEXT,
-    content_hash TEXT
+    content_hash TEXT,
+    category TEXT
 )"""
 
 TABLE_DDL['pattern_corrections'] = """CREATE TABLE IF NOT EXISTS pattern_corrections (
@@ -250,10 +251,14 @@ TABLE_DDL['processing_history'] = """CREATE TABLE IF NOT EXISTS processing_histo
     input_tokens INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
     llm_cost REAL DEFAULT 0.0,
+    audio_cues_detected INTEGER DEFAULT 0,
     -- Per-run pipeline stats (#519): JSON blob assembled by process_episode
     -- (downloaded duration, windows, stage hits, marker buckets, verification).
     processing_stats_json TEXT,
     created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    -- MinusPod version that produced this run (2.78.4); NULL for rows
+    -- recorded before this release.
+    app_version TEXT,
     FOREIGN KEY (podcast_id) REFERENCES podcasts(id) ON DELETE CASCADE
 )"""
 

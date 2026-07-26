@@ -392,6 +392,9 @@ def _strip_metadata(pattern: Dict, sponsor_row: Dict) -> Dict:
         'sponsor_aliases': sponsor_aliases,
         'sponsor_tags': sponsor_tags,
         'source_language': pattern.get('source_language'),
+        # Segment category (#565), when present. Omitting it stays backward
+        # compatible: import defaults a missing key to 'sponsor', same as a NULL column.
+        'category': pattern.get('category'),
     }
 
 

@@ -1,5 +1,6 @@
 import type { DetectionStage } from '../utils/detectionStage';
 import type { CorroborationSource } from '../utils/corroboration';
+import type { SegmentCategory, SegmentAction } from '../utils/segmentCategory';
 
 // Per-feed episode status counts (#466). Keys use the API status aliases
 // (DB 'processed' arrives as 'completed'); 'deferred' is the offline queue.
@@ -80,6 +81,12 @@ export interface Feed {
   processingMode?: 'passthrough' | 'skip_detection' | 'keep_content' | 'standard';
   maxEpisodes?: number | null;
   onlyExposeProcessedEpisodes?: boolean | null;
+  // Per-feed segment-action overrides (issue #565): only overridden
+  // categories are present (others inherit the global map); null/absent
+  // means there are no per-feed overrides at all.
+  segmentCategoryActions?: Partial<Record<SegmentCategory, SegmentAction>> | null;
+  // Also detect intro/outro/recap/housekeeping segments. Off by default.
+  detectShowSegments?: boolean | null;
 }
 
 export interface AdDistributionZone {
@@ -150,6 +157,10 @@ export interface EpisodeDetail extends Episode {
   adMarkers?: AdSegment[];
   rejectedAdMarkers?: AdSegment[];
   pendingReviewMarkers?: AdSegment[];
+  // Segments deliberately left in the audio by a per-category keep action
+  // (action_applied='keep'). Distinct from rejectedAdMarkers: a deliberate
+  // configuration outcome, not a rejected detection.
+  keptMarkers?: AdSegment[];
   corrections?: EpisodeCorrection[];
   cueDetections?: CueDetection[];
   originalDuration?: number;
@@ -297,6 +308,12 @@ export interface AdSegment {
   // identified as the actual ad. Enables approving the trimmed span.
   reviewer_proposed_start?: number;
   reviewer_proposed_end?: number;
+  // What kind of content this span is (issue #565); defaults to 'sponsor'
+  // server-side so the key is always present in practice.
+  category?: SegmentCategory;
+  // What the resolved segment-action map did with this marker's category.
+  // Null when the marker predates the feature or the action never resolved.
+  actionApplied?: SegmentAction | null;
 }
 
 export interface SettingValue {
@@ -353,6 +370,7 @@ export interface Settings {
   maxFeedEpisodes: SettingValueNumber;
   podpingEnabled: SettingValueBoolean;
   rssRefreshIntervalMinutes: SettingValueNumber;
+  segmentCategoryActions: { value: Record<SegmentCategory, SegmentAction>; isDefault: boolean };
   onlyExposeProcessedDefault: SettingValueBoolean;
   artworkWatermarkEnabled: SettingValueBoolean;
   feedAuthEnabled: SettingValueBoolean;
@@ -411,6 +429,7 @@ export interface Settings {
   whisperLanguage: SettingValue;
   whisperComputeType: SettingValue;
   llmProvider: SettingValue;
+  omitTemperature: SettingValueBoolean;
   openaiBaseUrl: SettingValue;
   pricingSourceMode: SettingValue;
   apiKeyConfigured: boolean;
@@ -435,6 +454,7 @@ export interface Settings {
     maxFeedEpisodes: number;
     podpingEnabled: boolean;
     rssRefreshIntervalMinutes: number;
+    segmentCategoryActions: Record<SegmentCategory, SegmentAction>;
     onlyExposeProcessedDefault: boolean;
     artworkWatermarkEnabled: boolean;
     feedAuthEnabled: boolean;
@@ -443,6 +463,7 @@ export interface Settings {
     chaptersModel: string;
     minCutConfidence: number;
     llmProvider: LlmProvider;
+    omitTemperature: boolean;
     openaiBaseUrl: string;
     pricingSourceMode: string;
     openrouterBaseUrl: string;
@@ -515,6 +536,10 @@ export interface UpdateSettingsPayload {
   maxFeedEpisodes?: number;
   podpingEnabled?: boolean;
   rssRefreshIntervalMinutes?: number;
+  // Partial map: only the categories being changed need to be present. The
+  // backend merges this over the stored global map (unlike the per-feed
+  // PATCH, which replaces the stored map outright).
+  segmentCategoryActions?: Partial<Record<SegmentCategory, SegmentAction>>;
   onlyExposeProcessedDefault?: boolean;
   artworkWatermarkEnabled?: boolean;
   feedAuthEnabled?: boolean;
@@ -600,6 +625,7 @@ export interface UpdateSettingsPayload {
   ollamaNumCtx?: number | null;
   windowSizeSeconds?: number | null;
   windowOverlapSeconds?: number | null;
+  omitTemperature?: boolean;
 }
 
 export type ReasoningLevel = 'none' | 'low' | 'medium' | 'high';
@@ -728,6 +754,9 @@ export interface ProcessingHistoryEntry {
   // Duration of the downloaded copy this run processed; null for runs
   // recorded before 2.53.0 (#519).
   downloadedDuration?: number | null;
+  // MinusPod version that produced this run; null for runs recorded
+  // before 2.78.4.
+  appVersion?: string | null;
 }
 
 export interface ProcessingHistoryResponse {

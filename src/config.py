@@ -3,10 +3,11 @@
 All magic numbers and thresholds should be defined here
 for easy tuning and consistency across the codebase.
 """
+import json
 import logging
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 _tunable_logger = logging.getLogger(__name__)
@@ -49,6 +50,66 @@ HOLD_REASON_DIFFERENTIAL_UNCORROBORATED = 'differential_uncorroborated'
 # confidence to auto-cut, too high to silently discard (see
 # _gate_verification_ads_by_confidence's fall-through in processing.py).
 HOLD_REASON_VERIFICATION_MISS = 'verification_miss'
+
+# Segment categories (issue #565): what kind of content a marker spans.
+# normalize_segment_category stamps this at the ad_detector merge seam, so
+# 'category' is always one of these regardless of the producing stage.
+SEGMENT_CATEGORIES = ('sponsor', 'cross_promo', 'self_promo', 'interaction',
+                      'intro', 'outro', 'recap')
+SEGMENT_ACTIONS = ('remove', 'beep', 'keep')
+DEFAULT_SEGMENT_ACTION = 'remove'
+
+
+def normalize_segment_category(value: Any) -> str:
+    """Return value if it is a known segment category, else 'sponsor'."""
+    return value if value in SEGMENT_CATEGORIES else 'sponsor'
+
+
+# Per-category community-sync acceptance (issue #565): which categories this
+# install pulls from community sync. Defaults to every category, so an
+# upgrade with an unset setting syncs exactly as it did before this feature.
+DEFAULT_COMMUNITY_SYNC_CATEGORIES_JSON = json.dumps(list(SEGMENT_CATEGORIES))
+
+
+def resolve_community_sync_categories(raw_json: Optional[str]) -> List[str]:
+    """Parse community_sync_categories JSON into accepted categories, falling
+    back to every category on missing, blank, or malformed input. An explicit
+    empty list is kept as-is (deliberate 'accept nothing'), not treated as unset.
+    """
+    if not raw_json:
+        return list(SEGMENT_CATEGORIES)
+    try:
+        parsed = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return list(SEGMENT_CATEGORIES)
+    if not isinstance(parsed, list):
+        return list(SEGMENT_CATEGORIES)
+    return [c for c in parsed if c in SEGMENT_CATEGORIES]
+
+
+def resolve_segment_category_actions_map(
+        raw_json: Optional[str],
+        baseline: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Parse segment_category_actions JSON and merge over `baseline` (default:
+    every category at DEFAULT_SEGMENT_ACTION). Invalid JSON, non-dict payloads,
+    and unknown category/action pairs are ignored rather than clearing keys.
+    Pass a prior result as `baseline` to layer another override on top.
+    """
+    merged = dict(baseline) if baseline is not None else {
+        cat: DEFAULT_SEGMENT_ACTION for cat in SEGMENT_CATEGORIES}
+    if not raw_json:
+        return merged
+    try:
+        parsed = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return merged
+    if not isinstance(parsed, dict):
+        return merged
+    for cat, action in parsed.items():
+        if cat in SEGMENT_CATEGORIES and action in SEGMENT_ACTIONS:
+            merged[cat] = action
+    return merged
+
 
 # Hold reasons pass-2 auto-approval may release when the verification pass
 # independently re-detects the held span at cut confidence. Deliberate
@@ -118,9 +179,12 @@ def count_pending_review(markers) -> int:
 def count_not_cut(markers) -> int:
     """Number of markers that stayed in the audio and are not pending review
     (e.g. a rejected correction). Missing was_cut defaults to True (cut),
-    matching is_pending_review's convention."""
+    matching is_pending_review's convention. A keep-action marker is
+    intentionally left in the audio, not a miss, so it's excluded here:
+    it must never inflate the notification-facing not-cut/miss count."""
     return sum(1 for m in markers
-               if not m.get('was_cut', True) and not is_pending_review(m))
+               if not m.get('was_cut', True) and not is_pending_review(m)
+               and m.get('action_applied') != 'keep')
 
 # Ad evidence thresholds
 CONTENT_DURATION_THRESHOLD = 120.0  # Segments >= this without evidence are likely content

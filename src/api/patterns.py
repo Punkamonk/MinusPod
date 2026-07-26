@@ -375,6 +375,7 @@ def get_merge_suggestions():
                     'text_template': (m.get('text_template') or '')[:300],
                     'confirmation_count': m.get('confirmation_count', 0),
                     'false_positive_count': m.get('false_positive_count', 0),
+                    'category': m.get('category'),
                 }
                 for m in members
             ],
@@ -1018,6 +1019,25 @@ def _load_markers(db, slug, episode_id):
         return None
 
 
+def _find_marker_by_bounds(db, slug, episode_id, start, end, tol=0.5):
+    """Find the persisted marker matching (start, end) within tolerance,
+    regardless of pending-review state (unlike _matches_held_marker). A
+    keep-resolved marker clears its hold, so it's never pending review and
+    a pending-review-scoped lookup would miss it.
+
+    Returns the marker dict, or None if no match.
+    """
+    markers = _load_markers(db, slug, episode_id)
+    if not markers:
+        return None
+    for m in markers:
+        m_start, m_end = m.get('start'), m.get('end')
+        if (m_start is not None and m_end is not None
+                and abs(m_start - start) <= tol and abs(m_end - end) <= tol):
+            return m
+    return None
+
+
 def _clear_held_marker_on_reject(db, slug, episode_id, start, end, tol=0.5,
                                  markers=None):
     """When the rejected range matches a held marker, demote it to a plain
@@ -1243,6 +1263,16 @@ def submit_correction(slug, episode_id):
     if original_start is None or original_end is None:
         return error_response('Missing original ad boundaries', 400)
 
+    # A keep-resolved marker is a final per-feed decision to leave the
+    # segment in; it's never pending review, so this guard only catches a
+    # stale client payload. Must never create a correction row or
+    # cross-episode false-positive text for it.
+    target_marker = _find_marker_by_bounds(db, slug, episode_id, original_start, original_end)
+    if target_marker is not None and target_marker.get('action_applied') == 'keep':
+        return error_response(
+            'This segment is kept for this feed and cannot be corrected', 409
+        )
+
     if correction_type == 'confirm':
         return _handle_confirm_correction(
             db, pattern_service, slug, episode_id, original_ad, data
@@ -1309,6 +1339,9 @@ def export_patterns():
             'false_positive_count': pattern.get('false_positive_count', 0),
             'is_active': pattern.get('is_active', True),
             'created_at': pattern.get('created_at'),
+            # Already normalized to 'sponsor' for a NULL/legacy row by
+            # _row_with_category; read as-is (issue #565).
+            'category': pattern.get('category'),
         }
 
         # Include network/podcast IDs for scoped patterns
@@ -1383,6 +1416,7 @@ def _upsert_import_pattern(db, conn, pattern_data, existing, mode):
             'intro_variants': pattern_data.get('intro_variants'),
             'outro_variants': pattern_data.get('outro_variants'),
             'sponsor_id': pattern_data.get('_sponsor_id'),
+            'category': pattern_data.get('category'),
         }
         updates = {k: v for k, v in updates.items() if v is not None}
         if updates:
@@ -1399,7 +1433,8 @@ def _upsert_import_pattern(db, conn, pattern_data, existing, mode):
         network_id=pattern_data.get('network_id'),
         dai_platform=pattern_data.get('dai_platform'),
         intro_variants=pattern_data.get('intro_variants'),
-        outro_variants=pattern_data.get('outro_variants')
+        outro_variants=pattern_data.get('outro_variants'),
+        category=pattern_data.get('category'),
     )
     return 'imported'
 

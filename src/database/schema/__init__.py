@@ -312,6 +312,13 @@ class SchemaMixin:
             ('chapters_mode', 'TEXT'),
             # Last received podping timestamp (podping-listener feature)
             ('last_podping_at', 'TEXT'),
+            # Per-feed segment category action overrides (issue #565): partial
+            # JSON map of category -> action, merged over the global
+            # segment_category_actions setting at resolve time.
+            ('segment_category_actions', 'TEXT'),
+            # Per-feed opt-in for show-segment (intro/outro/recap) detection
+            # (issue #565); NULL/0 = off, 1 = on, no global to inherit.
+            ('detect_show_segments', 'INTEGER'),
         ]
         for col, definition in podcasts_migrations:
             self._add_column_if_missing(conn, 'podcasts', col, definition, pod_cols)
@@ -422,6 +429,12 @@ class SchemaMixin:
         # first sync re-fetches each once to populate it (one-time, expected).
         ap_cols = self._get_table_columns(conn, 'ad_patterns')
         self._add_column_if_missing(conn, 'ad_patterns', 'content_hash', 'TEXT', ap_cols)
+
+        # category (#565): segment category (sponsor/cross_promo/etc) the
+        # pattern was learned from. NULL/unknown reads as 'sponsor' via
+        # normalize_segment_category, so pre-migration rows behave unchanged.
+        ap_cols = self._get_table_columns(conn, 'ad_patterns')
+        self._add_column_if_missing(conn, 'ad_patterns', 'category', 'TEXT', ap_cols)
 
         # Indexes for source filtering and community_id lookup (idempotent)
         try:
@@ -1096,6 +1109,8 @@ class SchemaMixin:
             ('audio_cues_detected', 'INTEGER DEFAULT 0'),
             # Per-run pipeline stats (#519)
             ('processing_stats_json', 'TEXT'),
+            # MinusPod version that produced this run (2.78.4)
+            ('app_version', 'TEXT'),
         ]:
             self._add_column_if_missing(conn, 'processing_history', col, definition, hist_cols)
 
