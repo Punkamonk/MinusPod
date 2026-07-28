@@ -25,8 +25,13 @@ ACTIONABLE_REASONS = {'update', 'live'}
 COOLDOWN_SECONDS = 300
 MAX_CATCHUP_BLOCKS = 100
 
-ALLOWED_ACCOUNTS_REFRESH_SECONDS = 3600
 FEED_MAP_REFRESH_SECONDS = 60
+HOST_FLUSH_SECONDS = 60
+
+# Where the last processed block is kept so a restart resumes instead of
+# jumping to the chain head. Every deploy used to lose the pings sent while
+# the container was down, and a podping is never resent.
+LAST_BLOCK_SETTING = 'podping_last_block'
 NODE_BACKOFF_SCHEDULE = (5, 15, 60)
 
 
@@ -69,21 +74,30 @@ def normalize_feed_url(url: str) -> str:
     return result
 
 
-def extract_podping_events(block: dict, allowed_accounts: set[str]) -> list[dict]:
+def feed_url_domain(url: str) -> str:
+    """Lowercase host of a feed URL without port, or '' when unparseable."""
+    if not isinstance(url, str) or not url:
+        return ''
+    try:
+        return urlparse(url).hostname or ''
+    except ValueError:
+        return ''
+
+
+def extract_podping_events(block: dict) -> list[dict]:
     """Extract podping events from a block.
+
+    Filters on the operation id alone, which is what the reference watcher
+    does. Authorization is per feed via <podcast:hiveAccount>, so the sending
+    accounts ride along in 'auths' for the caller to check.
 
     Args:
         block: Block dict from condenser_api.get_block with shape
                {'transactions': [{'operations': [['custom_json', {...}]]}]}.
-        allowed_accounts: Set of accounts allowed to post podping events.
-                         Empty set rejects all events (fail closed).
 
     Returns:
-        List of dicts with 'iris' and 'reason' keys.
+        List of dicts with 'iris', 'reason', and 'auths' keys.
     """
-    if not allowed_accounts:
-        return []
-
     events = []
     transactions = block.get('transactions')
     if not isinstance(transactions, list):
@@ -110,15 +124,15 @@ def extract_podping_events(block: dict, allowed_accounts: set[str]) -> list[dict
             if not (op_id == 'podping' or (isinstance(op_id, str) and op_id.startswith('pp_'))):
                 continue
 
-            required_posting_auths = op_data.get('required_posting_auths', [])
-            if not isinstance(required_posting_auths, list):
-                continue
-            if not required_posting_auths:
+            # Podping signs with posting authority by convention, but an op
+            # signed with active authority is still a valid sender.
+            auth_lists = [op_data.get('required_posting_auths', []),
+                          op_data.get('required_auths', [])]
+            if any(not isinstance(a, list) for a in auth_lists):
                 continue
 
-            auth_strs = {a for a in required_posting_auths if isinstance(a, str)}
-            if not (auth_strs & allowed_accounts):
-                continue
+            auth_strs = {a.lower() for auths in auth_lists for a in auths
+                         if isinstance(a, str)}
 
             json_string = op_data.get('json', '')
             if not json_string:
@@ -151,7 +165,7 @@ def extract_podping_events(block: dict, allowed_accounts: set[str]) -> list[dict
             if not iris or not isinstance(iris, list):
                 continue
 
-            events.append({'iris': iris, 'reason': reason})
+            events.append({'iris': iris, 'reason': reason, 'auths': auth_strs})
 
     return events
 
@@ -191,14 +205,15 @@ class PodpingListener:
         self.node_index = 0
         self._backoff_step = 0
 
-        self.allowed_accounts = set()
-        self.allowed_accounts_fetched_at = 0.0
-
         self.feed_map = {}
+        self.feed_rules = {}
         self.feed_map_fetched_at = 0.0
 
         self.current_block = None
         self.last_refresh = {}  # slug -> time.time() of last podping-triggered refresh
+
+        self.host_buffer = {}
+        self.host_flushed_at = 0.0
 
     def _default_rpc(self, method, params):
         """Default rpc: POST to the currently-selected node. Returns the
@@ -241,41 +256,14 @@ class PodpingListener:
         self._backoff_step = 0
         return result
 
-    def refresh_allowed_accounts(self) -> None:
-        """Fetch the podping posting-authority allow-list: 'podping' itself
-        plus every account_auths name on its posting authority. On failure,
-        the previous allow-list (possibly empty, if never fetched) is kept.
-        """
-        accounts = self._call_rpc(
-            'condenser_api.get_accounts', [['podping']], expected_type=list)
-        if accounts is None:
-            return
-
-        allowed = {'podping'}
-        if accounts and isinstance(accounts[0], dict):
-            posting = accounts[0].get('posting')
-            if isinstance(posting, dict):
-                for auth in posting.get('account_auths', []):
-                    if isinstance(auth, (list, tuple)) and auth:
-                        allowed.add(auth[0])
-                    elif isinstance(auth, str):
-                        allowed.add(auth)
-
-        self.allowed_accounts = allowed
-        self.allowed_accounts_fetched_at = time.time()
-
-    def _maybe_refresh_allowed_accounts(self):
-        now = time.time()
-        if now - self.allowed_accounts_fetched_at >= ALLOWED_ACCOUNTS_REFRESH_SECONDS:
-            self.refresh_allowed_accounts()
-
     def _refresh_feed_map(self):
         feed_map = {}
-        for podcast in self.db.get_all_podcasts():
+        for podcast in self.db.get_podcast_feed_urls():
             source_url = podcast.get('source_url')
             if source_url:
                 feed_map[normalize_feed_url(source_url)] = podcast['slug']
         self.feed_map = feed_map
+        self.feed_rules = self.db.get_all_podping_declarations()
         self.feed_map_fetched_at = time.time()
 
     def _maybe_refresh_feed_map(self):
@@ -283,14 +271,84 @@ class PodpingListener:
         if now - self.feed_map_fetched_at >= FEED_MAP_REFRESH_SECONDS:
             self._refresh_feed_map()
 
+    def _resume_block(self, head):
+        """Block to start from: the last one processed before a restart, or the
+        head when there is nothing stored or the gap is too wide to catch up."""
+        try:
+            stored = self.db.get_setting(LAST_BLOCK_SETTING)
+            last = int(stored) if stored else 0
+        except (TypeError, ValueError):
+            last = 0
+        if last and 0 <= head - last <= MAX_CATCHUP_BLOCKS:
+            if head > last:
+                logger.info("Podping listener resuming at block %d (%d behind head)",
+                            last + 1, head - last)
+            return last
+        return head - 1
+
+    def _buffer_hosts(self, iris):
+        """Count the host of every IRI seen, matching a local feed or not."""
+        for iri in iris:
+            domain = feed_url_domain(iri)
+            if domain:
+                self.host_buffer[domain] = self.host_buffer.get(domain, 0) + 1
+
+    def _persist_block(self):
+        """Record progress so a restart resumes here. Written on the flush
+        cadence, so a crash replays at most that many blocks; the per-feed
+        refresh cooldown absorbs a repeat."""
+        if self.current_block is None:
+            return
+        try:
+            self.db.set_setting(LAST_BLOCK_SETTING, str(self.current_block))
+        except Exception as exc:
+            logger.debug("Could not persist podping block: %s", exc)
+
+    def _flush_host_buffer(self) -> bool:
+        """Write buffered domain counts; keep the buffer on failure to retry.
+
+        Stamped before the write so a failing db backs off to the flush
+        interval instead of retrying, and logging, on every tick."""
+        self.host_flushed_at = time.time()
+        if not self.host_buffer:
+            return True
+        try:
+            self.db.record_podping_hosts(self.host_buffer)
+        except Exception:
+            logger.exception("Failed to record podping hosts; retrying next flush")
+            return False
+        self.host_buffer = {}
+        return True
+
+    def _feed_accepts(self, slug, auths):
+        """Whether this feed's own <podcast:podping> declaration allows a ping
+        from these accounts. Undeclared feeds accept any sender: the spec gives
+        nothing to check against, and polling stays the fallback either way.
+        """
+        rules = self.feed_rules.get(slug)
+        if not rules:
+            return True
+        if rules.get('uses_podping') is False:
+            logger.debug(
+                "[%s] Podping ignored: feed declares usesPodping=false", slug)
+            return False
+        declared = rules.get('hive_accounts') or []
+        if declared and not (set(declared) & set(auths or ())):
+            logger.info(
+                "[%s] Podping from %s ignored: not in the feed's hiveAccount "
+                "list %s", slug, sorted(auths or ()), declared)
+            return False
+        return True
+
     def _handle_match(self, slug, reason):
-        """Always stamp last_podping_at; refresh only outside the per-slug
-        cooldown window."""
-        self.db.set_last_podping_at(slug)
+        """Stamp last_podping_at and refresh, both outside the per-slug
+        cooldown window. A burst therefore leaves the displayed last-ping time
+        up to one cooldown behind the newest ping."""
         now = time.time()
         last = self.last_refresh.get(slug, 0.0)
         if now - last > COOLDOWN_SECONDS:
             self.last_refresh[slug] = now
+            self.db.set_last_podping_at(slug)
             logger.info(
                 "[%s] Podping received (reason=%s), refreshing feed",
                 slug, reason)
@@ -303,13 +361,8 @@ class PodpingListener:
                 slug, reason, COOLDOWN_SECONDS - (now - last))
 
     def tick(self) -> None:
-        """One polling iteration: refresh allow-list/feed map as needed,
-        pull any new blocks, match podping events against known feeds."""
-        self._maybe_refresh_allowed_accounts()
-        if not self.allowed_accounts:
-            # Never successfully fetched (or fail-closed) -- nothing to do.
-            return
-
+        """One polling iteration: refresh the feed map as needed, pull any new
+        blocks, match podping events against known feeds."""
         self._maybe_refresh_feed_map()
 
         props = self._call_rpc('condenser_api.get_dynamic_global_properties', [])
@@ -322,12 +375,13 @@ class PodpingListener:
             return
 
         if self.current_block is None:
-            self.current_block = head - 1
+            self.current_block = self._resume_block(head)
 
         if head - self.current_block > MAX_CATCHUP_BLOCKS:
-            logger.info(
-                "Podping listener is %d blocks behind; skipping catch-up to block %d",
-                head - self.current_block, head - 1)
+            logger.warning(
+                "Podping listener is %d blocks behind (over the %d cap); skipping "
+                "to block %d. Pings in the gap are lost, they are never resent.",
+                head - self.current_block, MAX_CATCHUP_BLOCKS, head - 1)
             self.current_block = head - 1
 
         while self.current_block < head:
@@ -337,11 +391,30 @@ class PodpingListener:
                 return  # Node failure already logged/rotated; retry next tick.
             self.current_block = next_block_num
 
-            for event in extract_podping_events(block, self.allowed_accounts):
+            for event in extract_podping_events(block):
+                iris = event.get('iris') or []
+                # Count the host whatever the reason, so coverage reflects all
+                # traffic and an unhandled reason cannot make a sender invisible.
+                self._buffer_hosts(iris)
                 reason = event.get('reason')
                 if reason is None or reason in ACTIONABLE_REASONS:
-                    for slug in match_iris(event.get('iris') or [], self.feed_map):
-                        self._handle_match(slug, reason)
+                    auths = event.get('auths') or set()
+                    for slug in match_iris(iris, self.feed_map):
+                        if self._feed_accepts(slug, auths):
+                            self._handle_match(slug, reason)
+
+        if time.time() - self.host_flushed_at >= HOST_FLUSH_SECONDS:
+            # Block progress is delivery correctness and host counts are a
+            # statistics side table, so a failed flush must not hold the
+            # cursor back: a podping is never resent, a count is re-flushed.
+            self._flush_host_buffer()
+            self._persist_block()
+
+    def final_flush(self):
+        """Write buffered counts and block progress on shutdown; without it
+        every clean deploy replayed the blocks since the last flush."""
+        self._flush_host_buffer()
+        self._persist_block()
 
 
 def podping_listener_loop():
@@ -376,3 +449,8 @@ def podping_listener_loop():
         except Exception:
             logger.exception("Podping listener loop iteration failed")
             background_module.shutdown_event.wait(timeout=60)
+
+    try:
+        listener.final_flush()
+    except Exception:
+        logger.exception("Podping listener shutdown flush failed")

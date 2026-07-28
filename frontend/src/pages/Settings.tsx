@@ -242,6 +242,8 @@ function Settings() {
   const [chaptersModel, setChaptersModel] = useState('');
   const [minCutConfidence, setMinCutConfidence] = useState(0);
   const [minContentBetweenAdsSeconds, setMinContentBetweenAdsSeconds] = useState(12);
+  const [maxAdDurationSeconds, setMaxAdDurationSeconds] = useState(300);
+  const [maxAdDurationConfirmedSeconds, setMaxAdDurationConfirmedSeconds] = useState(900);
   const [verificationMissHoldMinConfidence, setVerificationMissHoldMinConfidence] = useState(0.6);
   const [verificationMissAutocutMinConfidence, setVerificationMissAutocutMinConfidence] = useState(0);
   const [learningMinConfidence, setLearningMinConfidence] = useState(0.85);
@@ -261,6 +263,7 @@ function Settings() {
   const [transcribeMaxChunkSeconds, setTranscribeMaxChunkSeconds] = useState(600);
   const [transcribeConcurrentChunks, setTranscribeConcurrentChunks] = useState(4);
   const [transcribeChunkOverlapSeconds, setTranscribeChunkOverlapSeconds] = useState(30);
+  const [whisperApiTimeoutSeconds, setWhisperApiTimeoutSeconds] = useState(600);
   const [providersState, setProvidersState] = useState<ProvidersResponse | null>(null);
   const [providersError, setProvidersError] = useState<string | null>(null);
 
@@ -466,6 +469,7 @@ function Settings() {
     { key: 'transcribeMaxChunkSeconds', kind: 'val', useDefault: true, literal: 600, value: transcribeMaxChunkSeconds, set: setTranscribeMaxChunkSeconds },
     { key: 'transcribeConcurrentChunks', kind: 'val', useDefault: true, literal: 4, value: transcribeConcurrentChunks, set: setTranscribeConcurrentChunks },
     { key: 'transcribeChunkOverlapSeconds', kind: 'val', useDefault: true, literal: 30, value: transcribeChunkOverlapSeconds, set: setTranscribeChunkOverlapSeconds },
+    { key: 'whisperApiTimeoutSeconds', kind: 'val', useDefault: true, literal: 600, value: whisperApiTimeoutSeconds, set: setWhisperApiTimeoutSeconds },
     // Audio output
     { key: 'audioBitrate', kind: 'str', useDefault: true, value: audioBitrate, set: setAudioBitrate },
     { key: 'audioNormalizeEnabled', kind: 'val', useDefault: true, value: audioNormalizeEnabled, set: setAudioNormalizeEnabled },
@@ -486,6 +490,8 @@ function Settings() {
     // Ad detection
     { key: 'minCutConfidence', kind: 'val', useDefault: true, value: minCutConfidence, set: setMinCutConfidence },
     { key: 'minContentBetweenAdsSeconds', kind: 'val', useDefault: true, literal: 12, value: minContentBetweenAdsSeconds, set: setMinContentBetweenAdsSeconds },
+    { key: 'maxAdDurationSeconds', kind: 'val', useDefault: true, literal: 300, value: maxAdDurationSeconds, set: setMaxAdDurationSeconds },
+    { key: 'maxAdDurationConfirmedSeconds', kind: 'val', useDefault: true, literal: 900, value: maxAdDurationConfirmedSeconds, set: setMaxAdDurationConfirmedSeconds },
     { key: 'positionalPriorEnabled', kind: 'val', useDefault: true, value: positionalPriorEnabled, set: setPositionalPriorEnabled },
     { key: 'verificationMissHoldMinConfidence', kind: 'val', useDefault: true, literal: 0.6, value: verificationMissHoldMinConfidence, set: setVerificationMissHoldMinConfidence },
     { key: 'verificationMissAutocutMinConfidence', kind: 'val', useDefault: true, literal: 0, value: verificationMissAutocutMinConfidence, set: setVerificationMissAutocutMinConfidence },
@@ -930,6 +936,8 @@ function Settings() {
         transcribeConcurrentChunks={transcribeConcurrentChunks}
         onTranscribeConcurrentChunksChange={setTranscribeConcurrentChunks}
         transcribeChunkOverlapSeconds={transcribeChunkOverlapSeconds}
+        whisperApiTimeoutSeconds={whisperApiTimeoutSeconds}
+        onWhisperApiTimeoutSecondsChange={setWhisperApiTimeoutSeconds}
         onTranscribeChunkOverlapSecondsChange={setTranscribeChunkOverlapSeconds}
         skipFlacCompression={skipFlacCompression}
         onSkipFlacCompressionChange={setSkipFlacCompression}
@@ -953,6 +961,10 @@ function Settings() {
         onMinCutConfidenceChange={setMinCutConfidence}
         minContentBetweenAdsSeconds={minContentBetweenAdsSeconds}
         onMinContentBetweenAdsSecondsChange={setMinContentBetweenAdsSeconds}
+        maxAdDurationSeconds={maxAdDurationSeconds}
+        onMaxAdDurationSecondsChange={setMaxAdDurationSeconds}
+        maxAdDurationConfirmedSeconds={maxAdDurationConfirmedSeconds}
+        onMaxAdDurationConfirmedSecondsChange={setMaxAdDurationConfirmedSeconds}
         verificationMissHoldMinConfidence={verificationMissHoldMinConfidence}
         onVerificationMissHoldMinConfidenceChange={setVerificationMissHoldMinConfidence}
         verificationMissAutocutMinConfidence={verificationMissAutocutMinConfidence}

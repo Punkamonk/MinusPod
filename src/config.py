@@ -35,7 +35,7 @@ MIN_CUT_CONFIDENCE = 0.80       # Minimum to actually remove from audio
 MIN_AD_DURATION = 7.0           # Reject if shorter (quick mentions ~10s minimum)
 SHORT_AD_WARN = 30.0            # Warn if shorter than 30s
 LONG_AD_WARN = 180.0            # Warn if longer than 3 min
-MAX_AD_DURATION = 300.0         # Reject if longer (5 min)
+MAX_AD_DURATION = 300.0         # Needs a confirmed sponsor past this (5 min)
 MAX_AD_DURATION_CONFIRMED = 900.0  # Allow 15 min if sponsor confirmed
 MIN_UNCOVERED_TAIL_DURATION = 15.0  # Min seconds for an uncovered tail to be preserved
 
@@ -51,9 +51,9 @@ HOLD_REASON_DIFFERENTIAL_UNCORROBORATED = 'differential_uncorroborated'
 # _gate_verification_ads_by_confidence's fall-through in processing.py).
 HOLD_REASON_VERIFICATION_MISS = 'verification_miss'
 
-# Segment categories (issue #565): what kind of content a marker spans.
-# normalize_segment_category stamps this at the ad_detector merge seam, so
-# 'category' is always one of these regardless of the producing stage.
+# Segment categories (issue #565): what kind of content a marker spans. A
+# marker may carry none: unset means no stage classified it, and only action
+# resolution defaults (see normalize_segment_category).
 SEGMENT_CATEGORIES = ('sponsor', 'cross_promo', 'self_promo', 'interaction',
                       'intro', 'outro', 'recap')
 SEGMENT_ACTIONS = ('remove', 'beep', 'keep')
@@ -61,7 +61,13 @@ DEFAULT_SEGMENT_ACTION = 'remove'
 
 
 def normalize_segment_category(value: Any) -> str:
-    """Return value if it is a known segment category, else 'sponsor'."""
+    """Return value if it is a known segment category, else 'sponsor'.
+
+    For resolving a per-category action, where an unknown category has to
+    resolve to something and 'sponsor' is the conservative choice (cut it).
+    Do not use this to record or display a category: an unset one is left
+    unset so 'sponsor' keeps meaning a real sponsor read.
+    """
     return value if value in SEGMENT_CATEGORIES else 'sponsor'
 
 
@@ -419,6 +425,13 @@ TERMINAL_SNAP_EOF_TOLERANCE_SECONDS = 2.0  # Marker end within this of EOF count
 # tail_retranscribe_min_seconds / tail_retranscribe_max_seconds settings.
 TAIL_RETRANSCRIBE_MIN_SECONDS = 10.0
 TAIL_RETRANSCRIBE_MAX_SECONDS = 600.0
+# A podping host counts as active only if seen within this window, so a host
+# that drops podping support decays back to uncovered (#579).
+PODPING_HOST_ACTIVE_DAYS = 30
+# Anyone can podping any IRI, so the host table is attacker-influenced input:
+# cap the rows kept and the domains one flush may add.
+PODPING_HOSTS_MAX_ROWS = 10000
+PODPING_HOSTS_FLUSH_MAX_DOMAINS = 500
 AUDIO_CUE_PAIR_CONFIDENCE = 0.85        # Min cue confidence to synthesize an ad from a pair
 AUDIO_CUE_PAIR_MIN_BREAK_SECONDS = 30.0   # Shortest plausible cue-pair break
 AUDIO_CUE_PAIR_MAX_BREAK_SECONDS = 480.0  # Longest plausible cue-pair break
@@ -778,6 +791,31 @@ def resolve_max_ad_duration_override(db, podcast_id) -> Optional[float]:
     return _resolve_override(db, podcast_id, 'max_ad_duration_override', float, None)
 
 
+def resolve_max_ad_duration(db, podcast_id) -> float:
+    """Length past which an ad needs a confirmed sponsor.
+
+    Per-feed override wins, else the global setting, else the constant.
+    """
+    override = _resolve_override(
+        db, podcast_id, 'max_ad_duration_reject_override', float, None)
+    if override is not None:
+        return override
+    try:
+        return float(db.get_setting_float('max_ad_duration_seconds',
+                                          MAX_AD_DURATION))
+    except Exception:
+        return MAX_AD_DURATION
+
+
+def resolve_max_ad_duration_confirmed(db) -> float:
+    """Hard ceiling that even a confirmed sponsor cannot pass. Global only."""
+    try:
+        return float(db.get_setting_float('max_ad_duration_confirmed_seconds',
+                                          MAX_AD_DURATION_CONFIRMED))
+    except Exception:
+        return MAX_AD_DURATION_CONFIRMED
+
+
 def resolve_cue_gated_approval(db, podcast_id) -> bool:
     """Per-feed cue-gated approval opt-in (Phase C held-for-review). Default False."""
     return _resolve_snap_flag(db, podcast_id, 'cue_gated_approval')
@@ -982,6 +1020,14 @@ HTTP_TIMEOUT_WHISPER = 600            # Remote Whisper transcription upload
                                       # (multi-minute audio over slow network)
 HTTP_TIMEOUT_CONNECTION_TEST = 30.0   # Whisper /test-connection probe: 1s WAV
                                       # upload + inference, may cold-load model
+# Bounds on the operator-tunable override of HTTP_TIMEOUT_WHISPER (#593). The
+# API validator and the point-of-use clamp share these so an env var or direct
+# DB write cannot route around the range.
+WHISPER_API_TIMEOUT_MIN = 30
+WHISPER_API_TIMEOUT_MAX = 3600
+# The test-connection probe follows the request timeout but stops here, so a
+# hung backend cannot hold the settings page open for the full hour.
+CONNECTION_TEST_TIMEOUT_CEILING = 120.0
 
 # ============================================================
 # Chunked Transcription (OOM prevention for long episodes)

@@ -161,6 +161,15 @@ configured feeds. On a match, MinusPod stamps that feed's "last
 podping" time and triggers an immediate refresh of that one feed,
 instead of waiting for the next scheduled RSS poll.
 
+Which senders count is up to each feed. A feed can name the accounts
+allowed to podping it with `<podcast:hiveAccount account="...">` inside
+its `<podcast:podping>` tag, and MinusPod ignores podpings for that feed
+from anyone else. A feed carrying `usesPodping="false"` is asking to be
+polled, so MinusPod skips podping refreshes for it entirely. The tag is
+optional, and a feed that says nothing accepts any sender. Scheduled
+polling runs either way, so the worst a declaration can do is leave a
+feed on the schedule.
+
 No Hive account, keys, or wallet are required. The listener only
 reads the public chain; it never writes to it. Requests go to a small,
 built-in list of public Hive API nodes over outbound HTTPS, roughly
@@ -175,21 +184,39 @@ Podping](configuration.md#feed-refresh-and-podping) settings) keeps
 running unchanged, so a missed or delayed Podping notification costs
 nothing: the feed is picked up on its next regular poll either way.
 
-Coverage depends on the host. Buzzsprout, Transistor, RSS.com,
-Spreaker, Captivate, RedCircle, and Fireside send Podping notifications
-today; many large hosts, including Acast, Megaphone, Libsyn,
-Simplecast, and Omny, do not. Enabling the toggle only speeds up
-episodes on feeds whose host actually pings; everything else keeps its
-existing polling cadence.
+Coverage depends on the host. Hosts sending Podping notifications
+include Spreaker, Buzzsprout, RSS.com, PodServe, Transistor, RedCircle,
+Captivate, Podigee, Fireside, PRX Dovetail, Blubrry, Podhome, and
+Alitu, alongside a long tail of self-hosted and WordPress feeds. Many
+large hosts, including Acast, Megaphone, Libsyn, Simplecast, and Omny,
+do not. Enabling the toggle only speeds up episodes on feeds whose host
+pings; everything else keeps its existing polling cadence.
 
-The feed detail page shows a "Last podping" line with the time of the
-most recent matched notification, visible only after MinusPod has
-received one for that feed. If a host sends Podping and MinusPod's
-listener is on, this line is the way to check whether the host is
-pinging and whether MinusPod's stored source URL matches what the host
-announces. No line ever appearing, with the listener enabled and the
-feed active, usually means the host does not send Podping for that
-feed.
+That list is a snapshot, not a fixed set. It came from measuring three
+days of Podping traffic on the Hive chain in July 2026, and hosts adopt
+Podping over time. Treat it as a guide to what to expect rather than a
+guarantee, and use the Podping line below to see what a specific feed
+actually receives.
+
+With the listener on, the feed detail page and the feed lists show one
+line per feed. It reads `Podping: last ping at <time>` once a
+notification has arrived for that feed. A feed whose own tag declares
+`usesPodping="true"` but has not been pinged yet reads
+`Podping: enabled, none received yet`. Everything else reads
+`Podping: never`. The line is hidden when the listener is off, because
+that is an instance-wide setting rather than anything about the feed.
+
+The API carries more detail than the line does. `podpingCoverage` on
+the feeds endpoints separates the reasons a feed reads as never: the
+publisher declined Podping, the publisher opted in but nothing has
+arrived yet, the host was seen pinging other feeds in the last 30 days,
+or nothing is known. It also returns the parsed declaration as
+`podpingUses` and `podpingHiveAccounts`. `GET /api/v1/podping/hosts`
+lists every domain the listener has seen announcing feeds, which is the
+way to confirm the listener is receiving traffic at all. A feed that
+stays on never while `/podping/hosts` shows its host pinging usually
+means MinusPod's stored source URL does not match what the host
+announces.
 
 ### MinusPod does not emit Podping
 

@@ -148,6 +148,11 @@ class SchemaViolations:
     extra_keys: int = 0
     out_of_range: int = 0
     extra_key_names: list[str] = field(default_factory=list)
+    # Ads carrying a usable segment category, and ads carrying none. Counted
+    # separately from missing_required: an ad with no category is still a
+    # usable detection, it just stays uncategorized.
+    category_present: int = 0
+    category_missing: int = 0
 
 
 REQUIRED_AD_KEYS = ("start", "end")
@@ -171,13 +176,49 @@ KNOWN_OPTIONAL_KEYS = (
     "confidence", "reason", "advertiser", "description",
     "continues_from_previous", "continues_in_next",
     "start_time", "end_time", "text",
+    # The prompt asks for this one, so emitting it is compliance, not an
+    # extra key. It was scored as a violation before, which penalized the
+    # models that did what they were told.
+    "category",
 ) + _production_known_keys()
+
+
+def _fallback_categories() -> tuple[str, ...]:
+    """Production's vocabulary, or a copy of it when config is not importable."""
+    try:
+        from config import SEGMENT_CATEGORIES  # type: ignore[import-not-found]
+        return tuple(SEGMENT_CATEGORIES)
+    except Exception:
+        return ("sponsor", "cross_promo", "self_promo", "interaction",
+                "intro", "outro", "recap")
+
+
+def _fallback_resolve_category(ad: dict):
+    value = ad.get("category")
+    if isinstance(value, str) and value.strip().lower() in _fallback_categories():
+        return value.strip().lower()
+    return None
+
+
+# Resolved once at import: which resolver scored the run. Without this the
+# compliance figures differ silently between an environment that can import the
+# app and one that cannot.
+try:
+    from ad_detector.prompts import resolve_ad_category as _resolve_category  # type: ignore[import-not-found]
+    CATEGORY_RESOLVER = "production"
+except Exception:
+    _resolve_category = _fallback_resolve_category
+    CATEGORY_RESOLVER = "fallback"
 
 
 def schema_audit(parsed_ads: list[dict]) -> SchemaViolations:
     v = SchemaViolations()
     extras: set[str] = set()
     for ad in parsed_ads:
+        if _resolve_category(ad):
+            v.category_present += 1
+        else:
+            v.category_missing += 1
         for req in REQUIRED_AD_KEYS:
             if req not in ad and f"{req}_time" not in ad:
                 v.missing_required += 1

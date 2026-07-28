@@ -15,7 +15,7 @@ from config import (
     DEFAULT_AD_DURATION_ESTIMATE, LONG_AD_WARN,
     TFIDF_MATCH_THRESHOLD as TFIDF_THRESHOLD,
     FUZZY_MATCH_THRESHOLD as FUZZY_THRESHOLD,
-    normalize_segment_category,
+    SEGMENT_CATEGORIES,
 )
 from community_export import count_brand_occurrences, brand_match_candidates, get_sponsor_row_or_stub
 from utils.text import extract_text_from_segments
@@ -76,6 +76,23 @@ BASE_AD_VOCABULARY = [
 
 # Paired boundary scanning
 MAX_SCAN_CHARS = 4000                 # ~4 minutes of speech, cap for paired boundary scan
+
+# Below this length a phrase is not discriminative on its own: partial_ratio
+# scores the best substring alignment, so 20-odd common characters clear the
+# base threshold somewhere in any long transcript.
+FUZZY_DISCRIMINATIVE_LENGTH = 60
+
+
+# Shortest variant eligible for fuzzy matching. An exact substring scores 100,
+# above every scaled threshold, so a short verbatim-common phrase matched
+# anywhere it appeared; local extraction already floors well above this.
+MIN_FUZZY_VARIANT_CHARS = 20
+
+
+def required_fuzzy_score(phrase_len: int) -> float:
+    """Score a phrase of this length must reach to count as a match."""
+    base = FUZZY_THRESHOLD * 100
+    return min(98.0, base + max(0, FUZZY_DISCRIMINATIVE_LENGTH - phrase_len) * 0.5)
 
 # Emitted matches longer than this (s) are validated against the sponsor brand
 # before being kept. The matcher emits the convex hull of every matched
@@ -216,6 +233,8 @@ class TextMatch:
     confidence: float
     sponsor: Optional[str] = None
     match_type: str = "content"  # "content", "intro", "outro", "both"
+    # Transcript text the phrase aligned to, quoted in the marker reason.
+    matched_text: Optional[str] = None
     # Segment category (#565) inherited from the matched pattern, so a
     # re-match of a pattern learned from e.g. a cross_promo marker carries
     # that category into the detection instead of falling back to 'sponsor'.
@@ -708,23 +727,23 @@ class TextPatternMatcher:
             for pattern in patterns:
                 # Check intro phrases
                 for intro in pattern.intro_variants:
-                    if len(intro) < 10:
+                    if len(intro) < MIN_FUZZY_VARIANT_CHARS:
                         continue
 
                     intro_lower = intro.lower()
 
                     # Search for fuzzy matches
-                    best_pos, best_score = self._fuzzy_find(
+                    best_pos, best_score, matched = self._fuzzy_find(
                         full_text_lower, intro_lower
                     )
 
-                    if best_score >= FUZZY_THRESHOLD * 100:
+                    if best_score >= required_fuzzy_score(len(intro_lower)):
                         # Found intro - scan for paired outro or estimate from duration
                         start_time, _ = self._char_pos_to_time(
-                            best_pos, best_pos + len(intro),
+                            best_pos, best_pos + len(matched),
                             segment_map, segments
                         )
-                        intro_end_pos = best_pos + len(intro_lower)
+                        intro_end_pos = best_pos + len(matched)
                         end_time = self._scan_for_outro(
                             full_text_lower, segment_map, segments, pattern, intro_end_pos
                         ) or self._estimate_end_from_duration(pattern, start_time)
@@ -737,22 +756,23 @@ class TextPatternMatcher:
                             sponsor=pattern.sponsor,
                             match_type="intro",
                             category=pattern.category,
+                            matched_text=matched,
                         ))
 
                 # Check outro phrases
                 for outro in pattern.outro_variants:
-                    if len(outro) < 10:
+                    if len(outro) < MIN_FUZZY_VARIANT_CHARS:
                         continue
 
                     outro_lower = outro.lower()
 
-                    best_pos, best_score = self._fuzzy_find(
+                    best_pos, best_score, matched = self._fuzzy_find(
                         full_text_lower, outro_lower
                     )
 
-                    if best_score >= FUZZY_THRESHOLD * 100:
+                    if best_score >= required_fuzzy_score(len(outro_lower)):
                         _, end_time = self._char_pos_to_time(
-                            best_pos, best_pos + len(outro),
+                            best_pos, best_pos + len(matched),
                             segment_map, segments
                         )
                         outro_start_pos = best_pos
@@ -768,6 +788,7 @@ class TextPatternMatcher:
                             sponsor=pattern.sponsor,
                             match_type="outro",
                             category=pattern.category,
+                            matched_text=matched,
                         ))
 
         except ImportError:
@@ -777,18 +798,19 @@ class TextPatternMatcher:
 
         return matches
 
-    def _fuzzy_find(self, text: str, pattern: str) -> Tuple[int, float]:
+    def _fuzzy_find(self, text: str, pattern: str) -> Tuple[int, float, str]:
         """
         Find best fuzzy match position for pattern in text.
 
         Returns:
-            Tuple of (position, score)
+            Tuple of (aligned position, score, matched text).
         """
         try:
             from rapidfuzz import fuzz
 
             best_pos = 0
             best_score = 0
+            best_window = ''
 
             # Slide through text looking for best match
             pattern_len = len(pattern)
@@ -798,11 +820,19 @@ class TextPatternMatcher:
                 if score > best_score:
                     best_score = score
                     best_pos = i
+                    best_window = window
 
-            return best_pos, best_score
+            if best_window:
+                align = fuzz.partial_ratio_alignment(pattern, best_window)
+                if align:
+                    return (best_pos + align.dest_start, best_score,
+                            best_window[align.dest_start:align.dest_end])
+                return best_pos, best_score, best_window[:pattern_len]
+
+            return best_pos, best_score, ''
 
         except Exception:
-            return 0, 0
+            return 0, 0, ''
 
     def _scan_for_boundary(self, full_text, segment_map, segments, variants,
                            search_start, search_end, extract_time):
@@ -815,12 +845,12 @@ class TextPatternMatcher:
         search_region = full_text[search_start:search_end]
 
         for phrase in variants:
-            if len(phrase) < 10:
+            if len(phrase) < MIN_FUZZY_VARIANT_CHARS:
                 continue
             phrase_lower = phrase.lower()
-            pos, score = self._fuzzy_find(search_region, phrase_lower)
-            if score >= FUZZY_THRESHOLD * 100 and score > best_score:
-                time = extract_time(search_start, pos, phrase_lower, segment_map, segments)
+            pos, score, matched = self._fuzzy_find(search_region, phrase_lower)
+            if score >= required_fuzzy_score(len(phrase_lower)) and score > best_score:
+                time = extract_time(search_start, pos, matched, segment_map, segments)
                 if time is not None:
                     best_time = time
                     best_score = score
@@ -831,8 +861,8 @@ class TextPatternMatcher:
         """Scan forward from intro match for a known outro variant."""
         search_end = min(search_from_pos + MAX_SCAN_CHARS, len(full_text))
 
-        def extract_end_time(region_start, pos, phrase_lower, seg_map, segs):
-            abs_pos = region_start + pos + len(phrase_lower)
+        def extract_end_time(region_start, pos, matched, seg_map, segs):
+            abs_pos = region_start + pos + len(matched)
             _, end_time = self._char_pos_to_time(
                 region_start + pos, abs_pos, seg_map, segs
             )
@@ -847,10 +877,10 @@ class TextPatternMatcher:
         """Scan backward from outro match for a known intro variant."""
         search_start = max(0, search_to_pos - MAX_SCAN_CHARS)
 
-        def extract_start_time(region_start, pos, phrase_lower, seg_map, segs):
+        def extract_start_time(region_start, pos, matched, seg_map, segs):
             abs_pos = region_start + pos
             start_time, _ = self._char_pos_to_time(
-                abs_pos, abs_pos + len(phrase_lower), seg_map, segs
+                abs_pos, abs_pos + len(matched), seg_map, segs
             )
             return start_time
 
@@ -924,8 +954,9 @@ class TextPatternMatcher:
             )
             if same_sponsor and match.start <= current.end + 5.0:
                 # Merge - keep higher confidence
-                current = TextMatch(
-                    pattern_id=current.pattern_id if current.confidence >= match.confidence else match.pattern_id,
+                best = current if current.confidence >= match.confidence else match
+                current = replace(
+                    best,
                     start=min(current.start, match.start),
                     end=max(current.end, match.end),
                     confidence=max(current.confidence, match.confidence),
@@ -1066,7 +1097,9 @@ class TextPatternMatcher:
 
                 # Look for intro phrase near start
                 if pattern.intro_variants:
-                    # Get text around start
+                    # Flat threshold on purpose: this searches ~40s around a
+                    # match that already cleared required_fuzzy_score, so the
+                    # long-transcript alignment problem it guards is absent.
                     start_text = self._get_text_around_time(
                         segments, match.start - 10, match.start + 30
                     ).lower()
@@ -1098,15 +1131,7 @@ class TextPatternMatcher:
                                         break
                             break
 
-                refined.append(TextMatch(
-                    pattern_id=match.pattern_id,
-                    start=new_start,
-                    end=new_end,
-                    confidence=match.confidence,
-                    sponsor=match.sponsor,
-                    match_type=match.match_type,
-                    category=match.category,
-                ))
+                refined.append(replace(match, start=new_start, end=new_end))
 
         except ImportError:
             return matches
@@ -1274,7 +1299,7 @@ class TextPatternMatcher:
                 created_from_episode_id=episode_id,
                 duration=duration,
                 source_language=get_pattern_language(self.db, slug=podcast_id),
-                category=normalize_segment_category(category) if category is not None else None,
+                category=category if category in SEGMENT_CATEGORIES else None,
             )
 
             logger.info(f"Created text pattern {pattern_id} for sponsor: {sponsor}")

@@ -5,7 +5,7 @@ import shutil
 import time
 
 from config import MAX_EPISODE_RETRIES
-from utils.constants import EpisodeStatus
+from utils.constants import CANCELED_ERROR_MESSAGE, EpisodeStatus
 # Singletons are bound in main_app/__init__.py before this submodule
 # is loaded by the explicit `from main_app.background import ...` at
 # the bottom of that file, so the apparent circular import is safe.
@@ -110,6 +110,7 @@ def background_queue_processor():
     """
     from main_app.processing import start_background_processing
     from offline_queue import offline_queue_tick
+    from processing_queue import ProcessingQueue
     refresh_logger.info("Auto-process queue processor started")
     backoff_seconds = 30  # Initial backoff for busy queue
     orphan_check_interval = 0  # Counter for orphan check (every 10 iterations)
@@ -128,6 +129,11 @@ def background_queue_processor():
                 retry_count = db.reset_failed_queue_items(max_retries=MAX_EPISODE_RETRIES)
                 if retry_count > 0:
                     refresh_logger.info(f"Reset {retry_count} failed queue items for automatic retry")
+
+                # Episode rows orphaned in 'processing' by a killed worker.
+                # This ran at startup only, so a row could sit unprocessable
+                # until the next restart.
+                reset_stuck_processing_episodes()
 
                 # Offline queue (#482): expire deferred episodes past their
                 # TTL and re-queue the rest once their service is reachable.
@@ -177,11 +183,27 @@ def background_queue_processor():
                         from processing_timeouts import get_hard_timeout
                         max_wait = get_hard_timeout()
                         waited = 0
+                        queue = ProcessingQueue()
+                        # Consecutive polls where the row says processing but no
+                        # worker holds the lock. One poll of grace lets a job
+                        # that just finished write its status first.
+                        orphan_polls = 0
                         while waited < max_wait and not shutdown_event.is_set():
                             shutdown_event.wait(timeout=10)
                             waited += 10
                             episode = db.get_episode(slug, episode_id)
                             if episode and episode['status'] in ('processed', 'failed', 'permanently_failed', 'deferred'):
+                                break
+                            if queue.is_processing(slug, episode_id):
+                                orphan_polls = 0
+                                continue
+                            orphan_polls += 1
+                            if orphan_polls >= 2:
+                                row_status = episode.get('status') if episode else 'missing'
+                                refresh_logger.warning(
+                                    f"[{slug}:{episode_id}] Row says {row_status} but no worker holds "
+                                    f"the lock after {waited}s; treating as orphaned"
+                                )
                                 break
 
                         # Check final status
@@ -190,10 +212,14 @@ def background_queue_processor():
                             db.update_queue_status(queue_id, 'completed')
                             refresh_logger.info(f"[{slug}:{episode_id}] Auto-process completed successfully")
                         elif episode and episode['status'] == 'processing':
-                            # Still processing after timeout - don't mark as failed, let it continue
-                            # Put back in queue to check again later
+                            # Still running: requeue rather than fail. The next
+                            # claim restarts an orphan, since the lock gates a
+                            # start, not the row's status.
                             db.update_queue_status(queue_id, 'pending')
-                            refresh_logger.info(f"[{slug}:{episode_id}] Still processing after {max_wait}s, will check again later")
+                            if queue.is_processing(slug, episode_id):
+                                refresh_logger.info(f"[{slug}:{episode_id}] Still processing after {waited}s, will check again later")
+                            else:
+                                refresh_logger.warning(f"[{slug}:{episode_id}] Orphaned after {waited}s with no worker on it; requeued")
                         elif episode and episode['status'] == 'deferred':
                             # Offline queue (#482) owns the episode now. Close
                             # the row so it is not counted as a failure (the
@@ -201,6 +227,13 @@ def background_queue_processor():
                             # re-opens it as pending once the service is back.
                             db.update_queue_status(queue_id, 'completed')
                             refresh_logger.info(f"[{slug}:{episode_id}] Deferred to offline queue (endpoint unreachable)")
+                        elif (episode and episode['status'] == 'pending'
+                                and episode.get('error_message') == CANCELED_ERROR_MESSAGE):
+                            # Only a user cancel closes the row. The stuck-row
+                            # sweep also writes 'pending', and that one still
+                            # needs the retry ladder.
+                            db.update_queue_status(queue_id, 'completed')
+                            refresh_logger.info(f"[{slug}:{episode_id}] Cancelled; queue row closed")
                         else:
                             # Actually failed - get the real error message
                             error_msg = episode.get('error_message') if episode else None
@@ -258,6 +291,8 @@ def reset_stuck_processing_episodes():
     Episodes are marked permanently_failed only when retry_count (from real
     failures) reaches MAX_EPISODE_RETRIES.
     """
+    from processing_queue import ProcessingQueue
+
     conn = db.get_connection()
     cursor = conn.execute(
         """SELECT e.id, e.episode_id, e.retry_count, p.slug
@@ -268,10 +303,17 @@ def reset_stuck_processing_episodes():
     )
     stuck = cursor.fetchall()
 
+    # Age alone cannot distinguish a slow pass from a crash; the lock can. A row
+    # is only written at start and at ad_detection_status, so a long
+    # transcription looks stale while the job is very much alive.
+    current = ProcessingQueue().get_current()
     reset_count = 0
     failed_count = 0
 
     for row in stuck:
+        if current == (row['slug'], row['episode_id']):
+            continue
+
         current_retry_count = row['retry_count'] or 0
 
         if current_retry_count >= MAX_EPISODE_RETRIES:
@@ -305,7 +347,7 @@ def reset_stuck_processing_episodes():
 
     conn.commit()
 
-    if stuck:
+    if reset_count or failed_count:
         refresh_logger.info(
             f"Stuck episode cleanup: {reset_count} reset to pending, "
             f"{failed_count} marked permanently_failed"

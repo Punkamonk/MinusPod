@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.79.0
+  version: 2.81.23
   contact:
     name: MinusPod
   license:
@@ -631,6 +631,13 @@ paths:
                   minimum: 1.0
                   maximum: 3600.0
                   description: Per-feed max ad duration cap in seconds. Ads longer than this are held for review instead of cut. null means no cap (global MAX_AD_DURATION constants apply).
+                maxAdDurationRejectOverride:
+                  type:
+                    - number
+                    - 'null'
+                  minimum: 30.0
+                  maximum: 3600.0
+                  description: Per-feed length past which an ad must name a recognized sponsor to be cut; one that does not is held for review. Must not exceed the global maxAdDurationConfirmedSeconds. null falls back to the global maxAdDurationSeconds setting.
                 cueGatedApproval:
                   type:
                     - boolean
@@ -3381,6 +3388,17 @@ paths:
                     or `auto` to let Whisper detect. Empty value resets to the default (`en`).
                     Applies to both local (faster-whisper) and remote OpenAI-compatible backends.
                   example: en
+                whisperApiTimeoutSeconds:
+                  type: integer
+                  minimum: 30
+                  maximum: 3600
+                  description: |
+                    Seconds to wait for each transcription request to the remote
+                    Whisper backend (issue #593). A slow self-hosted backend that
+                    returns 0 segments on larger chunks is hitting this limit;
+                    raise it or lower transcribeMaxChunkSeconds. A proxy in front
+                    of the backend may cut the request sooner than this value.
+                  example: 600
                 whisperComputeType:
                   type: string
                   enum: [auto, float16, int8_float16, int8, float32]
@@ -3547,6 +3565,25 @@ paths:
                     less content (ad-transition music/silence) are collapsed into
                     one contiguous cut. Set to 0 to disable. Default 12.0.
                   example: 12.0
+                maxAdDurationSeconds:
+                  type: number
+                  format: float
+                  minimum: 30
+                  maximum: 3600
+                  description: |
+                    Length past which an ad must name a sponsor MinusPod
+                    recognizes to be cut. One that does not is held for
+                    review rather than dropped.
+                  example: 300.0
+                maxAdDurationConfirmedSeconds:
+                  type: number
+                  format: float
+                  minimum: 30
+                  maximum: 3600
+                  description: |
+                    Hard ceiling. Even an ad with a confirmed sponsor is held
+                    rather than cut past this length.
+                  example: 900.0
                 autoProcessEnabled:
                   type: boolean
                   description: Enable automatic processing of new episodes when feeds refresh
@@ -5354,6 +5391,48 @@ paths:
                         tag:         { type: string }
                         description: { type: string }
 
+  /podping/hosts:
+    get:
+      summary: List domains seen sending Podpings on the Hive chain
+      tags: [Feeds]
+      description: >
+        Diagnostic view of what the Podping listener has observed. The listener
+        records the domain of every feed URL announced on the chain, including
+        ones that match no local feed, which is what lets a feed report whether
+        its host sends Podpings at all. Counts are aggregated per domain as the
+        listener runs, so there is no per-notification history to return. Rows
+        recorded earlier stay visible when the listener is disabled.
+      parameters:
+        - in: query
+          name: limit
+          description: Rows to return, clamped to 1-500. Does not affect the totals.
+          schema: { type: integer, default: 100, minimum: 1, maximum: 500 }
+      responses:
+        '200':
+          description: Observed Podping host domains, most recently active first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hosts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        domain:      { type: string, example: feeds.transistor.fm }
+                        firstSeenAt: { type: string, format: date-time }
+                        lastSeenAt:  { type: string, format: date-time }
+                        pingCount:   { type: integer }
+                        active:
+                          type: boolean
+                          description: Seen within activeWindowDays.
+                  limit:            { type: integer }
+                  totalDomains:     { type: integer }
+                  activeDomains:    { type: integer }
+                  activeWindowDays: { type: integer, example: 30 }
+                  listenerEnabled:  { type: boolean }
+
   /feeds/{slug}/tags:
     get:
       summary: Get a feed's tag breakdown (rss / episode / user / effective)
@@ -5539,6 +5618,87 @@ paths:
         '200':
           description: Updated settings
 
+  /settings/replacement-audio:
+    get:
+      summary: Read the replacement audio currently in use
+      description: |
+        Metadata for the audio spliced in wherever an ad was cut. `source` is
+        `uploaded` when an operator has supplied their own file, `default`
+        otherwise.
+      tags: [Settings]
+      operationId: getReplacementAudio
+      responses:
+        '200':
+          description: Current replacement audio
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReplacementAudio' }
+    post:
+      summary: Upload a replacement audio file
+      description: |
+        Accepts a single audio file as multipart field `file`, transcodes it to
+        MP3 and installs it on the data volume so it survives a redeploy. Takes
+        effect on the next episode without a restart. Rejects files over 5 MB or
+        30 seconds; every cut becomes as long as this file.
+      tags: [Settings]
+      operationId: uploadReplacementAudio
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: MP3, WAV, M4A, OGG or FLAC. Up to 5 MB and 30 seconds.
+      responses:
+        '200':
+          description: Installed, returning the new metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReplacementAudio' }
+        '400':
+          description: Rejected, with an operator-facing reason
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      summary: Restore the default replacement audio
+      description: Removes an uploaded file so the shipped default applies again.
+      tags: [Settings]
+      operationId: revertReplacementAudio
+      responses:
+        '200':
+          description: Current replacement audio after the revert
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ReplacementAudio'
+                  - type: object
+                    properties:
+                      reverted:
+                        type: boolean
+                        description: False when no uploaded file was present.
+  /settings/replacement-audio/file:
+    get:
+      summary: Download the replacement audio for preview
+      tags: [Settings]
+      operationId: getReplacementAudioFile
+      responses:
+        '200':
+          description: The audio file
+          content:
+            audio/mpeg:
+              schema: { type: string, format: binary }
+        '404':
+          description: No replacement audio is installed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /settings/db-backup:
     get:
       summary: Read scheduled DB backup settings
@@ -7129,6 +7289,29 @@ components:
         manifest_version: { type: string }
         fetched_at: { type: string }
 
+    ReplacementAudio:
+      type: object
+      properties:
+        source:
+          type: string
+          enum: [default, uploaded]
+        canRevert:
+          type: boolean
+          description: True when an uploaded file is in use and can be removed.
+        exists:
+          type: boolean
+          description: False when no file is on disk, in which case cuts render as silence.
+        sizeBytes: { type: integer, nullable: true }
+        updatedAt:
+          type: integer
+          nullable: true
+          description: Unix mtime, used by the UI to bust the preview cache.
+        durationSeconds:
+          type: number
+          nullable: true
+          description: Every cut becomes this long.
+        channels: { type: integer, nullable: true }
+        sampleRateHz: { type: integer, nullable: true }
     DatabaseBackupSettings:
       type: object
       properties:
@@ -7301,6 +7484,39 @@ components:
             - 'null'
           format: date-time
           description: Stamped when a Podping publish notification matches this feed; null if the feed has never been matched by the Podping listener. See podpingEnabled in Settings.
+        podpingCoverage:
+          type:
+            - string
+            - 'null'
+          enum: [received, declared, host_active, unseen, declined, null]
+          description: >-
+            Why this feed is or is not covered by Podping, most specific first.
+            declined means the feed's own podcast:podping tag carries
+            usesPodping="false", so MinusPod polls it and ignores pings for it.
+            received means a podping arrived for this feed and lastPodpingAt
+            carries the time. declared means the feed's tag opts in but no ping
+            has arrived yet. host_active means the feed host has been seen
+            sending podpings in the last 30 days but not for this feed.
+            unseen means none of the above. Null when the Podping listener is
+            disabled instance-wide, which is a global setting rather than a fact
+            about this feed. The MinusPod UI collapses everything except
+            received into a single "none", so consumers wanting the detail
+            should read this field rather than mirror the UI.
+        podpingUses:
+          type:
+            - boolean
+            - 'null'
+          description: The upstream podcast:podping usesPodping value. Null when the feed carries no such tag.
+        podpingHiveAccounts:
+          type: array
+          items: { type: string }
+          description: Hive accounts the feed declares as allowed to podping it, from podcast:hiveAccount. Empty when the feed names none, in which case any sender is accepted.
+        podpingCheckedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: When the podcast:podping declaration was last read from the upstream feed body. Null means never, which makes a feed with no tag distinguishable from one whose body has not been read yet.
         createdAt:
           type: string
           format: date-time
@@ -7417,6 +7633,13 @@ components:
           minimum: 1.0
           maximum: 3600.0
           description: Per-feed max ad duration cap in seconds. Ads longer than this are held for review instead of cut. null means no cap.
+        maxAdDurationRejectOverride:
+          type:
+            - number
+            - 'null'
+          minimum: 30.0
+          maximum: 3600.0
+          description: Per-feed length past which an ad must name a recognized sponsor to be cut. Must not exceed the global maxAdDurationConfirmedSeconds. null falls back to the global maxAdDurationSeconds setting.
         cueGatedApproval:
           type:
             - boolean
@@ -8141,6 +8364,14 @@ components:
               description: ISO 639-1 code (e.g. `en`, `fi`) or `auto` for Whisper auto-detect
             isDefault:
               type: boolean
+        whisperApiTimeoutSeconds:
+          type: object
+          properties:
+            value:
+              type: integer
+              description: Seconds to wait for each remote Whisper transcription request.
+            isDefault:
+              type: boolean
         whisperComputeType:
           type: object
           properties:
@@ -8758,6 +8989,16 @@ components:
               format: float
               minimum: 0
               maximum: 60
+            maxAdDurationSeconds:
+              type: number
+              format: float
+              minimum: 30
+              maximum: 3600
+            maxAdDurationConfirmedSeconds:
+              type: number
+              format: float
+              minimum: 30
+              maximum: 3600
             llmProvider:
               type: string
             openaiBaseUrl:
@@ -8927,8 +9168,9 @@ components:
           type: string
           enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
           description: |
-            What kind of content this pattern matches (issue #565). A NULL/legacy
-            row normalizes to 'sponsor' when read, so this is always present.
+            What kind of content this pattern matches (issue #565). Absent when
+            the pattern is unclassified (a legacy row or one synced without a
+            category); the UI shows such patterns as Uncategorized.
             Community-shared patterns carry their category through sync; a
             per-install community_sync_categories setting controls which
             categories are accepted from community sync.

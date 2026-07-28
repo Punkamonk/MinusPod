@@ -231,6 +231,25 @@ class TestAdPatternOperations:
         assert pattern_id is not None
         assert pattern_id > 0
 
+    def test_null_pattern_category_reads_back_absent(self, temp_db):
+        """Unset means the key is absent, matching markers; present-and-None
+        defeats .get('category', default) consumers."""
+        pattern_id = temp_db.create_ad_pattern(
+            scope='global', text_template='no category here')
+        assert 'category' not in temp_db.get_ad_pattern_by_id(pattern_id)
+
+    def test_invalid_stored_pattern_category_reads_back_absent(self, temp_db):
+        pattern_id = temp_db.create_ad_pattern(
+            scope='global', text_template='bogus category here',
+            category='advertisement')
+        assert 'category' not in temp_db.get_ad_pattern_by_id(pattern_id)
+
+    def test_known_pattern_category_survives_the_read(self, temp_db):
+        pattern_id = temp_db.create_ad_pattern(
+            scope='global', text_template='a self promo read',
+            category='self_promo')
+        assert temp_db.get_ad_pattern_by_id(pattern_id)['category'] == 'self_promo'
+
     def test_create_podcast_scoped_pattern(self, temp_db):
         """Create pattern scoped to a podcast."""
         slug = 'pattern-podcast'
@@ -1517,6 +1536,19 @@ class TestBatchMethods:
         assert ep['status'] == 'pending'
         assert ep['reprocess_mode'] == 'full'
 
+    def test_insert_keeps_reprocess_requested_at(self, temp_db):
+        """A play request on an episode with no row yet must keep the
+        user-intent stamp, or the drainer's auto-process gate discards it."""
+        slug = 'insert-stamp'
+        temp_db.create_podcast(slug, 'https://example.com/feed.xml', 'Test')
+
+        temp_db.upsert_episode(slug, 'ep-new',
+                               original_url='https://example.com/new.mp3',
+                               reprocess_requested_at='2026-01-01T00:00:00Z')
+
+        ep = temp_db.get_episode(slug, 'ep-new')
+        assert ep['reprocess_requested_at'] == '2026-01-01T00:00:00Z'
+
     def test_batch_methods_empty_ids(self, temp_db):
         slug = 'batch-empty'
         temp_db.create_podcast(slug, 'https://example.com/feed.xml', 'Test')
@@ -1598,3 +1630,103 @@ class TestCloseQueueRowsForEpisode:
         assert touched == 1
         assert self._queue_status(temp_db, pid_a, 'shared-id') == 'completed'
         assert self._queue_status(temp_db, pid_b, 'shared-id') == 'pending'
+
+
+class TestStalePromptRefresh:
+    """A prompt row still flagged is_default tracks the shipped text; one the
+    user edited is theirs and must survive an upgrade untouched."""
+
+    def _row(self, db, key):
+        cur = db.get_connection().execute(
+            "SELECT value, is_default FROM settings WHERE key = ?", (key,))
+        r = cur.fetchone()
+        return (r['value'], r['is_default']) if r else (None, None)
+
+    def test_a_stale_default_prompt_is_refreshed(self, temp_db):
+        from utils.constants import DEFAULT_SYSTEM_PROMPT
+        conn = temp_db.get_connection()
+        conn.execute("INSERT OR REPLACE INTO settings (key, value, is_default)"
+                     " VALUES ('system_prompt', 'OLD PROMPT', 1)")
+        conn.commit()
+
+        temp_db._refresh_shipped_prompt_defaults(conn)
+
+        value, _ = self._row(temp_db, 'system_prompt')
+        assert value == DEFAULT_SYSTEM_PROMPT
+        assert 'CATEGORY:' in value
+
+    def test_a_user_edited_prompt_is_left_alone(self, temp_db):
+        conn = temp_db.get_connection()
+        conn.execute("INSERT OR REPLACE INTO settings (key, value, is_default)"
+                     " VALUES ('system_prompt', 'MY CUSTOM PROMPT', 0)")
+        conn.commit()
+
+        temp_db._refresh_shipped_prompt_defaults(conn)
+
+        value, is_default = self._row(temp_db, 'system_prompt')
+        assert value == 'MY CUSTOM PROMPT'
+        assert is_default == 0
+
+    def test_the_refresh_is_not_on_the_seeding_path(self, temp_db):
+        """Seeding is reached through _migrate_from_json, which returns early
+        on any database that already has podcasts. Putting the refresh there
+        skipped every install that needed it, which is how it shipped once
+        without working."""
+        import inspect
+        src = inspect.getsource(temp_db.__class__._seed_default_settings)
+        assert 'iter_refreshable_defaults' not in src
+
+    def test_a_populated_database_still_gets_the_refresh(self, temp_db):
+        """The production shape: podcasts present, prompt row stale."""
+        from utils.constants import DEFAULT_SYSTEM_PROMPT
+        temp_db.create_podcast('a-show', 'https://e.test/f.xml', 'A Show')
+        conn = temp_db.get_connection()
+        conn.execute("INSERT OR REPLACE INTO settings (key, value, is_default)"
+                     " VALUES ('system_prompt', 'OLD PROMPT', 1)")
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM podcasts").fetchone()[0] > 0
+
+        temp_db._refresh_shipped_prompt_defaults(conn)
+
+        assert self._row(temp_db, 'system_prompt')[0] == DEFAULT_SYSTEM_PROMPT
+
+
+class TestAutoProcessQueueUpsert:
+    """Clients poll a busy play request every 60s, and every poll re-upserts
+    the queue row. Resetting attempts each time made the retry ladder endless
+    for an episode that keeps failing."""
+
+    def _row(self, temp_db, slug, episode_id):
+        return temp_db.get_connection().execute(
+            """SELECT q.* FROM auto_process_queue q
+               JOIN podcasts p ON q.podcast_id = p.id
+               WHERE p.slug = ? AND q.episode_id = ?""",
+            (slug, episode_id)).fetchone()
+
+    def _queue(self, temp_db, slug='queue-podcast', episode_id='a1b2c3d4e5f6'):
+        temp_db.upsert_episode_for_processing(
+            slug, episode_id, 'https://example.com/ep.mp3', 'Episode One')
+
+    def test_repeat_play_request_keeps_pending_attempts(self, temp_db):
+        temp_db.create_podcast('queue-podcast', 'https://example.com/f.xml', 'Q')
+        self._queue(temp_db)
+        temp_db.get_connection().execute(
+            "UPDATE auto_process_queue SET attempts = 2")
+        temp_db.get_connection().commit()
+
+        self._queue(temp_db)
+
+        assert self._row(temp_db, 'queue-podcast', 'a1b2c3d4e5f6')['attempts'] == 2
+
+    def test_upsert_after_a_failure_resets_attempts(self, temp_db):
+        temp_db.create_podcast('queue-podcast', 'https://example.com/f.xml', 'Q')
+        self._queue(temp_db)
+        temp_db.get_connection().execute(
+            "UPDATE auto_process_queue SET attempts = 3, status = 'failed'")
+        temp_db.get_connection().commit()
+
+        self._queue(temp_db)
+
+        row = self._row(temp_db, 'queue-podcast', 'a1b2c3d4e5f6')
+        assert row['attempts'] == 0
+        assert row['status'] == 'pending'

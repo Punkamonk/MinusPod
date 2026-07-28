@@ -25,7 +25,7 @@ from config import (
 from rss_parser import extract_cached_base_url, extract_cached_feed_auth_key
 from utils.constants import EpisodeStatus
 from utils.safe_http import URLTrust, safe_head
-from utils.time import parse_iso_datetime
+from utils.time import parse_iso_datetime, utc_now_iso
 from utils.url import SSRFError
 from utils.validation import (
     validate_slug_param,
@@ -120,9 +120,10 @@ def _lookup_episode(slug, episode_id, feed_map, episode_row=None):
     """
     original_feed = rss_parser.fetch_feed(feed_map[slug]['in'])
     if original_feed:
-        parsed_feed = rss_parser.parse_feed(original_feed)
+        parsed_feed = rss_parser.parse_feed(original_feed, source=slug)
         podcast_name = parsed_feed.feed.get('title', 'Unknown') if parsed_feed else 'Unknown'
-        episodes = rss_parser.extract_episodes(original_feed, parsed_feed=parsed_feed)
+        episodes = rss_parser.extract_episodes(
+            original_feed, parsed_feed=parsed_feed, source=slug)
         for ep in episodes:
             if ep['id'] == episode_id:
                 return ep, podcast_name
@@ -475,7 +476,15 @@ def register_routes(app):
                 headers={'Retry-After': '30'}
             )
         else:
-            # Queue is busy with another episode - queue this one and return 503
+            # Queue is busy: this has to reach the real work queue the drainer
+            # reads, not only the status file the UI shows. The user-intent
+            # mark is what gets it past the drainer's auto-process gate on a
+            # feed with auto-process off.
+            db.upsert_episode(slug, episode_id,
+                              reprocess_requested_at=utc_now_iso())
+            db.upsert_episode_for_processing(
+                slug, episode_id, original_url, episode_title,
+                ep_data.get('published'), episode_description)
             status_service.queue_episode(slug, episode_id, episode_title, podcast_name)
             queue_position = status_service.get_queue_position(slug, episode_id)
             feed_logger.info(f"[{slug}:{episode_id}] Queue busy ({reason}), queued at position {queue_position}")

@@ -1,5 +1,6 @@
 """Tests for PodpingListener and podping_listener_loop."""
 import json
+import threading
 import time
 from unittest.mock import Mock
 
@@ -11,6 +12,7 @@ _test_data_dir = bootstrap('podping_listener_test_', passphrase='podping-listene
 
 from podping_listener import (
     PodpingListener,
+    extract_podping_events,
     podping_listener_loop,
     PODPING_NODES,
     ACTIONABLE_REASONS,
@@ -37,15 +39,41 @@ class ScriptedRpc:
 
 
 class FakeDb:
-    def __init__(self, podcasts=None):
+    def __init__(self, podcasts=None, declarations=None, settings=None):
         self.podcasts = podcasts or []
+        self.declarations = declarations or {}
         self.stamped_slugs = []
+        self.recorded_hosts = []
+        self.settings = dict(settings or {})
+        self.setting_writes = []
+        self.heavy_podcast_reads = 0
+        self.record_fails = False
 
     def get_all_podcasts(self):
+        self.heavy_podcast_reads += 1
         return self.podcasts
+
+    def get_podcast_feed_urls(self):
+        return [{'slug': p['slug'], 'source_url': p.get('source_url')}
+                for p in self.podcasts]
+
+    def get_all_podping_declarations(self):
+        return self.declarations
 
     def set_last_podping_at(self, slug):
         self.stamped_slugs.append(slug)
+
+    def record_podping_hosts(self, counts):
+        if self.record_fails:
+            raise RuntimeError('db down')
+        self.recorded_hosts.append(dict(counts))
+
+    def get_setting(self, key):
+        return self.settings.get(key)
+
+    def set_setting(self, key, value, is_default=False):
+        self.settings[key] = value
+        self.setting_writes.append((key, value))
 
 
 def _podping_op(auths, payload):
@@ -60,32 +88,51 @@ def _podping_op(auths, payload):
     }
 
 
-class TestRefreshAllowedAccounts:
-    def test_parses_posting_auths_and_includes_podping(self):
-        rpc = ScriptedRpc({
-            'condenser_api.get_accounts': [{
-                'name': 'podping',
-                'posting': {'account_auths': [['delegate1', 1], ['delegate2', 1]]},
-            }],
-        })
-        listener = PodpingListener(rpc=rpc, sleep=lambda s: None)
+class TestFeedAcceptance:
+    """Per-feed authorization from the upstream <podcast:hiveAccount> tags."""
 
-        listener.refresh_allowed_accounts()
+    def _listener(self, declarations):
+        db = FakeDb(
+            podcasts=[{'slug': 'my-show', 'source_url': 'https://feeds.example.com/show'}],
+            declarations=declarations)
+        listener = PodpingListener(db=db, refresh=Mock(), sleep=lambda s: None)
+        listener._refresh_feed_map()
+        return listener
 
-        assert listener.allowed_accounts == {'podping', 'delegate1', 'delegate2'}
-        assert listener.allowed_accounts_fetched_at > 0
+    def test_undeclared_feed_accepts_any_sender(self):
+        listener = self._listener({})
+        assert listener._feed_accepts('my-show', {'podping.ddd'}) is True
 
-    def test_fetch_failure_keeps_old_list(self):
-        rpc = ScriptedRpc({
-            'condenser_api.get_accounts': requests.RequestException('down'),
-        })
-        listener = PodpingListener(rpc=rpc, sleep=lambda s: None)
-        listener.allowed_accounts = {'podping', 'delegate1'}
-        listener.allowed_accounts_fetched_at = 123.0
+    def test_declared_account_accepts_matching_sender(self):
+        listener = self._listener({
+            'my-show': {'uses_podping': True, 'hive_accounts': ['podping.aaa']}})
+        assert listener._feed_accepts('my-show', {'podping.aaa'}) is True
 
-        listener.refresh_allowed_accounts()
+    def test_declared_account_rejects_other_sender(self):
+        listener = self._listener({
+            'my-show': {'uses_podping': True, 'hive_accounts': ['podping.aaa']}})
+        assert listener._feed_accepts('my-show', {'attacker'}) is False
 
-        assert listener.allowed_accounts == {'podping', 'delegate1'}
+    def test_any_declared_account_may_match(self):
+        listener = self._listener({
+            'my-show': {'uses_podping': True,
+                        'hive_accounts': ['podping.aaa', 'podping.bbb']}})
+        assert listener._feed_accepts('my-show', {'podping.bbb'}) is True
+
+    def test_opt_out_rejects_even_a_declared_account(self):
+        listener = self._listener({
+            'my-show': {'uses_podping': False, 'hive_accounts': ['podping.aaa']}})
+        assert listener._feed_accepts('my-show', {'podping.aaa'}) is False
+
+    def test_declared_true_with_no_accounts_accepts_any_sender(self):
+        listener = self._listener({
+            'my-show': {'uses_podping': True, 'hive_accounts': []}})
+        assert listener._feed_accepts('my-show', {'podping.ddd'}) is True
+
+    def test_missing_auths_rejected_when_accounts_declared(self):
+        listener = self._listener({
+            'my-show': {'uses_podping': True, 'hive_accounts': ['podping.aaa']}})
+        assert listener._feed_accepts('my-show', set()) is False
 
 
 class TestNodeRotation:
@@ -138,9 +185,10 @@ class TestNodeRotation:
 
 
 class TestTick:
-    def test_allowlist_never_fetched_processes_nothing(self):
+    def test_head_fetch_failure_processes_nothing(self):
         rpc = ScriptedRpc({
-            'condenser_api.get_accounts': requests.RequestException('down'),
+            'condenser_api.get_dynamic_global_properties':
+                requests.RequestException('down'),
         })
         fake_db = FakeDb()
         refresh_mock = Mock()
@@ -148,11 +196,11 @@ class TestTick:
 
         listener.tick()
 
-        assert listener.allowed_accounts == set()
         assert fake_db.stamped_slugs == []
         refresh_mock.assert_not_called()
-        # Never got past the allow-list fetch -- no head/block calls made.
-        assert [c[0] for c in rpc.calls] == ['condenser_api.get_accounts']
+        # No allow-list round trip any more: the head poll is the first call.
+        assert [c[0] for c in rpc.calls] == [
+            'condenser_api.get_dynamic_global_properties']
 
     def test_match_triggers_refresh_and_stamp(self, caplog):
         block = _podping_op(['delegate1'], {
@@ -180,6 +228,129 @@ class TestTick:
         assert fake_db.stamped_slugs == ['my-show']
         refresh_mock.assert_called_once_with('my-show')
         assert '[my-show] Podping received (reason=update), refreshing feed' in caplog.text
+
+    def test_tick_skips_a_feed_whose_hiveaccount_list_excludes_the_sender(self):
+        block = _podping_op(['podping.ddd'], {
+            'version': '1.0',
+            'iris': ['https://feeds.example.com/show'],
+            'reason': 'update',
+        })
+        rpc = ScriptedRpc({
+            'condenser_api.get_dynamic_global_properties': {'head_block_number': 5},
+            'condenser_api.get_block': {'transactions': [block]},
+        })
+        fake_db = FakeDb(
+            podcasts=[{'slug': 'my-show', 'source_url': 'https://feeds.example.com/show'}],
+            declarations={'my-show': {'uses_podping': True,
+                                      'hive_accounts': ['podping.aaa']}})
+        refresh_mock = Mock()
+        listener = PodpingListener(rpc=rpc, db=fake_db, refresh=refresh_mock,
+                                   sleep=lambda s: None)
+
+        listener.tick()
+
+        assert fake_db.stamped_slugs == []
+        refresh_mock.assert_not_called()
+        # The host domain is still recorded: coverage is about what the chain
+        # shows, independent of per-feed authorization.
+        assert fake_db.recorded_hosts == [{'feeds.example.com': 1}]
+
+    def test_tick_honors_a_feed_that_opted_out(self):
+        block = _podping_op(['podping.aaa'], {
+            'version': '1.0',
+            'iris': ['https://feeds.example.com/show'],
+            'reason': 'update',
+        })
+        rpc = ScriptedRpc({
+            'condenser_api.get_dynamic_global_properties': {'head_block_number': 5},
+            'condenser_api.get_block': {'transactions': [block]},
+        })
+        fake_db = FakeDb(
+            podcasts=[{'slug': 'my-show', 'source_url': 'https://feeds.example.com/show'}],
+            declarations={'my-show': {'uses_podping': False, 'hive_accounts': []}})
+        refresh_mock = Mock()
+        listener = PodpingListener(rpc=rpc, db=fake_db, refresh=refresh_mock,
+                                   sleep=lambda s: None)
+
+        listener.tick()
+
+        assert fake_db.stamped_slugs == []
+        refresh_mock.assert_not_called()
+
+    def test_tick_accepts_the_load_balanced_senders(self):
+        # Regression: the old posting-authority allow-list rejected every one
+        # of these, so the listener never fired in production.
+        block = _podping_op(['podping.eee'], {
+            'version': '1.0',
+            'iris': ['https://feeds.example.com/show'],
+            'reason': 'update',
+        })
+        rpc = ScriptedRpc({
+            'condenser_api.get_dynamic_global_properties': {'head_block_number': 5},
+            'condenser_api.get_block': {'transactions': [block]},
+        })
+        fake_db = FakeDb(podcasts=[
+            {'slug': 'my-show', 'source_url': 'https://feeds.example.com/show'},
+        ])
+        refresh_mock = Mock()
+        listener = PodpingListener(rpc=rpc, db=fake_db, refresh=refresh_mock,
+                                   sleep=lambda s: None)
+
+        listener.tick()
+
+        assert fake_db.stamped_slugs == ['my-show']
+        refresh_mock.assert_called_once_with('my-show')
+
+    def test_tick_records_hosts_of_feeds_it_does_not_have(self):
+        block = _podping_op(['delegate1'], {
+            'version': '1.0',
+            'iris': ['https://feeds.example.com/show',
+                     'https://anchor.fm/somebody-else'],
+            'reason': 'update',
+        })
+        rpc = ScriptedRpc({
+            'condenser_api.get_accounts': [{
+                'name': 'podping',
+                'posting': {'account_auths': [['delegate1', 1]]},
+            }],
+            'condenser_api.get_dynamic_global_properties': {'head_block_number': 5},
+            'condenser_api.get_block': {'transactions': [block]},
+        })
+        fake_db = FakeDb(podcasts=[
+            {'slug': 'my-show', 'source_url': 'https://feeds.example.com/show'},
+        ])
+        listener = PodpingListener(rpc=rpc, db=fake_db, refresh=Mock(),
+                                   sleep=lambda s: None)
+
+        listener.tick()
+
+        assert fake_db.recorded_hosts == [
+            {'feeds.example.com': 1, 'anchor.fm': 1}]
+
+    def test_tick_does_not_flush_again_inside_the_interval(self):
+        block = _podping_op(['delegate1'], {
+            'version': '1.0',
+            'iris': ['https://anchor.fm/somebody-else'],
+            'reason': 'update',
+        })
+        rpc = ScriptedRpc({
+            'condenser_api.get_accounts': [{
+                'name': 'podping',
+                'posting': {'account_auths': [['delegate1', 1]]},
+            }],
+            'condenser_api.get_dynamic_global_properties': {'head_block_number': 5},
+            'condenser_api.get_block': {'transactions': [block]},
+        })
+        fake_db = FakeDb()
+        listener = PodpingListener(rpc=rpc, db=fake_db, refresh=Mock(),
+                                   sleep=lambda s: None)
+
+        listener.tick()
+        listener.current_block = 4  # replay the same block
+        listener.tick()
+
+        assert len(fake_db.recorded_hosts) == 1
+        assert listener.host_buffer == {'anchor.fm': 1}
 
     def test_reason_none_is_actionable(self):
         block = _podping_op(['delegate1'], {
@@ -229,6 +400,29 @@ class TestTick:
 
         refresh_mock.assert_not_called()
         assert fake_db.stamped_slugs == []
+
+    def test_a_non_actionable_reason_is_still_counted_as_traffic(self):
+        """The host table is a coverage measure, so a reason we do not act on
+        must not make its sender invisible."""
+        block = _podping_op(['delegate1'], {
+            'version': '1.0',
+            'iris': ['https://feeds.somehost.com/show'],
+            'reason': 'delete',
+        })
+        rpc = ScriptedRpc({
+            'condenser_api.get_dynamic_global_properties': {'head_block_number': 5},
+            'condenser_api.get_block': {'transactions': [block]},
+        })
+        fake_db = FakeDb()
+        listener = PodpingListener(rpc=rpc, db=fake_db, refresh=Mock(),
+                                   sleep=lambda s: None)
+        listener.host_flushed_at = 0
+
+        listener.tick()
+
+        recorded = {d for call in fake_db.recorded_hosts for d in call}
+        assert recorded == {'feeds.somehost.com'}
+        assert fake_db.stamped_slugs == [], 'still no refresh for that reason'
 
     def test_block_fetch_failure_does_not_advance_cursor(self):
         def get_block_side_effect(params):
@@ -284,7 +478,8 @@ class TestTick:
 
 
 class TestCooldown:
-    def test_second_ping_within_cooldown_stamps_but_no_refresh(self):
+    def test_second_ping_within_cooldown_neither_stamps_nor_refreshes(self):
+        """A bursty sender drove one UPDATE plus commit per notification."""
         fake_db = FakeDb()
         refresh_mock = Mock()
         listener = PodpingListener(db=fake_db, refresh=refresh_mock, sleep=lambda s: None)
@@ -292,7 +487,7 @@ class TestCooldown:
         listener._handle_match('my-show', 'update')
         listener._handle_match('my-show', 'update')
 
-        assert fake_db.stamped_slugs == ['my-show', 'my-show']
+        assert fake_db.stamped_slugs == ['my-show']
         assert refresh_mock.call_count == 1
 
     def test_second_ping_within_cooldown_logs_debug_skip(self, caplog):
@@ -314,11 +509,19 @@ class _FakeShutdownEvent:
     """Stand-in for the real, process-wide shutdown_event -- see
     test_refresh_interval_setting.py's identically-shaped fake for why this
     is needed rather than monkeypatching the real singleton's methods.
+
+    Only the thread that built it is observed. Background threads started at
+    bootstrap read the same patched attribute, and their waits used to land in
+    wait_calls, which made the assertions here depend on test order.
     """
 
     def __init__(self):
         self._flag = False
         self.wait_calls = []
+        self._owner = threading.current_thread()
+
+    def _is_owner(self):
+        return threading.current_thread() is self._owner
 
     def is_set(self):
         return self._flag
@@ -327,6 +530,8 @@ class _FakeShutdownEvent:
         self._flag = True
 
     def wait(self, timeout=None):
+        if not self._is_owner():
+            return True
         self.wait_calls.append(timeout)
         self._flag = True
         return True
@@ -359,6 +564,8 @@ class TestPodpingListenerLoop:
                 return self.iteration_count >= self.max_iterations
 
             def wait(self, timeout=None):
+                if not self._is_owner():
+                    return True
                 self.wait_calls.append(timeout)
                 self.iteration_count += 1
                 return True
@@ -400,6 +607,8 @@ class TestPodpingListenerLoop:
                 return self.iteration_count >= self.max_iterations
 
             def wait(self, timeout=None):
+                if not self._is_owner():
+                    return True
                 self.wait_calls.append(timeout)
                 self.iteration_count += 1
                 return True
@@ -427,3 +636,163 @@ class TestPodpingListenerLoop:
         assert 'Podping listener loop iteration failed' in caplog.text
         exc_records = [r for r in caplog.records if r.exc_info is not None]
         assert len(exc_records) == 2
+
+
+class TestRestartResume:
+    """A podping is never resent, so a restart must not jump to the chain head
+    and skip whatever was sent while the container was down."""
+
+    def _listener(self, head, stored=None):
+        rpc = ScriptedRpc({
+            'condenser_api.get_dynamic_global_properties': {'head_block_number': head},
+            'condenser_api.get_block': {'transactions': []},
+        })
+        settings = {'podping_last_block': stored} if stored else {}
+        fake_db = FakeDb(settings=settings)
+        listener = PodpingListener(rpc=rpc, db=fake_db, refresh=Mock(),
+                                   sleep=lambda s: None)
+        listener.feed_map = {}
+        listener.feed_map_fetched_at = time.time()
+        return listener, fake_db, rpc
+
+    def test_resumes_from_the_last_processed_block(self):
+        head = 5000
+        listener, _, rpc = self._listener(head, stored='4990')
+        listener.tick()
+
+        fetched = sorted(c[1][0] for c in rpc.calls
+                         if c[0] == 'condenser_api.get_block')
+        assert fetched[0] == 4991, 'must replay the blocks missed while down'
+        assert listener.current_block == head
+
+    def test_a_gap_wider_than_the_cap_still_skips(self):
+        head = 5000
+        listener, _, rpc = self._listener(head, stored=str(head - MAX_CATCHUP_BLOCKS - 500))
+        listener.tick()
+
+        calls = [c for c in rpc.calls if c[0] == 'condenser_api.get_block']
+        assert len(calls) == 1, 'an unbounded catch-up would hammer the nodes'
+
+    def test_first_ever_start_begins_at_the_head(self):
+        listener, _, rpc = self._listener(5000)
+        listener.tick()
+
+        calls = [c for c in rpc.calls if c[0] == 'condenser_api.get_block']
+        assert len(calls) == 1
+
+    def test_progress_is_persisted_for_the_next_start(self):
+        listener, fake_db, _ = self._listener(5000, stored='4998')
+        listener.host_flushed_at = 0  # force the flush cadence
+        listener.tick()
+
+        assert fake_db.settings.get('podping_last_block') == '5000'
+
+    def test_a_corrupt_stored_block_falls_back_to_the_head(self):
+        listener, _, rpc = self._listener(5000, stored='not-a-number')
+        listener.tick()
+
+        calls = [c for c in rpc.calls if c[0] == 'condenser_api.get_block']
+        assert len(calls) == 1
+
+
+class TestListenerWritePatterns:
+    """The listener runs a tick every 3 seconds, so anything unconditional in
+    a tick is a write every 3 seconds."""
+
+    def _listener(self, fake_db, head=5, block=None):
+        rpc = ScriptedRpc({
+            'condenser_api.get_dynamic_global_properties': {'head_block_number': head},
+            'condenser_api.get_block': {'transactions': [block] if block else []},
+        })
+        listener = PodpingListener(rpc=rpc, db=fake_db, refresh=Mock(),
+                                   sleep=lambda s: None)
+        listener.feed_map = {}
+        listener.feed_map_fetched_at = time.time()
+        return listener, rpc
+
+    def test_an_empty_buffer_tick_does_not_rewrite_the_block_setting(self):
+        fake_db = FakeDb()
+        listener, _ = self._listener(fake_db)
+        listener.host_flushed_at = 0
+
+        listener.tick()
+        writes_after_first = len(fake_db.setting_writes)
+        listener.tick()
+
+        assert len(fake_db.setting_writes) == writes_after_first
+
+    def test_a_failed_flush_still_advances_the_stored_block(self):
+        """Block progress is delivery correctness; a podping is never resent,
+        while a host count the buffer still holds is re-flushed next tick."""
+        block = _podping_op(['delegate1'], {
+            'version': '1.0', 'iris': ['https://anchor.fm/x'], 'reason': 'update'})
+        fake_db = FakeDb()
+        fake_db.record_fails = True
+        listener, _ = self._listener(fake_db, block=block)
+        listener.host_flushed_at = 0
+
+        listener.tick()
+
+        assert fake_db.settings.get('podping_last_block') == '5'
+        assert listener.host_buffer == {'anchor.fm': 1}
+
+    def test_the_last_ping_stamp_is_throttled_per_slug(self):
+        block = _podping_op(['delegate1'], {
+            'version': '1.0', 'iris': ['https://feeds.example.com/show'],
+            'reason': 'update'})
+        fake_db = FakeDb(podcasts=[
+            {'slug': 'my-show', 'source_url': 'https://feeds.example.com/show'}])
+        listener, _ = self._listener(fake_db, block=block)
+        listener._refresh_feed_map()
+
+        listener.tick()
+        listener.current_block = 4  # replay the same block
+        listener.tick()
+
+        assert fake_db.stamped_slugs == ['my-show']
+
+    def test_the_feed_map_reads_only_slug_and_url(self):
+        fake_db = FakeDb(podcasts=[
+            {'slug': 'my-show', 'source_url': 'https://feeds.example.com/show'}])
+        listener, _ = self._listener(fake_db)
+
+        listener._refresh_feed_map()
+
+        assert fake_db.heavy_podcast_reads == 0
+
+    def test_a_caught_up_restart_does_not_replay_the_head_block(self):
+        fake_db = FakeDb(settings={'podping_last_block': '5000'})
+        listener, rpc = self._listener(fake_db, head=5000)
+
+        listener.tick()
+
+        assert [c for c in rpc.calls if c[0] == 'condenser_api.get_block'] == []
+
+    def test_shutdown_flushes_and_persists(self):
+        block = _podping_op(['delegate1'], {
+            'version': '1.0', 'iris': ['https://anchor.fm/x'], 'reason': 'update'})
+        fake_db = FakeDb()
+        listener, _ = self._listener(fake_db, block=block)
+        listener.host_flushed_at = time.time()
+
+        listener.tick()          # inside the flush interval: nothing written yet
+        assert fake_db.recorded_hosts == []
+        listener.final_flush()
+
+        assert fake_db.recorded_hosts == [{'anchor.fm': 1}]
+        assert fake_db.settings.get('podping_last_block') == '5'
+
+
+class TestActiveAuthorityIsAccepted:
+    def test_an_op_signed_with_active_authority_carries_its_auths(self):
+        events = extract_podping_events({'transactions': [{
+            'operations': [['custom_json', {
+                'id': 'podping',
+                'required_auths': ['podping.aaa'],
+                'required_posting_auths': [],
+                'json': json.dumps({'version': '1.0',
+                                    'iris': ['https://feeds.example.com/show'],
+                                    'reason': 'update'}),
+            }]]}]})
+
+        assert events[0]['auths'] == {'podping.aaa'}

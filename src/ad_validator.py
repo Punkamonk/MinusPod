@@ -96,6 +96,10 @@ class AdValidator:
         r'this\s+is\s+(not|n\'t)\s+|'
         r'does\s+not\s+appear\s+to\s+be|'
         r'no\s+(ad|advertisement|sponsor)|'
+        # The model also denies ad content in prose: "no promotional copy is
+        # present in the transcript for this gap". A content noun is required
+        # so a real read described as having "no promotional code" survives.
+        r'no\s+promotional\s+(?:copy|content|language|material|pitch)|'
         r'false\s+positive',
         re.IGNORECASE
     )
@@ -116,7 +120,10 @@ class AdValidator:
                  cue_gate_enabled: bool = False,
                  splice_veto_enabled: bool = True,
                  veto_min_cut_seconds: float = VETO_MIN_CUT_SECONDS,
-                 differential_corr_max: float = 0.60):
+                 differential_corr_max: float = 0.60,
+                 sponsor_service=None,
+                 max_ad_duration: float = MAX_AD_DURATION,
+                 max_ad_duration_confirmed: float = MAX_AD_DURATION_CONFIRMED):
         """Initialize validator.
 
         Args:
@@ -136,6 +143,13 @@ class AdValidator:
                 setting (threaded by the caller; the validator has no db
                 handle). A differential region corroborates a marker only
                 when its measured corr is <= this value.
+            sponsor_service: Sponsor registry, used to confirm a long ad names
+                a real advertiser when the episode description does not list
+                sponsors. Optional; without it only the description counts.
+            max_ad_duration: Length above which an ad needs a confirmed
+                sponsor. Resolved per feed by the caller.
+            max_ad_duration_confirmed: Length above which even a confirmed
+                sponsor does not help.
         """
         self.episode_duration = episode_duration
         self.segments = segments or []
@@ -150,6 +164,16 @@ class AdValidator:
         self.splice_veto_enabled = splice_veto_enabled
         self.veto_min_cut_seconds = veto_min_cut_seconds
         self.differential_corr_max = differential_corr_max
+        self.sponsor_service = sponsor_service
+        # A per-feed override or a pair stored before the API cross-check
+        # existed can invert the two; confirming a sponsor must never lower
+        # an ad's ceiling.
+        if max_ad_duration > max_ad_duration_confirmed:
+            logger.info(
+                f"Confirmation threshold {max_ad_duration:.0f}s is above the "
+                f"hard ceiling {max_ad_duration_confirmed:.0f}s; using the ceiling")
+        self.max_ad_duration = min(max_ad_duration, max_ad_duration_confirmed)
+        self.max_ad_duration_confirmed = max_ad_duration_confirmed
         self._audio_analysis = None
 
         if self.false_positive_corrections:
@@ -196,8 +220,40 @@ class AdValidator:
 
         return sponsors
 
+    def _registry_confirms(self, ad: Dict) -> bool:
+        """Whether the ad's own audio names sponsors from the registry.
+
+        The transcript is the evidence, not the model's reason. Two registry
+        mentions are required, across one brand or two: a single organic
+        mention inside a span of several minutes is not a read.
+        """
+        if not self.sponsor_service:
+            return False
+        ad_text = self._get_text_in_range(ad['start'], ad['end'])
+        if not ad_text:
+            return False
+        try:
+            found = self.sponsor_service.find_sponsor_in_text(ad_text)
+            if not found:
+                return False
+            mentions = self.sponsor_service.count_sponsor_mentions(ad_text)
+        except Exception as e:
+            logger.debug(f"Sponsor registry lookup failed: {e}")
+            return False
+        if mentions < 2:
+            logger.info(
+                f"Sponsor '{found}' mentioned once in "
+                f"{ad['start']:.1f}s-{ad['end']:.1f}s; not treating as confirmed")
+            return False
+        logger.info(
+            f"Registry sponsors named {mentions}x in the ad audio "
+            f"({ad['start']:.1f}s-{ad['end']:.1f}s), first '{found}'; "
+            f"treating as confirmed")
+        return True
+
     def _is_sponsor_confirmed(self, ad: Dict) -> bool:
-        """Check if the ad's sponsor is confirmed in the episode description.
+        """Check if the ad's sponsor is confirmed in the episode description,
+        or failing that, named in the ad's own audio (see _registry_confirms).
 
         Args:
             ad: Ad marker with reason field
@@ -206,7 +262,7 @@ class AdValidator:
             True if sponsor name from ad matches a sponsor in description
         """
         if not self.description_sponsors:
-            return False
+            return self._registry_confirms(ad)
 
         # Extract sponsor from ad reason
         reason = ad.get('reason', '').lower()
@@ -224,7 +280,7 @@ class AdValidator:
                 logger.info(f"Sponsor '{sponsor}' found in ad transcript, confirmed in description")
                 return True
 
-        return False
+        return self._registry_confirms(ad)
 
     def _overlaps_corrections(self, corrections: List[Dict], start: float, end: float,
                                overlap_threshold: float = CORRECTION_MATCH_MIN_COVERAGE) -> bool:
@@ -441,13 +497,14 @@ class AdValidator:
 
         # Check if sponsor is confirmed in episode description
         sponsor_confirmed = self._is_sponsor_confirmed(ad)
-        max_duration = MAX_AD_DURATION_CONFIRMED if sponsor_confirmed else MAX_AD_DURATION
+        max_duration = (self.max_ad_duration_confirmed if sponsor_confirmed
+                        else self.max_ad_duration)
 
         if duration > max_duration:
             flags.append(f"ERROR: Very long ({duration:.1f}s)")
         elif duration > LONG_AD_WARN:
             if sponsor_confirmed:
-                flags.append(f"INFO: Long ({duration:.1f}s) but sponsor confirmed in description")
+                flags.append(f"INFO: Long ({duration:.1f}s) but sponsor confirmed")
             else:
                 flags.append(f"WARN: Long duration ({duration:.1f}s)")
 
@@ -716,7 +773,7 @@ class AdValidator:
 
         # High confidence (>0.9) overrides long-duration errors up to 15 minutes
         if has_long_error and confidence >= HIGH_CONFIDENCE_OVERRIDE:
-            if duration <= MAX_AD_DURATION_CONFIRMED:
+            if duration <= self.max_ad_duration_confirmed:
                 logger.info(
                     f"Accepting long ad ({duration:.1f}s) due to high confidence ({confidence:.2f})"
                 )
@@ -741,18 +798,21 @@ class AdValidator:
         A held ad gets decision=REVIEW with held_for_review=True so the gate
         keeps it in the audio. Returns the (possibly updated) decision.
         """
-        # Rule 1: max duration override.
-        if self.max_ad_duration_override is not None and duration > self.max_ad_duration_override:
-            if decision == Decision.ACCEPT:
+        # Rule 1a: per-feed cap holds an ad that would otherwise be cut.
+        if (self.max_ad_duration_override is not None
+                and duration > self.max_ad_duration_override
+                and decision == Decision.ACCEPT):
+            self._mark_held(ad, flags, HOLD_REASON_MAX_DURATION)
+            return Decision.REVIEW
+
+        # Rule 1b: a reject whose only fault is length is held, not dropped,
+        # since a plain reject leaves no marker and a whole ad break vanished
+        # with nothing to review. Low-confidence junk still rejects.
+        if decision == Decision.REJECT and confidence >= REJECT_CONFIDENCE:
+            error_flags = [f for f in flags if 'ERROR' in f]
+            if error_flags and all('Very long' in f for f in error_flags):
                 self._mark_held(ad, flags, HOLD_REASON_MAX_DURATION)
                 return Decision.REVIEW
-            if decision == Decision.REJECT and confidence >= REJECT_CONFIDENCE:
-                # Only hold duration-only rejects -- leave low-confidence junk
-                # and non-duration errors (NOT_AD etc.) as plain REJECT.
-                duration_flags = [f for f in flags if 'ERROR' in f]
-                if all('Very long' in f for f in duration_flags) and duration_flags:
-                    self._mark_held(ad, flags, HOLD_REASON_MAX_DURATION)
-                    return Decision.REVIEW
 
         # Rule 5: uncorroborated cross-fetch differential (#541) -> held for
         # review, never solo-cut. Ordered before the cue gate so the hold

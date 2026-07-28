@@ -54,6 +54,7 @@ from config import (
     MIN_PRESERVED_CHAPTERS,
     count_not_cut, is_cue_backed, is_pending_review, is_template_cue,
     normalize_segment_category,
+    SEGMENT_CATEGORIES,
     DEFAULT_SEGMENT_ACTION,
     resolve_feed_processing_mode,
     resolve_chapters_mode,
@@ -61,6 +62,8 @@ from config import (
     resolve_silence_snap_tunables,
     resolve_tail_retranscribe_tunables,
     resolve_max_ad_duration_override,
+    resolve_max_ad_duration,
+    resolve_max_ad_duration_confirmed,
     resolve_cue_gated_approval,
     differential_fetch_effective,
     resolve_differential_fetch_setting,
@@ -85,7 +88,7 @@ from utils.circuit_breaker import CircuitBreakerOpen
 from positional_prior import format_prior_hint, load_positional_prior
 from splice_calibration import compute_splice_calibration
 from transcriber import extract_audio_chunk
-from utils.constants import EpisodeStatus
+from utils.constants import CANCELED_ERROR_MESSAGE, EpisodeStatus
 from utils.episode_paths import episode_relative_path
 from utils.errors import ServiceUnavailableError, AudioTooLargeError
 from utils.gpu import get_available_memory_gb, clear_gpu_memory
@@ -227,7 +230,8 @@ def _process_episode_background(slug, episode_id, original_url, title, podcast_n
             audio_logger.warning(f"[{slug}:{episode_id}] Failed to clean up partial file: {cleanup_err}")
         # Reset DB status (before finally releases queue, preventing re-queue race)
         try:
-            db.upsert_episode(slug, episode_id, status=EpisodeStatus.PENDING.value, error_message='Canceled by user')
+            db.upsert_episode(slug, episode_id, status=EpisodeStatus.PENDING.value,
+                              error_message=CANCELED_ERROR_MESSAGE)
         except Exception as db_err:
             audio_logger.warning(f"[{slug}:{episode_id}] Failed to reset status after cancel: {db_err}")
         status_service.complete_job()
@@ -346,6 +350,12 @@ def _retranscribe_tail_no_vad(slug, episode_id, audio_path, segments,
                 os.unlink(chunk_path)
             except OSError:
                 pass
+    if tail_segments is None:
+        # transcribe() returns None on failure and [] on a silent tail.
+        audio_logger.warning(
+            f"[{slug}:{episode_id}] Tail re-transcription failed; "
+            f"proceeding without tail")
+        return segments, False
     if not tail_segments:
         audio_logger.info(
             f"[{slug}:{episode_id}] Tail re-transcription produced no segments")
@@ -384,8 +394,9 @@ def _next_processed_version(episode_data):
     """Version for the output file. ``processed_at`` is cleared by the
     reprocess reset before processing starts, so it can't signal "been
     processed before"; ``processed_version`` is not reset and
-    ``reprocess_requested_at`` is set by the reprocess endpoints -- either
-    one means this run is a reprocess and the version bumps."""
+    ``reprocess_requested_at`` is set by the reprocess endpoints and by
+    a JIT play request (the user-intent mark the auto-process gate reads).
+    Either one means this run is a reprocess and the version bumps."""
     previous_version = (episode_data or {}).get('processed_version') or 0
     is_reprocess = (previous_version > 0
                     or bool((episode_data or {}).get('reprocess_requested_at')))
@@ -830,21 +841,25 @@ def _setting_float(db, key: str, default: float, allow_zero: bool = False) -> fl
     return default
 
 
-def _refine_boundaries(all_ads, segments, db=None, false_positive_corrections=None):
+def _refine_boundaries(all_ads, segments, db=None, false_positive_corrections=None,
+                       podcast_name=None):
     """Apply the boundary refinement pipeline. Returns updated list.
 
     ``false_positive_corrections`` are threaded to the filler-gap merge so it
     never collapses a span the user rejected (merging would dilute the
-    validator's overlap ratio).
+    validator's overlap ratio). ``podcast_name`` keeps the host's own site out
+    of the harvested sponsor tokens.
     """
     if all_ads and segments:
         all_ads = refine_ad_boundaries(all_ads, segments)
     if all_ads and segments:
-        all_ads = extend_ad_boundaries_by_content(all_ads, segments)
+        all_ads = extend_ad_boundaries_by_content(all_ads, segments,
+                                                  podcast_name=podcast_name)
     if all_ads:
         all_ads = snap_early_ads_to_zero(all_ads)
     if all_ads and segments:
-        all_ads = merge_same_sponsor_ads(all_ads, segments)
+        all_ads = merge_same_sponsor_ads(all_ads, segments,
+                                         podcast_name=podcast_name)
     if all_ads:
         min_content = _setting_float(db, 'min_content_between_ads_seconds',
                                      MIN_CONTENT_BETWEEN_ADS_SECONDS,
@@ -958,7 +973,7 @@ def _build_validator(episode_duration, segments, episode_description, *,
                      false_positive_corrections, min_cut_confidence,
                      max_ad_duration_override, cue_gate_enabled,
                      confirmed_corrections=None, positional_prior=None,
-                     splice_veto=True):
+                     splice_veto=True, podcast_id=None):
     """Single construction point for AdValidator; owns the splice-veto
     settings reads. Per-site differences are stated by the callers:
 
@@ -969,6 +984,8 @@ def _build_validator(episode_duration, segments, episode_description, *,
     - recut passes everything except positional_prior.
     """
     from ad_validator import AdValidator
+    max_ad_duration = resolve_max_ad_duration(db, podcast_id)
+    max_ad_duration_confirmed = resolve_max_ad_duration_confirmed(db)
     splice_kwargs = {}
     if splice_veto:
         splice_kwargs = {
@@ -988,6 +1005,9 @@ def _build_validator(episode_duration, segments, episode_description, *,
         differential_corr_max=db.get_setting_float(
             'differential_measured_corr_max',
             registry_get_default('differential_measured_corr_max')),
+        sponsor_service=sponsor_service,
+        max_ad_duration=max_ad_duration,
+        max_ad_duration_confirmed=max_ad_duration_confirmed,
         **splice_kwargs,
     )
 
@@ -1110,15 +1130,16 @@ def _learn_from_kept_ads(slug, episode_id, keep_ads, segments, audio_path):
 
 
 def _stamp_pass2_marker_categories(markers):
-    """Stamp category via normalize_segment_category on pass-2 markers, at save time.
+    """Validate the category on pass-2 markers at save time.
 
-    Pass-2 verification markers never route through the pass-1 detector
-    merge seam that normally stamps category, so without this they would
-    persist with no category key. Mutates in place; returns markers for
-    chaining.
+    Pass-2 markers never route through the pass-1 merge seam, so an
+    unrecognized value would persist and an absent one must stay absent.
+    Mutates in place; returns markers for chaining.
     """
     for m in markers:
-        m['category'] = normalize_segment_category(m.get('category'))
+        if m.get('category') in SEGMENT_CATEGORIES:
+            continue
+        m.pop('category', None)
     return markers
 
 
@@ -1126,7 +1147,7 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
                           episode_description, episode_duration, min_cut_confidence,
                           podcast_name, skip_patterns=False, positional_prior=None,
                           max_ad_duration_override=None, cue_gate_enabled=False,
-                          audio_analysis=None):
+                          audio_analysis=None, podcast_id=None):
     """Pipeline stage: Refine ad boundaries, detect rolls, validate, gate by confidence.
 
     Returns (ads_to_remove, all_ads_with_validation).
@@ -1139,7 +1160,8 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
 
     # Boundary refinement
     all_ads = _refine_boundaries(all_ads, segments, db=db,
-                                 false_positive_corrections=false_positive_corrections)
+                                 false_positive_corrections=false_positive_corrections,
+                                 podcast_name=podcast_name)
 
     # Heuristic pre/post-roll detection
     _apply_heuristic_rolls(slug, episode_id, all_ads, segments, podcast_name,
@@ -1157,6 +1179,7 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
         positional_prior=positional_prior,
         max_ad_duration_override=max_ad_duration_override,
         cue_gate_enabled=cue_gate_enabled,
+        podcast_id=podcast_id,
     )
     validation_result = validator.validate(all_ads, audio_analysis=audio_analysis)
 
@@ -1568,7 +1591,8 @@ def _find_master(all_ads, ad):
 
 
 def _snap_terminal_starts(slug, episode_id, ads_to_remove, all_ads_with_validation,
-                          segments, audio_analysis_result, episode_duration):
+                          segments, audio_analysis_result, episode_duration,
+                          podcast_name=None):
     """Terminal boundary snap (spec 2.3b): pull a terminal cut's start back
     to the strongest deep-silence splice event. Runs after the reviewer,
     whose adjust verdicts are what move Dillon-style starts inside the ad
@@ -1588,7 +1612,7 @@ def _snap_terminal_starts(slug, episode_id, ads_to_remove, all_ads_with_validati
                     if m.get('action_applied') != 'keep']
     snapped = snap_terminal_ad_to_splice(
         ads_to_remove, segments, events, episode_duration, window_s,
-        coverage_ads=coverage_ads,
+        coverage_ads=coverage_ads, podcast_name=podcast_name,
     )
     changed = False
     for old, new in zip(ads_to_remove, snapped):
@@ -1611,7 +1635,7 @@ def _snap_terminal_starts(slug, episode_id, ads_to_remove, all_ads_with_validati
 
 
 def _complete_cut_tails(slug, episode_id, ads_to_remove, all_ads_with_validation,
-                        segments):
+                        segments, podcast_name=None):
     """Re-run content-based end extension as the last step before cutting.
 
     This sweep exists to undo reviewer end-pullbacks: the reviewer can pull a
@@ -1630,7 +1654,7 @@ def _complete_cut_tails(slug, episode_id, ads_to_remove, all_ads_with_validation
         return ads_to_remove
 
     extended = extend_ad_boundaries_by_content(
-        ads_to_remove, segments, extend_start=False
+        ads_to_remove, segments, extend_start=False, podcast_name=podcast_name
     )
 
     changed = False
@@ -1710,7 +1734,7 @@ def _validate_verification_ads(slug, episode_id, verification_ads_processed,
                                 min_cut_confidence, db,
                                 processed_duration=None,
                                 max_ad_duration_override=None,
-                                cue_gate_enabled=False):
+                                cue_gate_enabled=False, podcast_id=None):
     """Validate pass-2 ad candidates against processed-coordinate validator.
 
     Maps pass-1 user FP corrections from original to processed coordinates,
@@ -1761,6 +1785,7 @@ def _validate_verification_ads(slug, episode_id, verification_ads_processed,
         max_ad_duration_override=max_ad_duration_override,
         cue_gate_enabled=cue_gate_enabled,
         splice_veto=False,
+        podcast_id=podcast_id,
     )
 
     # Pair each processed candidate with its original-coords twin before
@@ -1921,9 +1946,10 @@ def _gate_verification_ads_by_confidence(verification_ads_processed,
     double-count pending_review_count. When the dropped ad corroborates a
     releasable hold (see _corroborates_hold), the hold's
     marker dict is stamped pass2_corroborated in place so
-    _auto_approve_corroborated_holds can approve it through the standard
-    human-approval path after the episode completes. corroborated_count is
-    the number of newly stamped markers (they need a re-save).
+    _file_corroborated_hold_approvals can approve it through the standard
+    human-approval path, before the run finalizes, and the run's own recut
+    cuts it. corroborated_count is the number of newly stamped markers (they
+    need a re-save).
 
     Note: verification ads can never carry cue evidence (snap is pass-1 only),
     so on a cue-gated feed every pass-2 proposal is held -- intended
@@ -2037,20 +2063,11 @@ def _gate_verification_ads_by_confidence(verification_ads_processed,
     return v_ads_to_cut, v_ads_for_ui, v_ads_held, corroborated_count
 
 
-def _auto_approve_corroborated_holds(slug, episode_id, episode_title,
-                                      podcast_name, episode_description,
-                                      markers):
-    """Approve pass-2-corroborated holds through the standard human-approval
-    path: file the same confirm correction the approve button
-    writes, then run the standard recut from the retained original audio.
+def _file_corroborated_hold_approvals(slug, episode_id, markers):
+    """File the confirm corrections for pass-2-corroborated holds.
 
-    Runs only after the episode has fully completed. Pending-hold audio is
-    never cut mid-pipeline; when the preconditions are unmet or the recut
-    fails, the markers stay pending for a manual approval (a recut failure
-    carries the same episode-level effects as a failed manual recut). The
-    recut deliberately gets no cancel_event: a cancel here would propagate to
-    the background wrapper's cleanup, which deletes the completed episode's
-    files. Returns the number of holds approved and recut."""
+    Returns the count filed; the caller owns the recut that applies them, so
+    the pipeline can fold them into its own and finalize once."""
     holds = [m for m in markers or []
              if m.get('pass2_corroborated') and is_pending_review(m)
              and m.get('hold_reason') in PASS2_AUTOAPPROVE_HOLD_REASONS]
@@ -2125,13 +2142,10 @@ def _auto_approve_corroborated_holds(slug, episode_id, episode_title,
                 + (f" trimmed to {span['start']:.1f}s-{span['end']:.1f}s"
                    if trimmed else "")
                 + ": pass-2 independently re-detected the span as an ad")
-        recut_ok = _recut_episode(slug, episode_id, episode_title,
-                                   podcast_name, episode_description,
-                                   time.time(), cancel_event=None)
-        return len(holds) if recut_ok else 0
+        return len(holds)
     except Exception as e:
         audio_logger.warning(
-            f"[{slug}:{episode_id}] Auto-approve recut failed: {e}; "
+            f"[{slug}:{episode_id}] Auto-approve failed: {e}; "
             f"hold(s) remain pending for manual approval")
         return 0
 
@@ -2241,8 +2255,8 @@ def _run_verification_pass(ctx, processed_path, pass1_cuts,
     ``pass1_held_markers`` are pass-1 markers held for review (original
     coordinates); a pass-2 cut overlapping one is dropped so the protected
     region survives. A corroborating re-detection of a differential hold
-    stamps the marker dict pass2_corroborated in place for post-completion
-    auto-approval.
+    stamps the marker dict pass2_corroborated in place so the run files the
+    approval before it finalizes.
 
     ``pass1_kept_markers`` are pass-1 markers with action_applied == 'keep';
     a verification finding overlapping one is dropped before it can be cut,
@@ -2336,6 +2350,7 @@ def _run_verification_pass(ctx, processed_path, pass1_cuts,
                     processed_duration=processed_duration,
                     max_ad_duration_override=max_ad_duration_override,
                     cue_gate_enabled=cue_gate_enabled,
+                    podcast_id=ctx.podcast_id,
                 )
 
             # Kept-span exclusion: must run before any finding is routed to
@@ -2771,6 +2786,9 @@ def _persist_episode_state(slug, episode_id, pass1_cut_count, verification_count
         ads_removed=pass1_cut_count + verification_count,
         ads_removed_firstpass=first_pass_count,
         ads_removed_secondpass=verification_count,
+        # A successful finalize clears any message left by an earlier failure
+        # or by the stuck-row sweep.
+        error_message=None,
         reprocess_mode=None,
         reprocess_requested_at=None,
         deferred_at=None,
@@ -3016,6 +3034,16 @@ def _apply_boundary_adjustments(slug, episode_id, all_ads):
         audio_logger.info(f"[{slug}:{episode_id}] Recut: applied {applied} boundary adjustment(s)")
 
 
+def _split_recut_counts(total_cut, verification_count):
+    """Split a recut's cut total into (first pass, verification).
+
+    ad_markers_json already holds the merged pass-2 spans, so a recut's own
+    count is the total. Persistence adds the two back together, so the
+    verification share has to come out of the total, not on top of it."""
+    verification_count = max(0, min(verification_count or 0, total_cut))
+    return total_cut - verification_count, verification_count
+
+
 def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
                           episode_description, min_cut_confidence,
                           podcast_id=None):
@@ -3089,6 +3117,7 @@ def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
         min_cut_confidence=min_cut_confidence,
         max_ad_duration_override=max_ad_duration_override,
         cue_gate_enabled=cue_gate_enabled,
+        podcast_id=podcast_id,
     )
     validation_result = validator.validate(all_ads, audio_analysis=audio_analysis)
 
@@ -3222,7 +3251,9 @@ def _passthrough_episode(slug, episode_id, episode_url, episode_title,
 
 
 def _recut_episode(slug, episode_id, episode_title, podcast_name,
-                    episode_description, start_time, cancel_event=None):
+                    episode_description, start_time, cancel_event=None,
+                    run_stats=None, verification_count=0,
+                    audio_cue_detections=0, owns_failure=True, progress=None):
     """Recut mode (issue #422): re-cut the retained original audio from the
     current ad detections and re-time the saved transcript -- no download,
     transcription, detection, LLM, or verification pass. Preconditions
@@ -3231,7 +3262,14 @@ def _recut_episode(slug, episode_id, episode_title, podcast_name,
     Segment-category actions are re-resolved against the current per-feed/
     global maps before cutting (issue #565): a marker's cut/keep fate is
     not pinned to whatever the map said the last time this episode was
-    processed. See the re-partition block below for the exact rule."""
+    processed. See the re-partition block below for the exact rule.
+
+    run_stats, verification_count, and audio_cue_detections are forwarded to
+    the history row, so a folded approval recut keeps the run's stats.
+    owns_failure=False leaves the failure to the caller. ``progress`` is a dict
+    the recut stamps 'mutated' on before it overwrites the episode's markers or
+    audio, so a caller that means to fall back knows whether anything it would
+    finalize is still intact."""
 
     work_path = None
     episode_data = db.get_episode(slug, episode_id)
@@ -3312,6 +3350,10 @@ def _recut_episode(slug, episode_id, episode_title, podcast_name,
             master = _find_master(all_ads_with_validation, ad)
             if master is not None:
                 master['was_cut'] = False
+        # Past this point the recut owns the episode's markers and audio, so a
+        # later failure cannot be papered over by finalizing the earlier render.
+        if progress is not None:
+            progress['mutated'] = True
         storage.save_combined_ads(slug, episode_id, all_ads_with_validation)
 
         new_duration = local_audio_processor.get_audio_duration(processed_path)
@@ -3351,13 +3393,29 @@ def _recut_episode(slug, episode_id, episode_title, podcast_name,
         )
         held_count = sum(1 for m in all_ads_with_validation if is_pending_review(m))
         not_cut_count = count_not_cut(all_ads_with_validation)
+        first_pass_count, verification_count = _split_recut_counts(
+            pass1_cut_count, verification_count)
+        if run_stats is not None and 'verification_ads_cut' in run_stats:
+            # Capped here as well, or the run's stat and the history row report
+            # different pass-2 counts.
+            run_stats['verification_ads_cut'] = verification_count
+        if run_stats is not None and original_duration and new_duration:
+            # Recomputed here: the caller's copy predates the approvals this
+            # recut just cut.
+            run_stats['seconds_removed'] = round(original_duration - new_duration, 2)
+            if isinstance(run_stats.get('markers'), dict):
+                run_stats['markers'] = dict(run_stats['markers'],
+                                            cut=pass1_cut_count,
+                                            held=held_count,
+                                            not_cut=not_cut_count)
         _finalize_episode(slug, episode_id, episode_title, podcast_name,
-                           pass1_cut_count, verification_count=0,
-                           first_pass_count=pass1_cut_count,
+                           first_pass_count, verification_count=verification_count,
+                           first_pass_count=first_pass_count,
                            original_duration=original_duration,
                            new_duration=new_duration, start_time=start_time,
                            processed_version=new_version,
-                           audio_cue_detections=0,
+                           audio_cue_detections=audio_cue_detections,
+                           run_stats=run_stats,
                            ads_held=held_count, ads_not_cut=not_cut_count)
         status_service.complete_job()
         return True
@@ -3365,8 +3423,11 @@ def _recut_episode(slug, episode_id, episode_title, podcast_name,
     except ProcessingCancelled:
         raise
     except Exception as e:
-        _handle_processing_failure(slug, episode_id, episode_title, podcast_name,
-                                    episode_data, e, start_time)
+        if owns_failure:
+            _handle_processing_failure(slug, episode_id, episode_title, podcast_name,
+                                        episode_data, e, start_time)
+        else:
+            audio_logger.exception(f"[{slug}:{episode_id}] Recut failed: {e}")
         return False
     finally:
         if work_path and os.path.exists(work_path):
@@ -3750,6 +3811,7 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                     max_ad_duration_override=max_ad_duration_override,
                     cue_gate_enabled=cue_gate_enabled,
                     audio_analysis=_val_audio_analysis,
+                    podcast_id=podcast_id,
                 )
 
                 # Late keep partition: _refine_and_validate's heuristic
@@ -3795,14 +3857,16 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
             # reviewer-adjusted start can be pulled back to the splice point.
             ads_to_remove = _snap_terminal_starts(
                 slug, episode_id, ads_to_remove, all_ads_with_validation,
-                segments, audio_analysis_result, episode_duration
+                segments, audio_analysis_result, episode_duration,
+                podcast_name=podcast_name
             )
 
             # Tail completion: final content-based end sweep after the reviewer,
             # which can pull cut ends back to the detector boundary and strand
             # the trailing CTA in the audio.
             ads_to_remove = _complete_cut_tails(
-                slug, episode_id, ads_to_remove, all_ads_with_validation, segments
+                slug, episode_id, ads_to_remove, all_ads_with_validation,
+                segments, podcast_name=podcast_name
             )
 
             # Backstop: the late keep partition above should already have
@@ -3998,6 +4062,39 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                 run_stats['verification_ads_cut'] = verification_count
             if new_duration:
                 run_stats['seconds_removed'] = round(original_duration - new_duration, 2)
+            # File the confirms before finalizing so the recut below applies
+            # them in this run: two finalizes wrote two history rows and
+            # notified twice for one reprocess.
+            if _file_corroborated_hold_approvals(
+                    slug, episode_id, all_ads_with_validation):
+                # No cancel_event: a cancel here reaches the background
+                # wrapper's cleanup, which deletes the finished files.
+                recut_progress = {}
+                if _recut_episode(slug, episode_id, episode_title,
+                                   podcast_name, episode_description,
+                                   start_time, cancel_event=None,
+                                   run_stats=run_stats,
+                                   verification_count=verification_count,
+                                   audio_cue_detections=audio_cue_count,
+                                   owns_failure=False,
+                                   progress=recut_progress):
+                    return True
+                if recut_progress.get('mutated'):
+                    # The recut already replaced the markers and the audio, so
+                    # this run's render is gone and only it can own the outcome.
+                    _handle_processing_failure(
+                        slug, episode_id, episode_title, podcast_name,
+                        db.get_episode(slug, episode_id),
+                        RuntimeError('Approval recut failed after rewriting the '
+                                     'episode'), start_time, run_stats=run_stats)
+                    return False
+                # Nothing was overwritten: finalize this run's render and leave
+                # the filed confirms for the next run to apply.
+                audio_logger.warning(
+                    f"[{slug}:{episode_id}] Approval recut failed before it "
+                    f"rewrote anything; finalizing this run's render"
+                )
+
             _finalize_episode(slug, episode_id, episode_title, podcast_name,
                                pass1_cut_count, verification_count, first_pass_count,
                                original_duration, new_duration, start_time,
@@ -4007,13 +4104,6 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                                ads_held=held_count, ads_not_cut=not_cut_count)
 
             status_service.complete_job()
-
-            # After the episode is fully complete: approve any differential
-            # hold pass 2 corroborated, via the same correction + recut path
-            # a human approval uses.
-            _auto_approve_corroborated_holds(
-                slug, episode_id, episode_title, podcast_name,
-                episode_description, all_ads_with_validation)
             return True
 
         finally:

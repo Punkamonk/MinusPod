@@ -11,6 +11,7 @@ from config import (
 )
 
 from database.episodes import normalize_published_at
+from database.podcasts import podping_declaration_columns
 from utils.http import safe_url_for_log
 from utils.time import parse_iso_utc, utc_now_iso
 
@@ -172,8 +173,17 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
             if discovered_count > 0:
                 # Even on 304, ensure artwork is cached (may be missing after DB restore)
                 podcast = db.get_podcast_by_slug(slug)
+                # A 304 carries no body, so a steady-state feed would never
+                # have its <podcast:podping> tag ingested (#579). Stamped only
+                # on a successful fetch, so a failing feed retries each cycle.
+                forced_reason = None
                 if podcast and not podcast.get('artwork_cached'):
-                    refresh_logger.info(f"[{slug}] Feed unchanged (304) but artwork missing, forcing full fetch")
+                    forced_reason = 'artwork missing'
+                elif podcast and not podcast.get('podping_checked_at'):
+                    forced_reason = 'podping declaration never read'
+                if forced_reason:
+                    refresh_logger.info(
+                        f"[{slug}] Feed unchanged (304) but {forced_reason}, forcing full fetch")
                     feed_content, new_etag, new_last_modified = rss_parser.fetch_feed_conditional(
                         feed_url, etag=None, last_modified=None
                     )
@@ -219,7 +229,7 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
         # success -- treating it as success would reset the failure counter
         # mid-outage. A clean parse of an empty placeholder feed still
         # counts as success.
-        parsed_feed = rss_parser.parse_feed(feed_content)
+        parsed_feed = rss_parser.parse_feed(feed_content, source=slug)
         if not parsed_feed or (not parsed_feed.feed and not parsed_feed.entries
                                and getattr(parsed_feed, 'bozo', False)):
             refresh_logger.error(f"[{slug}] Fetched feed could not be parsed as RSS")
@@ -242,12 +252,18 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
             if not website_url.startswith(('http://', 'https://')):
                 website_url = None
 
+            # Upstream <podcast:podping> declaration (#579): who may podping
+            # this feed, and whether it opts out entirely.
+            podping = rss_parser.extract_podping_declaration(feed_content)
+
             # Update podcast metadata (and ETag if available) in a single DB call
             update_kwargs = dict(
                 title=title,
                 description=description,
                 artwork_url=artwork_url,
                 website_url=website_url,
+                **podping_declaration_columns(
+                    podping.get('uses_podping'), podping.get('hive_accounts')),
                 last_checked_at=utc_now_iso()
             )
             # On force=True, always overwrite the stored ETag/Last-Modified --
@@ -296,7 +312,8 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
         # Discover all episodes from the feed (upsert as 'discovered').
         # Pass parsed_feed so extract_episodes does not re-parse the same
         # XML we already parsed above.
-        all_episodes = rss_parser.extract_episodes(feed_content, parsed_feed=parsed_feed)
+        all_episodes = rss_parser.extract_episodes(
+            feed_content, parsed_feed=parsed_feed, source=slug)
         inserted = db.bulk_upsert_discovered_episodes(slug, all_episodes)
         if inserted > 0:
             refresh_logger.info(f"[{slug}] Discovered {inserted} new episode(s)")
@@ -472,7 +489,7 @@ def rebuild_served_rss(slug, podcast=None):
         feed_content = rss_parser.fetch_feed(podcast['source_url'])
         if not feed_content:
             return False
-        parsed_feed = rss_parser.parse_feed(feed_content)
+        parsed_feed = rss_parser.parse_feed(feed_content, source=slug)
         _build_and_save_served_rss(slug, feed_content, parsed_feed, podcast)
         return True
     except Exception as e:

@@ -13,6 +13,7 @@ import DropdownMenu from '../components/DropdownMenu';
 import EpisodeList from '../components/EpisodeList';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { Pagination } from '../components/Pagination';
+import PodpingBadge from '../components/PodpingBadge';
 import { feedDisplayTitle } from '../utils/feedTitle';
 import FeedSettingsPanel from './feeds/FeedSettingsPanel';
 import FeedStatsCards from './feeds/FeedStatsCards';
@@ -20,7 +21,7 @@ import PodcastAdDistributionPanel from './feeds/PodcastAdDistributionPanel';
 import CueTemplatesPanel from './feeds/CueTemplatesPanel';
 import { formatStorage } from './settings/settingsUtils';
 import { formatDateTime } from '../utils/format';
-import { stripHtml } from '../utils/stripHtml';
+import RichText from '../components/RichText';
 import { btnDestructive, btnGhost, btnPrimary, btnSecondary } from '../components/buttonStyles';
 import { Modal } from '../components/Modal';
 
@@ -331,16 +332,17 @@ function FeedDetail() {
               </div>
             )}
             {feed.description && (
-              <p className="text-muted-foreground mt-2 line-clamp-3">{stripHtml(feed.description)}</p>
+              <RichText html={feed.description} className="text-muted-foreground mt-2 block wrap-break-word" />
             )}
             <div className="mt-4 flex flex-wrap gap-4 text-sm text-muted-foreground">
               <span>{feed.episodeCount} episodes</span>
               {feed.lastRefreshed && (
                 <span>Updated {formatDateTime(feed.lastRefreshed)}</span>
               )}
-              {feed.lastPodpingAt && (
-                <span>Last podping: {formatDateTime(feed.lastPodpingAt)}</span>
-              )}
+              <PodpingBadge
+                coverage={feed.podpingCoverage}
+                lastPodpingAt={feed.lastPodpingAt}
+              />
               {feed.lastRefreshError && (
                 <span
                   className="text-warning"

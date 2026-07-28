@@ -119,14 +119,15 @@ class SchemaMixin:
         'model_pricing',
         'token_usage',
         'ad_reviewer_log',
+        'podping_hosts',
     )
 
     def _create_new_tables_only(self, conn):
         """Create new tables for existing databases without running indexes."""
-        # Sentinel: ad_reviewer_log is the last table created in this block.
+        # Sentinel: podping_hosts is the last table created in this block.
         # If it already exists, every other CREATE IF NOT EXISTS below is a
         # no-op too, so we can skip the boot "Created new tables..." log.
-        sentinel_existed = self._table_exists(conn, 'ad_reviewer_log')
+        sentinel_existed = self._table_exists(conn, 'podping_hosts')
         for table in self._MIGRATION_CREATED_TABLES:
             conn.execute(TABLE_DDL[table])
 
@@ -142,6 +143,10 @@ class SchemaMixin:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ad_reviewer_log_podcast "
             "ON ad_reviewer_log(podcast_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_podping_hosts_last_seen "
+            "ON podping_hosts(last_seen_at DESC)"
         )
 
         conn.commit()
@@ -288,6 +293,7 @@ class SchemaMixin:
             ('differential_fetch_enabled', 'INTEGER'),
             # Phase C held-for-review per-feed settings
             ('max_ad_duration_override', 'REAL'),
+            ('max_ad_duration_reject_override', 'REAL'),
             ('cue_gated_approval', 'INTEGER DEFAULT 0'),
             ('skip_second_pass', 'INTEGER DEFAULT 0'),
             ('max_episodes', 'INTEGER'),
@@ -312,6 +318,15 @@ class SchemaMixin:
             ('chapters_mode', 'TEXT'),
             # Last received podping timestamp (podping-listener feature)
             ('last_podping_at', 'TEXT'),
+            # Upstream <podcast:podping> declaration (#579). podping_uses is a
+            # nullable bool: NULL when the feed carries no tag. hive_accounts
+            # is a JSON array of accounts allowed to podping this feed.
+            ('podping_uses', 'INTEGER'),
+            ('podping_hive_accounts', 'TEXT'),
+            # When the declaration was last read from the upstream body. NULL
+            # means never, which is what lets a 304 force one full fetch to
+            # read it instead of waiting for the feed to change (#579).
+            ('podping_checked_at', 'TEXT'),
             # Per-feed segment category action overrides (issue #565): partial
             # JSON map of category -> action, merged over the global
             # segment_category_actions setting at resolve time.
@@ -431,8 +446,8 @@ class SchemaMixin:
         self._add_column_if_missing(conn, 'ad_patterns', 'content_hash', 'TEXT', ap_cols)
 
         # category (#565): segment category (sponsor/cross_promo/etc) the
-        # pattern was learned from. NULL/unknown reads as 'sponsor' via
-        # normalize_segment_category, so pre-migration rows behave unchanged.
+        # pattern was learned from. NULL or unknown reads back as None, so a
+        # pre-migration row shows as uncategorized rather than as a sponsor.
         ap_cols = self._get_table_columns(conn, 'ad_patterns')
         self._add_column_if_missing(conn, 'ad_patterns', 'category', 'TEXT', ap_cols)
 
@@ -1241,6 +1256,14 @@ class SchemaMixin:
             self._run_env_backed_settings_migration(conn)
         except Exception as e:
             logger.error(f"env-backed settings migration failed: {e}")
+
+        # Shipped prompts track the current default while the row is still
+        # flagged is_default. Not in _seed_default_settings: that path returns
+        # early on any database with podcasts in it.
+        try:
+            self._refresh_shipped_prompt_defaults(conn)
+        except Exception as e:
+            logger.error(f"shipped prompt refresh failed: {e}")
 
         # One-shot backfill of processing_history.ads_detected (2.5.29).
         # See _run_backfill_history_ads_detected for the bug + predicate.
@@ -3158,6 +3181,25 @@ class SchemaMixin:
 
         conn.commit()
         logger.info("JSON to SQLite migration completed")
+
+    def _refresh_shipped_prompt_defaults(self, conn: 'sqlite3.Connection'):
+        """Re-point untouched prompt rows at the text this version ships.
+
+        Seeding only ever inserted, so an install kept whatever prompt existed
+        when its database was created and no later improvement reached it. A
+        row the user edited carries is_default = 0 and is left alone.
+        """
+        from database.settings import iter_refreshable_defaults
+
+        for key, value in iter_refreshable_defaults():
+            cursor = conn.execute(
+                "UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE key = ? AND is_default = 1 AND value != ?",
+                (value, key, value)
+            )
+            if cursor.rowcount:
+                logger.info("Refreshed %s to the shipped default", key)
+        conn.commit()
 
     def _seed_default_settings(self, conn: 'sqlite3.Connection'):
         """Seed default settings from SETTINGS_REGISTRY.

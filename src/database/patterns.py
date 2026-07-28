@@ -3,7 +3,7 @@ import json
 import logging
 from typing import Optional, Dict, List
 
-from config import normalize_segment_category
+from config import SEGMENT_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +20,11 @@ def _parse_bounds(raw: Optional[str]) -> Optional[Dict]:
 
 
 def _row_with_category(row: Dict) -> Dict:
-    """Default a NULL/unrecognized `category` to 'sponsor', mirroring
-    normalize_segment_category, so pre-migration and community-imported
-    rows with no category behave identically to an explicit 'sponsor' one."""
-    row['category'] = normalize_segment_category(row.get('category'))
+    """Drop a NULL or unrecognized `category` so an unclassified pattern is
+    unset the same way an unclassified marker is: key absent, never
+    present-and-None, which silently defeats a .get('category', default)."""
+    if row.get('category') not in SEGMENT_CATEGORIES:
+        row.pop('category', None)
     return row
 
 
@@ -174,9 +175,8 @@ class PatternMixin:
         Lets a multi-statement caller (e.g. replace-mode import) own the
         transaction boundary so the whole batch is atomic. Returns pattern ID.
 
-        category is stored as given (including None -> NULL); readers default
-        NULL to 'sponsor' via _row_with_category, so omitting it here is
-        backward compatible with every existing caller."""
+        category is stored as given (including None -> NULL); readers return
+        NULL as None, so omitting it here leaves the pattern uncategorized."""
         cursor = conn.execute(
             """INSERT INTO ad_patterns
                (scope, text_template, sponsor_id, podcast_id, network_id, dai_platform,

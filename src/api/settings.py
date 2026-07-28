@@ -8,8 +8,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping
 
-from flask import request
+from flask import request, send_file
 
+import replacement_audio
 from api import (
     api, log_request, json_response, error_response,
     get_database, _enrich_models_with_pricing, limiter,
@@ -26,8 +27,10 @@ from config import (
     AD_REVIEWER_PARALLEL_ADS_DEFAULT,
     AD_REVIEWER_PARALLEL_ADS_MIN,
     AD_REVIEWER_PARALLEL_ADS_MAX,
+    WHISPER_API_TIMEOUT_MIN, WHISPER_API_TIMEOUT_MAX,
     coerce_bool_setting,
     MIN_CONTENT_BETWEEN_ADS_SECONDS,
+    MAX_AD_DURATION, MAX_AD_DURATION_CONFIRMED,
     get_env_backed_int,
     MAX_ARTWORK_BYTES_MIN, MAX_ARTWORK_BYTES_MAX, MAX_RSS_BYTES_MIN,
     MAX_AUDIO_DOWNLOAD_MB_MIN,
@@ -293,6 +296,9 @@ def get_settings():
     vad_gap_mid = _db_float('vad_gap_mid_min_seconds', default_vad_gap_mid)
     vad_gap_tail = _db_float('vad_gap_tail_min_seconds', default_vad_gap_tail)
     min_content_between_ads = _db_float('min_content_between_ads_seconds', MIN_CONTENT_BETWEEN_ADS_SECONDS)
+    max_ad_duration = _db_float('max_ad_duration_seconds', MAX_AD_DURATION)
+    max_ad_duration_confirmed = _db_float('max_ad_duration_confirmed_seconds',
+                                          MAX_AD_DURATION_CONFIRMED)
 
     # Detection tuning (2.76.0): verification-miss hold/autocut confidence,
     # learning confidence floors, differential correlation/hold thresholds.
@@ -354,6 +360,8 @@ def get_settings():
         except (ValueError, TypeError):
             return default
 
+    whisper_api_timeout_seconds = _db_int(
+        'whisper_api_timeout_seconds', registry_get_default('whisper_api_timeout_seconds'))
     transcribe_max_chunk_seconds = _db_int(
         'transcribe_max_chunk_seconds', registry_get_default('transcribe_max_chunk_seconds'))
     transcribe_concurrent_chunks = _db_int(
@@ -520,6 +528,9 @@ def get_settings():
         'vadGapMidMinSeconds': _sv('vad_gap_mid_min_seconds', vad_gap_mid),
         'vadGapTailMinSeconds': _sv('vad_gap_tail_min_seconds', vad_gap_tail),
         'minContentBetweenAdsSeconds': _sv('min_content_between_ads_seconds', min_content_between_ads),
+        'maxAdDurationSeconds': _sv('max_ad_duration_seconds', max_ad_duration),
+        'maxAdDurationConfirmedSeconds': _sv('max_ad_duration_confirmed_seconds',
+                                             max_ad_duration_confirmed),
         'audioCueDetectionEnabled': _sv('audio_cue_detection_enabled', audio_cue_enabled),
         'audioCueFreqMinHz': _sv('audio_cue_freq_min_hz', audio_cue_freq_min),
         'audioCueFreqMaxHz': _sv('audio_cue_freq_max_hz', audio_cue_freq_max),
@@ -561,6 +572,7 @@ def get_settings():
         'maxArtworkBytes': _sv('max_artwork_bytes', max_artwork_bytes),
         'maxRssBytes': _sv('max_rss_bytes', max_rss_bytes),
         'maxAudioDownloadMb': _sv('max_audio_download_mb', max_audio_download_mb),
+        'whisperApiTimeoutSeconds': _sv('whisper_api_timeout_seconds', whisper_api_timeout_seconds),
         'transcribeMaxChunkSeconds': _sv('transcribe_max_chunk_seconds', transcribe_max_chunk_seconds),
         'transcribeConcurrentChunks': _sv('transcribe_concurrent_chunks', transcribe_concurrent_chunks),
         'transcribeChunkOverlapSeconds': _sv('transcribe_chunk_overlap_seconds', transcribe_chunk_overlap_seconds),
@@ -616,6 +628,7 @@ def update_ad_detection_settings():
         _apply_transcribe_chunk_fields,
         _apply_stage_tunables,
         _apply_ad_merge_fields,
+        _apply_max_ad_duration_fields,
         _apply_detection_tuning_fields,
         _apply_segment_category_actions,
         _apply_community_sync_categories,
@@ -943,20 +956,22 @@ def _apply_audio_fields(db, data):
 def _apply_transcribe_chunk_fields(db, data):
     """Chunked transcription tuning (parallel API path)."""
     parsed = {}
-    for field_name, db_key, max_val in (
-        ('transcribeMaxChunkSeconds', 'transcribe_max_chunk_seconds', 7200),
-        ('transcribeConcurrentChunks', 'transcribe_concurrent_chunks', 32),
-        ('transcribeChunkOverlapSeconds', 'transcribe_chunk_overlap_seconds', 600),
+    for field_name, db_key, min_val, max_val in (
+        ('transcribeMaxChunkSeconds', 'transcribe_max_chunk_seconds', 1, 7200),
+        ('transcribeConcurrentChunks', 'transcribe_concurrent_chunks', 1, 32),
+        ('transcribeChunkOverlapSeconds', 'transcribe_chunk_overlap_seconds', 1, 600),
+        ('whisperApiTimeoutSeconds', 'whisper_api_timeout_seconds',
+         WHISPER_API_TIMEOUT_MIN, WHISPER_API_TIMEOUT_MAX),
     ):
         if field_name not in data:
             continue
         try:
             value = int(data[field_name])
         except (TypeError, ValueError):
-            return json_response({'error': f'{field_name} must be a positive integer'}, 400)
-        if value < 1 or value > max_val:
+            return json_response({'error': f'{field_name} must be an integer'}, 400)
+        if not (min_val <= value <= max_val):
             return json_response(
-                {'error': f'{field_name} must be between 1 and {max_val}'}, 400
+                {'error': f'{field_name} must be between {min_val} and {max_val}'}, 400
             )
         parsed[db_key] = value
 
@@ -1147,6 +1162,7 @@ def _apply_whisper_fields(db, data):
         enabled = coerce_bool_setting(data['skipFlacCompression'])
         db.set_setting('skip_flac_compression', 'true' if enabled else 'false', is_default=False)
         logger.info(f"Updated skip_flac_compression to: {enabled}")
+
     return None
 
 
@@ -1188,6 +1204,49 @@ def _apply_ad_merge_fields(db, data):
         return json_response({'error': 'minContentBetweenAdsSeconds must be between 0 and 60'}, 400)
     db.set_setting('min_content_between_ads_seconds', str(value), is_default=False)
     logger.info(f"Updated min_content_between_ads_seconds to: {value}")
+    return None
+
+
+def _apply_max_ad_duration_fields(db, data):
+    """Persist the ad-length ceilings. Past the first an ad needs a confirmed
+    sponsor; past the second nothing helps. The pair is validated before either
+    is written so confirmation can never lower an ad's allowed length."""
+    def read(key, setting, default):
+        """(value, was sent) for one field, or a 400 response on a bad value."""
+        if key not in data:
+            return db.get_setting_float(setting, default), False, None
+        try:
+            value = float(data[key])
+        except (TypeError, ValueError):
+            return None, True, json_response({'error': f'{key} must be a number'}, 400)
+        if not math.isfinite(value) or value < 30.0 or value > 3600.0:
+            return None, True, json_response(
+                {'error': f'{key} must be between 30 and 3600'}, 400)
+        return value, True, None
+
+    threshold, threshold_sent, err = read(
+        'maxAdDurationSeconds', 'max_ad_duration_seconds', MAX_AD_DURATION)
+    if err:
+        return err
+    ceiling, ceiling_sent, err = read(
+        'maxAdDurationConfirmedSeconds', 'max_ad_duration_confirmed_seconds',
+        MAX_AD_DURATION_CONFIRMED)
+    if err:
+        return err
+    if not (threshold_sent or ceiling_sent):
+        return None
+    if threshold > ceiling:
+        return json_response(
+            {'error': 'maxAdDurationSeconds cannot exceed '
+                      'maxAdDurationConfirmedSeconds'}, 400)
+
+    for setting, value, sent in (
+        ('max_ad_duration_seconds', threshold, threshold_sent),
+        ('max_ad_duration_confirmed_seconds', ceiling, ceiling_sent),
+    ):
+        if sent:
+            db.set_setting(setting, str(value), is_default=False)
+            logger.info(f"Updated {setting} to: {value}")
     return None
 
 
@@ -2379,10 +2438,16 @@ def update_reviewer_settings():
 # ========== Community-pattern sync settings ==========
 
 def _community_category_breakdown(db) -> Dict[str, int]:
-    """Per-category counts of currently-active (synced) community patterns."""
+    """Per-category counts of active community patterns, resolved the same way
+    community_sync filters, so an unset category counts as sponsor there too."""
     breakdown = {cat: 0 for cat in SEGMENT_CATEGORIES}
     for pattern in db.get_patterns_by_source('community', active_only=True):
-        breakdown[pattern.get('category', 'sponsor')] += 1
+        category = pattern.get('category')
+        # Folded rather than passed to normalize_segment_category, whose
+        # docstring rules it out for a displayed count. The fold is still right
+        # here: community_sync's filter treats unset as sponsor, so this is the
+        # number of patterns the sponsor toggle actually syncs.
+        breakdown[category if category in SEGMENT_CATEGORIES else 'sponsor'] += 1
     return breakdown
 
 
@@ -2580,3 +2645,55 @@ def delete_all_community_patterns():
     db = get_database()
     deleted = db.delete_all_community_patterns()
     return json_response({'deleted': deleted})
+
+
+@api.route('/settings/replacement-audio', methods=['GET'])
+@log_request
+def get_replacement_audio():
+    """Metadata for the audio spliced in where an ad was cut."""
+    return json_response(replacement_audio.describe())
+
+
+@api.route('/settings/replacement-audio/file', methods=['GET'])
+@log_request
+def get_replacement_audio_file():
+    """Serve the current replacement audio so the UI can play it."""
+    path, mimetype = replacement_audio.current_file()
+    if not path:
+        return error_response('no replacement audio is installed', 404)
+    response = send_file(path, mimetype=mimetype, as_attachment=False,
+                         download_name='replace.mp3')
+    # The path is stable across uploads, so without this a swap keeps playing
+    # the file the browser already cached.
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@api.route('/settings/replacement-audio', methods=['POST'])
+@limiter.limit("10/minute")
+@log_request
+def upload_replacement_audio():
+    """Install an operator-supplied replacement, transcoded to MP3."""
+    upload = request.files.get('file')
+    if upload is None:
+        return error_response('an audio file is required (multipart field "file")', 400)
+    # Read whole so the rejection message can name the real size; Flask's
+    # MAX_CONTENT_LENGTH already bounds the request at 10 MB.
+    raw = upload.stream.read()
+    try:
+        info = replacement_audio.save_upload(raw)
+    except replacement_audio.ToolMissingError as e:
+        return error_response(str(e), 503)
+    except replacement_audio.ReplacementAudioError as e:
+        return error_response(str(e), 400)
+    return json_response(info)
+
+
+@api.route('/settings/replacement-audio', methods=['DELETE'])
+@log_request
+def delete_replacement_audio():
+    """Drop the uploaded replacement and fall back to the shipped default."""
+    reverted = replacement_audio.revert()
+    info = replacement_audio.describe()
+    info['reverted'] = reverted
+    return json_response(info)

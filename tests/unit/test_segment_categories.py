@@ -68,20 +68,20 @@ class TestMergeDetectionResultsStampsCategory:
     def _det(self):
         return AdDetector(api_key='test-key')
 
-    def test_fingerprint_ad_defaults_to_sponsor(self):
+    def test_fingerprint_ad_without_a_category_stays_unset(self):
         det = self._det()
         out = det._merge_detection_results([_ad(10.0, 40.0, 'fingerprint')])
-        assert out[0]['category'] == 'sponsor'
+        assert 'category' not in out[0]
 
-    def test_text_pattern_ad_defaults_to_sponsor(self):
+    def test_text_pattern_ad_without_a_category_stays_unset(self):
         det = self._det()
         out = det._merge_detection_results([_ad(10.0, 40.0, 'text_pattern')])
-        assert out[0]['category'] == 'sponsor'
+        assert 'category' not in out[0]
 
-    def test_dai_differential_ad_defaults_to_sponsor(self):
+    def test_dai_differential_ad_without_a_category_stays_unset(self):
         det = self._det()
         out = det._merge_detection_results([_ad(10.0, 40.0, 'dai_differential')])
-        assert out[0]['category'] == 'sponsor'
+        assert 'category' not in out[0]
 
     def test_llm_ad_valid_category_survives_merge(self):
         det = self._det()
@@ -89,13 +89,14 @@ class TestMergeDetectionResultsStampsCategory:
             [_ad(10.0, 40.0, 'claude', category='cross_promo')])
         assert out[0]['category'] == 'cross_promo'
 
-    def test_llm_ad_unknown_category_normalizes_to_sponsor(self):
+    def test_llm_ad_unknown_category_is_left_unset(self):
         det = self._det()
         out = det._merge_detection_results(
             [_ad(10.0, 40.0, 'claude', category='advertisement')])
-        assert out[0]['category'] == 'sponsor'
+        # Recording it as sponsor would claim a classification nothing made.
+        assert out[0].get('category') is None
 
-    def test_mixed_stage_ads_all_carry_a_valid_category(self):
+    def test_mixed_stage_ads_keep_valid_categories_and_leave_the_rest_unset(self):
         det = self._det()
         ads = [
             _ad(10.0, 40.0, 'fingerprint'),
@@ -106,7 +107,9 @@ class TestMergeDetectionResultsStampsCategory:
         out = det._merge_detection_results(ads)
         assert len(out) == 4
         for marker in out:
-            assert marker['category'] in SEGMENT_CATEGORIES
+            if 'category' in marker:
+                assert marker['category'] in SEGMENT_CATEGORIES
+        assert [m.get('category') for m in out] == [None, None, None, 'self_promo']
 
 
 class TestParseAdsFromResponseCarriesCategory:
@@ -124,13 +127,16 @@ class TestParseAdsFromResponseCarriesCategory:
         assert len(ads) == 1
         assert ads[0]['category'] == 'cross_promo'
 
-    def test_unknown_category_passes_through_unvalidated(self):
+    def test_a_value_outside_the_vocabulary_counts_as_missing(self):
+        """It used to be carried through and normalized to sponsor at the merge
+        seam. Treating it as absent means the repair pass gets a chance at it,
+        and the merge seam still defaults to sponsor if that fails."""
         response = json.dumps([{
             "start": 100.0, "end": 160.0, "confidence": 0.92,
             "reason": "ad", "sponsor": "X", "category": "advertisement",
         }])
         ads = parse_ads_from_response(response)
-        assert ads[0]['category'] == 'advertisement'
+        assert 'category' not in ads[0]
 
     def test_missing_category_field_stays_absent(self):
         response = json.dumps([{
@@ -335,7 +341,7 @@ def _dtns5317_raw_llm_detections():
     ]
 
 
-class TestDTNS5317IntroOutroSurviveFullPipeline:
+class TestIntroOutroSurviveFullPipeline:
     """End-to-end reproduction of DTNS 5317: the raw 9 LLM window
     detections, run through deduplicate_window_ads and
     _merge_detection_results with the feed's real action map, must keep
@@ -365,7 +371,8 @@ class TestDTNS5317IntroOutroSurviveFullPipeline:
         # Every remove-side marker still resolves to 'sponsor'/'remove':
         # the surrounding ad content is still cut, only the categorized
         # keep spans are protected.
-        assert all(m['category'] == 'sponsor' for m in remove_ads)
+        assert all(normalize_segment_category(m.get('category')) == 'sponsor'
+                   for m in remove_ads)
         remove_by_start = {m['start']: m for m in remove_ads}
         assert remove_by_start[0.0]['end'] == 156.7
         assert remove_by_start[2385.8]['end'] == 2444.9
@@ -386,9 +393,267 @@ class TestDTNS5317IntroOutroSurviveFullPipeline:
         assert keep_ads == []
         # Every marker resolves to 'remove' regardless of its stamped
         # category label (an all-remove map cuts everything).
-        assert all(all_remove[m['category']] == 'remove' for m in remove_ads)
+        assert all(all_remove[normalize_segment_category(m.get('category'))] == 'remove'
+                   for m in remove_ads)
         # Intro fused into the pre-roll block, outro fused into the
         # trailing sponsor ad, matching the unfixed shape.
         by_start = {m['start']: m for m in remove_ads}
         assert by_start[0.0]['end'] == 166.6
         assert by_start[2324.5]['end'] == 2444.9
+
+
+class TestMergedSpanTakesTheDominantCategory:
+    """A merged span used to keep whichever member sorted first, so a break
+    holding a sponsor read, a self-promo and a cross-promo was labelled by
+    accident. Observed on a real episode: three distinct categories at
+    detection, all four final markers reading sponsor.
+    """
+
+    def _detector(self):
+        d = AdDetector.__new__(AdDetector)
+        d.pattern_service = None
+        return d
+
+    def _ad(self, start, end, category, conf=0.95):
+        return {'start': start, 'end': end, 'confidence': conf,
+                'category': category, 'reason': f'{category} read',
+                'detection_stage': 'claude'}
+
+    def test_the_longest_member_names_the_span(self):
+        merged = self._detector()._merge_detection_results([
+            self._ad(100.0, 120.0, 'self_promo'),
+            self._ad(110.0, 200.0, 'sponsor'),
+        ])
+        assert len(merged) == 1
+        assert merged[0]['category'] == 'sponsor'
+
+    def test_order_does_not_decide_it(self):
+        """Same spans, reversed input: the answer must not change."""
+        merged = self._detector()._merge_detection_results([
+            self._ad(110.0, 200.0, 'sponsor'),
+            self._ad(100.0, 120.0, 'self_promo'),
+        ])
+        assert merged[0]['category'] == 'sponsor'
+
+    def test_an_uncategorized_extension_does_not_credit_the_incumbent(self):
+        """The incumbent's span was captured lazily at the first categorized
+        competitor, after an uncategorized member had already extended the
+        merged end, so it was credited audio it never classified."""
+        merged = self._detector()._merge_detection_results([
+            self._ad(100.0, 130.0, 'sponsor'),
+            self._ad(100.0, 300.0, None),
+            self._ad(130.0, 300.0, 'self_promo'),
+        ])
+        assert len(merged) == 1
+        assert merged[0]['category'] == 'self_promo'
+
+    def test_an_invalid_category_cannot_displace_a_valid_one(self):
+        merged = self._detector()._merge_detection_results([
+            self._ad(100.0, 130.0, 'self_promo'),
+            self._ad(100.0, 300.0, 'advertisement'),
+        ])
+        assert merged[0]['category'] == 'self_promo'
+
+    def test_a_short_dominant_member_keeps_its_label(self):
+        merged = self._detector()._merge_detection_results([
+            self._ad(100.0, 190.0, 'cross_promo'),
+            self._ad(180.0, 200.0, 'sponsor'),
+        ])
+        assert merged[0]['category'] == 'cross_promo'
+
+    def test_a_member_without_a_category_never_displaces_one(self):
+        uncategorized = {'start': 110.0, 'end': 300.0, 'confidence': 0.95,
+                         'reason': 'no category given', 'detection_stage': 'claude'}
+        merged = self._detector()._merge_detection_results([
+            self._ad(100.0, 120.0, 'cross_promo'), uncategorized,
+        ])
+        assert merged[0]['category'] == 'cross_promo'
+
+    def test_the_bookkeeping_key_is_stripped(self):
+        merged = self._detector()._merge_detection_results([
+            self._ad(100.0, 120.0, 'self_promo'),
+            self._ad(110.0, 200.0, 'sponsor'),
+        ])
+        assert '_category_span' not in merged[0]
+
+
+class TestCategoryIsNotASponsorName:
+    """The sponsor scan falls back to any short string field, and 'category'
+    was not excluded, so a verification-pass ad reported sponsor='self_promo'."""
+
+    def _sponsor_for(self, ad):
+        parsed = parse_ads_from_response(json.dumps([ad]))
+        return parsed[0].get('sponsor') if parsed else None
+
+    def test_category_is_not_used_as_the_sponsor_name(self):
+        sponsor = self._sponsor_for({
+            'start': 10.0, 'end': 60.0, 'confidence': 0.95,
+            'category': 'self_promo',
+            'reason': 'Patreon promo',
+        })
+
+        assert sponsor != 'self_promo'
+
+    def test_a_real_sponsor_field_still_wins(self):
+        sponsor = self._sponsor_for({
+            'start': 10.0, 'end': 60.0, 'confidence': 0.95,
+            'category': 'sponsor', 'sponsor': 'Acme',
+            'reason': 'Acme host read',
+        })
+
+        assert sponsor == 'Acme'
+
+    def test_segment_type_is_not_used_either(self):
+        sponsor = self._sponsor_for({
+            'start': 10.0, 'end': 60.0, 'confidence': 0.95,
+            'segment_type': 'cross_promo',
+            'reason': 'Promo for another show',
+        })
+
+        assert sponsor != 'cross_promo'
+
+
+class TestUncategorizedIsNotSponsor:
+    """'sponsor' used to double as 'nobody classified this', which made a real
+    sponsor read indistinguishable from an unclassified marker."""
+
+    def test_a_stage_that_never_classifies_stays_uncategorized(self):
+        out = AdDetector(api_key='test-key')._merge_detection_results(
+            [_ad(10.0, 60.0, 'cue_pair')])
+
+        assert 'category' not in out[0]
+
+    def test_a_real_category_still_survives_the_merge(self):
+        out = AdDetector(api_key='test-key')._merge_detection_results(
+            [_ad(10.0, 60.0, 'claude', category='self_promo')])
+
+        assert out[0]['category'] == 'self_promo'
+
+    def test_an_invalid_category_is_left_unset(self):
+        out = AdDetector(api_key='test-key')._merge_detection_results(
+            [_ad(10.0, 60.0, 'claude', category='not_a_real_category')])
+
+        assert out[0].get('category') is None
+
+    def test_action_resolution_still_reads_unknown_as_sponsor(self):
+        """Cutting behaviour must not change: unknown stays conservative."""
+        from config import normalize_segment_category
+
+        assert normalize_segment_category(None) == 'sponsor'
+
+
+class TestStagesThatClassifyAtSource:
+    """A DAI insert and a foreign-language block are paid ads by definition,
+    so they carry a category rather than relying on a downstream default."""
+
+    def test_differential_ads_are_sponsors(self):
+        from ad_detector import dai_differential_ads
+        ads = dai_differential_ads(
+            {'regions': [{'kind': 'differential', 'corr': 0.1,
+                          'start_s': 100.0, 'end_s': 200.0}]}, [],
+            corroborating_spans=[(100.0, 200.0)])
+
+        assert ads and all(a['category'] == 'sponsor' for a in ads)
+
+
+class TestVerificationPromptCoversEveryCategory:
+    def test_every_valid_category_is_offered_to_the_verification_pass(self):
+        """Three categories were unreachable from pass 2 while the settings UI
+        still exposed a per-category action for each of them."""
+        from config import SEGMENT_CATEGORIES
+        from database import DEFAULT_VERIFICATION_PROMPT
+
+        missing = [c for c in SEGMENT_CATEGORIES if c not in DEFAULT_VERIFICATION_PROMPT]
+        assert missing == []
+
+
+class TestUnsetStaysUnsetOnEverySavePath:
+    """The merge seam is not the only place a marker's category is settled."""
+
+    def test_a_pass2_marker_with_no_category_stays_unset(self):
+        from main_app.processing import _stamp_pass2_marker_categories
+
+        markers = [{'start': 1.0, 'end': 2.0},
+                   {'start': 3.0, 'end': 4.0, 'category': 'not-a-category'},
+                   {'start': 5.0, 'end': 6.0, 'category': 'outro'}]
+
+        _stamp_pass2_marker_categories(markers)
+
+        assert 'category' not in markers[0]
+        assert 'category' not in markers[1]
+        assert markers[2]['category'] == 'outro'
+
+    def test_the_duplicate_fold_does_not_invent_a_category(self):
+        from ad_detector import AdDetector
+
+        detector = AdDetector.__new__(AdDetector)
+        detector.pattern_service = None
+        folded = detector._merge_overlapping_accepted_duplicates([
+            {'start': 100.0, 'end': 200.0, 'confidence': 0.9,
+             'was_cut': True, 'detection_stage': 'claude'},
+            {'start': 100.0, 'end': 200.0, 'confidence': 0.8,
+             'was_cut': True, 'detection_stage': 'text_pattern'},
+        ])
+
+        assert len(folded) == 1
+        assert folded[0].get('category') is None
+
+
+class TestSplitSpansKeepTheirOwnCategoryReach:
+    """split_conflicting_action_span rewrites the accumulator, so its entries
+    need the same span stamp the append sites give theirs."""
+
+    def _detector(self):
+        d = AdDetector.__new__(AdDetector)
+        d.pattern_service = None
+        return d
+
+    def _ad(self, start, end, category):
+        return {'start': start, 'end': end, 'confidence': 0.95,
+                'category': category, 'reason': f'{category} read',
+                'detection_stage': 'claude'}
+
+    def test_a_short_member_cannot_relabel_a_split_span(self):
+        actions = {'sponsor': 'remove', 'cross_promo': 'remove',
+                   'self_promo': 'remove', 'interaction': 'remove',
+                   'intro': 'keep', 'outro': 'remove', 'recap': 'remove'}
+
+        merged = self._detector()._merge_detection_results([
+            self._ad(0.0, 60.0, 'intro'),
+            self._ad(30.0, 300.0, 'sponsor'),
+            self._ad(295.0, 305.0, 'cross_promo'),
+        ], action_map=actions)
+
+        long_span = max(merged, key=lambda m: m['end'] - m['start'])
+        assert long_span['category'] == 'sponsor'
+
+    def test_an_unrecognized_category_is_not_recorded_as_sponsor(self):
+        merged = self._detector()._merge_detection_results([
+            self._ad(100.0, 200.0, 'advertisement'),
+        ])
+
+        assert merged[0].get('category') is None
+
+
+class TestUnsetHasOneRepresentation:
+    """Unset category means the key is absent, for markers and pattern rows
+    alike. Present-and-None silently defeats .get('category', default)
+    consumers, which is how the community-sync page 500ed."""
+
+    def test_a_pattern_row_never_carries_a_none_category(self, temp_db):
+        for stored in (None, 'advertisement'):
+            pid = temp_db.create_ad_pattern(
+                scope='global', text_template=f'row for {stored} case ' * 3,
+                category=stored)
+            assert 'category' not in temp_db.get_ad_pattern_by_id(pid)
+
+    def test_markers_and_patterns_agree_on_absence(self, temp_db):
+        from main_app.processing import _stamp_pass2_marker_categories
+
+        pid = temp_db.create_ad_pattern(
+            scope='global', text_template='agreement row ' * 4)
+        marker = {'start': 1.0, 'end': 2.0}
+        _stamp_pass2_marker_categories([marker])
+
+        assert 'category' not in temp_db.get_ad_pattern_by_id(pid)
+        assert 'category' not in marker

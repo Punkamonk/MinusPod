@@ -13,6 +13,8 @@ import AdDetectionSection from './AdDetectionSection';
 interface TunablesState {
   minCutConfidence: number;
   minContentBetweenAdsSeconds: number;
+  maxAdDurationSeconds: number;
+  maxAdDurationConfirmedSeconds: number;
   verificationMissHoldMinConfidence: number;
   verificationMissAutocutMinConfidence: number;
   learningMinConfidence: number;
@@ -25,6 +27,8 @@ function defaultState(): TunablesState {
   return {
     minCutConfidence: 0.75,
     minContentBetweenAdsSeconds: 12,
+    maxAdDurationSeconds: 300,
+    maxAdDurationConfirmedSeconds: 900,
     verificationMissHoldMinConfidence: 0.6,
     verificationMissAutocutMinConfidence: 0,
     learningMinConfidence: 0.85,
@@ -48,6 +52,10 @@ function Harness({ onCommit }: { onCommit: (payload: TunablesState) => void }) {
         onMinCutConfidenceChange={patch('minCutConfidence')}
         minContentBetweenAdsSeconds={state.minContentBetweenAdsSeconds}
         onMinContentBetweenAdsSecondsChange={patch('minContentBetweenAdsSeconds')}
+        maxAdDurationSeconds={state.maxAdDurationSeconds}
+        onMaxAdDurationSecondsChange={patch('maxAdDurationSeconds')}
+        maxAdDurationConfirmedSeconds={state.maxAdDurationConfirmedSeconds}
+        onMaxAdDurationConfirmedSecondsChange={patch('maxAdDurationConfirmedSeconds')}
         verificationMissHoldMinConfidence={state.verificationMissHoldMinConfidence}
         onVerificationMissHoldMinConfidenceChange={patch('verificationMissHoldMinConfidence')}
         verificationMissAutocutMinConfidence={state.verificationMissAutocutMinConfidence}
@@ -154,6 +162,8 @@ describe('AdDetectionSection: commit fires the batched save payload with camelCa
     expect(committed).toEqual({
       minCutConfidence: 0.75,
       minContentBetweenAdsSeconds: 12,
+      maxAdDurationSeconds: 300,
+      maxAdDurationConfirmedSeconds: 900,
       verificationMissHoldMinConfidence: 0.7,
       verificationMissAutocutMinConfidence: 0.8,
       learningMinConfidence: 0.9,
@@ -161,5 +171,37 @@ describe('AdDetectionSection: commit fires the batched save payload with camelCa
       differentialMeasuredCorrMax: 0.4,
       differentialHoldMinSeconds: 20,
     });
+  });
+});
+
+describe('AdDetectionSection: typing a value into the ad-length fields', () => {
+  it('accepts a value typed digit by digit through the floor', async () => {
+    let committed: TunablesState | null = null;
+    render(<Harness onCommit={(payload) => { committed = payload; }} />);
+    const user = userEvent.setup();
+
+    // "120" passes through "1" and "12", both under the 30 floor. Rejecting
+    // those keystrokes reverted the field and mangled the rest of the entry.
+    const field = screen.getByLabelText('Ad length needing a confirmed sponsor (s)');
+    await user.clear(field);
+    await user.type(field, '120');
+    field.blur();
+
+    await user.click(screen.getByRole('button', { name: 'Commit' }));
+    expect(committed!.maxAdDurationSeconds).toBe(120);
+  });
+
+  it('clamps an out-of-range entry on blur instead of dropping keystrokes', async () => {
+    let committed: TunablesState | null = null;
+    render(<Harness onCommit={(payload) => { committed = payload; }} />);
+    const user = userEvent.setup();
+
+    const field = screen.getByLabelText('Longest ad to cut at all (s)');
+    await user.clear(field);
+    await user.type(field, '5');
+    field.blur();
+
+    await user.click(screen.getByRole('button', { name: 'Commit' }));
+    expect(committed!.maxAdDurationConfirmedSeconds).toBe(30);
   });
 });

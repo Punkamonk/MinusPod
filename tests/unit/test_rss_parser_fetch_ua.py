@@ -7,6 +7,10 @@ passed ``APP_USER_AGENT``; ``fetch_feed`` did not, which made
 the title-fetch step returned None and the endpoint then refused to
 auto-derive a slug from the URL.
 """
+import logging
+import re
+
+import requests
 from unittest.mock import MagicMock, patch
 
 import defusedxml
@@ -14,6 +18,7 @@ defusedxml.defuse_stdlib()
 
 from config import APP_USER_AGENT
 from rss_parser import RSSParser
+from utils.http import safe_url_for_log
 
 
 def _ok_response(body: bytes = b"<rss><channel><title>X</title></channel></rss>"):
@@ -46,8 +51,6 @@ class TestFetchFeedSendsAppUserAgent:
 
     def test_gzip_retry_also_passes_user_agent(self):
         """The gzip-fallback retry path inside fetch_feed must keep the UA."""
-        import requests
-
         rp = RSSParser()
         captured_headers = []
 
@@ -68,3 +71,31 @@ class TestFetchFeedSendsAppUserAgent:
         assert captured_headers[1].get('User-Agent') == APP_USER_AGENT
         # Retry also forces identity encoding.
         assert captured_headers[1].get('Accept-Encoding') == 'identity'
+
+    def test_gzip_retry_names_the_feed_it_retried(self, caplog):
+        """Three of these landed in a day with no way to tell which origin
+        produced them."""
+        import requests
+
+        rp = RSSParser()
+        calls = []
+
+        def fake_safe_get(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise requests.exceptions.ContentDecodingError("bad gzip")
+            return _ok_response()
+
+        with patch('rss_parser.safe_get', side_effect=fake_safe_get), \
+             patch('rss_parser.read_response_capped', return_value=b"<rss/>"), \
+             caplog.at_level(logging.WARNING):
+            rp.fetch_feed('https://feeds.example.com/show.xml')
+
+        gzip_warnings = [r.getMessage() for r in caplog.records
+                         if 'Gzip decompression failed' in r.getMessage()]
+        assert gzip_warnings
+        # Compared as a whole field rather than a substring: the point is that
+        # the scrubbed origin is reported, and a substring test would pass on
+        # any message that merely contained it.
+        logged_url = re.search(r'url=(\S+)', gzip_warnings[0]).group(1)
+        assert logged_url == safe_url_for_log('https://feeds.example.com/show.xml')

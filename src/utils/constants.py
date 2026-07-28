@@ -49,7 +49,12 @@ INVALID_SPONSOR_VALUES = frozenset({
     'none', 'unknown', 'null', 'n/a', 'na', '', 'no', 'yes',
     'ad', 'ads', 'sponsor', 'sponsors', 'advertisement', 'advertisements',
     'multiple', 'various', 'detected', 'advertisement detected',
-    'host read', 'host-read', 'mid-roll', 'pre-roll', 'post-roll'
+    'host read', 'host-read', 'mid-roll', 'pre-roll', 'post-roll',
+    # Window-continuation notes the prompt itself asks for. 'note' is a
+    # sponsor-candidate key, so a short one became the brand name and was
+    # offered to pattern learning as a sponsor.
+    'continues in next', 'continues from previous', 'continued',
+    'continues', 'continuation',
 })
 
 # Claude occasionally returns a reasoning sentence in the `sponsor` slot
@@ -67,7 +72,37 @@ SPONSOR_REASONING_SUBSTRINGS = (
     ' in transcript', 'audio signal', 'no spoken content',
     'gap in transcript', 'volume anomaly',
 )
+
+# The substrings above only decide for text short enough to be nothing but a
+# rationale; a full description can mention the transcript in passing. A
+# rationale-shaped prefix still decides at any length.
+SPONSOR_RATIONALE_SUBSTRING_MAX_CHARS = 200
+CANCELED_ERROR_MESSAGE = 'Canceled by user'
+
 SPONSOR_MAX_NAME_CHARS = 60
+
+# Backstop on the detector's free-text reason. Generous on purpose: the old
+# 300/150 caps put a literal "..." in the UI with nothing behind it (#591).
+REASON_DESCRIPTION_MAX = 2000
+
+# Max chars of quoted transcript text carried into a pattern match reason.
+# Above the phrase-variant cap, so only a pathological alignment trips it.
+PATTERN_EVIDENCE_MAX_CHARS = 220
+
+_SQUASH_RE = re.compile(r'[^a-z0-9]')
+
+# Longest a brand name is taken to be when no domain confirms where it ends;
+# beyond this the model is describing rather than naming.
+MAX_BRAND_WORDS = 4
+# The labeler's span search is quadratic in a run's word count, so bound it.
+# A brand a domain agrees with is never this long; past here it is prose.
+MAX_SPAN_WORDS = 12
+
+
+def squash_brand(text) -> str:
+    """Brand text reduced to comparable characters, so a slug-style rendering
+    still matches: "Jack Archer" and "jackarcher.com" both give 'jackarcher'."""
+    return _SQUASH_RE.sub('', str(text).lower())
 
 
 def is_sponsor_reasoning_rationale(text) -> bool:
@@ -84,21 +119,22 @@ def is_sponsor_reasoning_rationale(text) -> bool:
     lowered = str(text).strip().lower()
     if lowered.startswith(SPONSOR_REASONING_PREFIXES):
         return True
-    if any(s in lowered for s in SPONSOR_REASONING_SUBSTRINGS):
-        return True
+    if len(lowered) <= SPONSOR_RATIONALE_SUBSTRING_MAX_CHARS:
+        return any(s in lowered for s in SPONSOR_REASONING_SUBSTRINGS)
     return False
 
 
-def sanitize_sponsor_label(text) -> Optional[str]:
+def sanitize_sponsor_label(text, show_name: Optional[str] = None) -> Optional[str]:
     """Reject an LLM-mislabeled sponsor slot before it reaches a marker.
 
     Returns None when `text` is falsy, is reasoning prose caught by
-    is_sponsor_reasoning_rationale, or is a bare segment name (Claude
+    is_sponsor_reasoning_rationale, is a bare segment name (Claude
     sometimes echoes the show-segment title into the sponsor slot for one ad
     read, e.g. 'Xbox segment' instead of the actual advertiser -- matched by
-    a trailing "segment" word, case-insensitive). Otherwise returns `text`
-    unchanged. Used by ad_detector._merge_detection_results to keep junk
-    sponsor labels out of merged markers.
+    a trailing "segment" word, case-insensitive), or names the show itself.
+    Otherwise returns `text` unchanged. Used by
+    ad_detector._merge_detection_results to keep junk sponsor labels out of
+    merged markers.
     """
     if not text:
         return None
@@ -106,7 +142,26 @@ def sanitize_sponsor_label(text) -> Optional[str]:
         return None
     if re.search(r'\bsegment$', str(text).strip(), re.I):
         return None
+    if names_the_show(text, show_name):
+        return None
     return text
+
+
+def names_the_show(text, show_name: Optional[str]) -> bool:
+    """Whether a sponsor label is just the show's own name.
+
+    A self-promo or listener-support read has no advertiser, so the model
+    puts the show there ("Dailytechnewsshow" for a Patreon thank-you). That
+    is not a sponsor, and it pollutes pattern learning and same-sponsor
+    merging. Compared with separators stripped, so a slug-style rendering
+    still matches.
+    """
+    if not text or not show_name:
+        return False
+    label, show = squash_brand(text), squash_brand(show_name)
+    if not label or not show:
+        return False
+    return label == show
 
 
 # First-pass-learning and verification-miss confidence floors. Single source
@@ -124,6 +179,9 @@ STRUCTURAL_FIELDS = frozenset({
     'confidence', 'end_text', 'is_ad', 'type', 'classification',
     'start_seconds', 'end_seconds', 'duration', 'duration_seconds',
     'music_bed', 'music_bed_confidence',
+    # 'category' and its aliases: the sponsor scan falls back to any short
+    # string field, so "self_promo" was being returned as the sponsor name.
+    'category', 'segment_type',
 })
 
 # Ordered list of field names to check for sponsor/advertiser name (priority order).
@@ -448,6 +506,54 @@ NON_BRAND_WORDS = frozenset({
     'brand', 'tagline', 'product', 'pitch', 'marketing', 'copy',
     'complete', 'partial', 'full', 'brief', 'short', 'long',
     'message', 'insert', 'mid', 'roll', 'pre', 'post',
+})
+
+# Vocabulary the model reaches for when describing an ad's shape or evidence,
+# plus the pronouns it quotes ("We'll be right back"). Read only by the
+# sponsor labeler. Kept out of NON_BRAND_WORDS because that set also filters
+# boundary-relocation keywords, where losing "back" or "block" costs hits.
+REASON_DESCRIPTION_WORDS = frozenset({
+    'orphaned', 'contiguous', 'dai', 'url', 'back', 'block', 'lead',
+    'fragment', 'leftover', 'confirmed', 'merged', 'missed', 'spots',
+    'we', 'll', 'i', 'you', 'they', 'he', 'she', 'it', 'to',
+})
+
+NEGATION_WORDS = frozenset({
+    'not', 'no', 'non', 'never', 'isnt', 'arent', 'wasnt', 'without',
+})
+
+# Words that only appear in a reason when the model is describing advertising.
+AD_LANGUAGE_WORDS = frozenset({
+    'ad', 'ads', 'advert', 'adverts', 'advertisement', 'advertisements',
+    'advertiser', 'advertisers', 'advertising', 'sponsor', 'sponsors',
+    'sponsored', 'sponsorship', 'commercial', 'commercials', 'promo',
+    'promos', 'promotion', 'promotional', 'preroll', 'midroll', 'postroll',
+    'dai', 'endorsement', 'infomercial', 'spot', 'spots',
+})
+
+
+def mentions_advertising(text) -> bool:
+    """True if `text` calls the span an ad, the positive evidence the detection
+    gate needs. Separate from the sponsor labeler, which answers what the
+    advertiser is called and names the first capitalized word of any sentence.
+    """
+    if not text:
+        return False
+    words = re.findall(r'[a-z]+', str(text).lower())
+    # A negated mention is the model saying the span is not an ad, so it is not
+    # evidence that it is. Two tokens back covers "not a sponsor read".
+    return any(w in AD_LANGUAGE_WORDS
+               and NEGATION_WORDS.isdisjoint(words[max(0, i - 2):i])
+               for i, w in enumerate(words))
+
+
+# TLDs recognized in spoken "X dot com" transcript prose.
+DOMAIN_TLDS = frozenset({'com', 'org', 'net', 'io', 'co'})
+
+# TLDs a sponsor URL in an ad reason is written with. Wider than the spoken
+# set: a written URL carries TLDs a host would not say aloud.
+SPONSOR_DOMAIN_TLDS = DOMAIN_TLDS | frozenset({
+    'tv', 'fm', 'us', 'app', 'shop', 'store', 'ai', 'edu',
 })
 
 # Classifications from LLM that indicate non-ad content

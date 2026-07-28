@@ -32,21 +32,27 @@ class TestAdValidatorDuration:
         assert result.accepted == 0
         assert any('ERROR' in f for f in result.ads[0]['validation']['flags'])
 
-    def test_reject_too_long_ads(self, sample_transcript):
-        """Ads longer than MAX_AD_DURATION (300s) should be rejected."""
+    def test_too_long_ads_are_held_not_dropped(self, sample_transcript):
+        """An ad past the ceiling whose only fault is length is held for review.
+
+        It used to be rejected outright, which left no marker at all, so a
+        whole ad break could disappear with nothing to look at.
+        """
         validator = AdValidator(episode_duration=600.0, segments=sample_transcript)
 
         long_ad = {
             'start': 100.0,
-            'end': 450.0,  # 350 seconds - above 300s max
+            'end': 450.0,  # 350 seconds - above the 300s ceiling
             'confidence': 0.70,
             'reason': 'Extended segment'
         }
 
         result = validator.validate([long_ad])
 
-        assert result.rejected == 1
-        assert any('Very long' in f for f in result.ads[0]['validation']['flags'])
+        ad = result.ads[0]
+        assert ad['validation']['decision'] == Decision.REVIEW.value
+        assert ad.get('held_for_review')
+        assert any('Very long' in f for f in ad['validation']['flags'])
 
     def test_accept_long_ad_with_sponsor_confirmed(self, sample_transcript):
         """Long ads with sponsor confirmed in description should use higher limit."""
@@ -799,15 +805,14 @@ class TestMaxAdDurationHold:
         assert not ad.get('held_for_review')
         assert ad['validation']['decision'] == Decision.REJECT.value
 
-    def test_override_none_behaves_like_existing_long_ad(self):
-        # No override set -> same behavior as the baseline long-ad test
+    def test_override_none_still_holds_a_long_ad(self):
+        # No per-feed override: the global ceiling holds it just the same.
         validator = AdValidator(episode_duration=3600.0, segments=[])
         result = validator.validate([self._ad(100.0, 450.0, confidence=0.70,
                                               reason='sponsor read')])
         ad = result.ads[0]
-        assert not ad.get('held_for_review')
-        # 350s at conf 0.70 without override: flagged Very long -> REJECT
-        assert ad['validation']['decision'] == Decision.REJECT.value
+        assert ad.get('held_for_review')
+        assert ad['validation']['decision'] == Decision.REVIEW.value
 
     def test_confirm_corrected_over_cap_is_accepted(self):
         # Confirmed correction early-returns ACCEPT before hold rules run
@@ -1336,3 +1341,209 @@ def test_merge_never_crosses_held_boundary():
     merged = validator._merge_close_ads(ads, result)
     assert len(merged) == 2
     assert merged[0]['end'] == 160.0
+
+
+class TestRegistryConfirmsLongAds:
+    """A real multi-sponsor break was rejected on length alone.
+
+    The duration ceiling lifts when a sponsor is "confirmed", but the only
+    source of confirmation was the episode description, and many shows never
+    list sponsors there. A 374s break naming two registry sponsors was
+    rejected as "Very long", and the verification pass could not rescue it.
+    """
+
+    ADS_TEXT = ("head to the money zone. Are you ready to upgrade your home for way "
+                "less? Head to Wayfair.com right now to shop all things home. "
+                "I've been wearing Warby Parker frames for years, buy one pair and "
+                "get 20% off any additional pairs at warbyparker.com slash show.")
+
+    def _segments(self):
+        return [
+            {'start': 0.0, 'end': 1690.0, 'text': 'ordinary show content ' * 20},
+            {'start': 1692.8, 'end': 2066.3, 'text': self.ADS_TEXT},
+            {'start': 2067.0, 'end': 3600.0, 'text': 'more show content ' * 20},
+        ]
+
+    def _ad(self):
+        return {'start': 1692.8, 'end': 2066.3, 'confidence': 0.8,
+                'reason': 'Wayfair, Warby Parker: ad break', 'detection_stage': 'claude'}
+
+    class _Registry:
+        """Stands in for the seeded registry: both brands in ADS_TEXT are
+        seed sponsors, and 'warbyparker.com' matches the spaced name too."""
+
+        def find_sponsor_in_text(self, text):
+            low = (text or '').lower()
+            return 'Wayfair' if 'wayfair' in low else None
+
+        def count_sponsor_mentions(self, text):
+            low = (text or '').lower()
+            return (low.count('wayfair') + low.count('warby parker')
+                    + low.count('warbyparker'))
+
+    def test_long_break_is_held_without_the_registry(self):
+        v = AdValidator(3700.0, self._segments(), episode_description='',
+                        min_cut_confidence=0.80)
+        ad = v.validate([self._ad()]).ads[0]
+        assert ad['validation']['decision'] == 'REVIEW'
+        assert ad.get('held_for_review')
+
+    def test_the_registry_confirms_it_and_it_is_accepted(self):
+        v = AdValidator(3700.0, self._segments(), episode_description='',
+                        min_cut_confidence=0.80, sponsor_service=self._Registry())
+        result = v.validate([self._ad()])
+        assert result.ads[0]['validation']['decision'] == 'ACCEPT'
+
+    def test_a_break_naming_no_known_sponsor_is_not_cut(self):
+        segs = self._segments()
+        segs[1]['text'] = 'just a very long stretch of ordinary conversation ' * 12
+        v = AdValidator(3700.0, segs, episode_description='',
+                        min_cut_confidence=0.80, sponsor_service=self._Registry())
+        ad = v.validate([self._ad()]).ads[0]
+        assert ad['validation']['decision'] != 'ACCEPT'
+
+    def test_the_reason_alone_cannot_lift_the_cap(self):
+        """The transcript is the evidence; a model reason naming a brand is not
+        enough, or a passing mention in prose would raise the ceiling."""
+        segs = self._segments()
+        segs[1]['text'] = 'ordinary conversation with no brand named at all ' * 12
+        v = AdValidator(3700.0, segs, episode_description='',
+                        min_cut_confidence=0.80, sponsor_service=self._Registry())
+        assert v._is_sponsor_confirmed(self._ad()) is False
+
+    def test_a_registry_failure_does_not_break_validation(self):
+        class Boom:
+            def find_sponsor_in_text(self, text):
+                raise RuntimeError('registry down')
+
+        v = AdValidator(3700.0, self._segments(), episode_description='',
+                        min_cut_confidence=0.80, sponsor_service=Boom())
+        assert v.validate([self._ad()]).ads[0]['validation']['decision'] != 'ACCEPT'
+
+
+class TestConfigurableDurationCeilings:
+    """The ceilings are settings, not constants, so a show with long ad blocks
+    can be tuned instead of losing every break to the default."""
+
+    def _ad(self, seconds=400.0, confidence=0.85):
+        """Confidence sits above the cut slider but below the high-confidence
+        override, which is the band the ceiling actually governs."""
+        return {'start': 100.0, 'end': 100.0 + seconds, 'confidence': confidence,
+                'reason': 'sponsor read for Acme with promo code'}
+
+    def test_a_raised_ceiling_accepts_what_the_default_holds(self):
+        assert AdValidator(episode_duration=3600.0, segments=[]).validate(
+            [self._ad()]).ads[0].get('held_for_review')
+
+        ad = AdValidator(episode_duration=3600.0, segments=[],
+                         max_ad_duration=600.0).validate([self._ad()]).ads[0]
+        assert ad['validation']['decision'] == Decision.ACCEPT.value
+        assert not ad.get('held_for_review')
+
+    def test_a_lowered_ceiling_holds_what_the_default_accepts(self):
+        assert AdValidator(episode_duration=3600.0, segments=[]).validate(
+            [self._ad(seconds=120.0)]).ads[0]['validation']['decision'] == (
+                Decision.ACCEPT.value)
+
+        ad = AdValidator(episode_duration=3600.0, segments=[],
+                         max_ad_duration=60.0).validate(
+            [self._ad(seconds=120.0)]).ads[0]
+        assert ad.get('held_for_review')
+
+    def test_a_very_confident_detection_still_rides_the_override(self):
+        """Long-standing behavior, kept: past the ceiling a detection at or
+        above the high-confidence override is cut anyway, bounded by the
+        confirmed ceiling. The UI text says so."""
+        ad = AdValidator(episode_duration=3600.0, segments=[],
+                         max_ad_duration=60.0).validate(
+            [self._ad(seconds=120.0, confidence=0.95)]).ads[0]
+        assert ad['validation']['decision'] == Decision.ACCEPT.value
+
+    def test_the_confirmed_ceiling_caps_the_high_confidence_override(self):
+        # 400s at high confidence rides the override under the default 900s
+        # ceiling, but not when the ceiling is below the ad's length.
+        strong = {'start': 100.0, 'end': 500.0, 'confidence': 0.95,
+                  'reason': 'long sponsor block'}
+        assert AdValidator(episode_duration=3600.0, segments=[]).validate(
+            [dict(strong)]).ads[0]['validation']['decision'] == Decision.ACCEPT.value
+
+        ad = AdValidator(episode_duration=3600.0, segments=[],
+                         max_ad_duration_confirmed=350.0).validate(
+            [dict(strong)]).ads[0]
+        assert ad.get('held_for_review')
+
+
+class TestReasonDenyingAdContent:
+    """A reason that says there is no ad content must not become a marker.
+
+    The verification pass reads the already-cut audio, so a seam left by a
+    pass-1 cut looks like a mid-sentence break. The model reported one and
+    said so plainly ("no promotional copy is present in the transcript for
+    this gap"), but the phrase was not in the not-an-ad set, so a 17-second
+    stretch of an advice segment was flagged.
+    """
+
+    REASON = ("Ad break cut into the advice segment: segment breaks off "
+              "mid-sentence at 2980.9 and resumes at 2997.9 with the advice "
+              "already in progress; no promotional copy is present in the "
+              "transcript for this gap")
+
+    def test_a_reason_denying_promotional_copy_is_rejected(self):
+        ad = {'start': 3370.6, 'end': 3387.6, 'confidence': 0.8,
+              'reason': self.REASON}
+        result = AdValidator(3694.0, [], min_cut_confidence=0.80).validate([ad])
+        v = result.ads[0]['validation']
+        assert v['decision'] == Decision.REJECT.value
+        assert any('not an ad' in f for f in v['flags'])
+
+    def test_other_ways_of_denying_ad_content(self):
+        for reason in ('contains no promotional content',
+                       'no promotional language in this window',
+                       'no sponsor names, URLs, or promo codes appear'):
+            ad = {'start': 100.0, 'end': 160.0, 'confidence': 0.8, 'reason': reason}
+            result = AdValidator(3694.0, [], min_cut_confidence=0.80).validate([ad])
+            assert result.ads[0]['validation']['decision'] == Decision.REJECT.value, reason
+
+    def test_a_real_read_mentioning_no_promo_code_survives(self):
+        """The guard needs a content noun: an ad can legitimately be described
+        as having no promo code."""
+        ad = {'start': 100.0, 'end': 160.0, 'confidence': 0.9,
+              'reason': 'Acme sponsor read with no promotional code offered'}
+        result = AdValidator(3694.0, [], min_cut_confidence=0.80).validate([ad])
+        assert result.ads[0]['validation']['decision'] == Decision.ACCEPT.value
+
+
+def test_effective_threshold_is_clamped_to_the_hard_ceiling():
+    """An inverted pair stored before validation existed, or a per-feed
+    override above the global ceiling, must not make confirmation a penalty."""
+    validator = AdValidator(3600.0, [], None, max_ad_duration=1200.0,
+                            max_ad_duration_confirmed=600.0)
+    assert validator.max_ad_duration == 600.0
+    assert validator.max_ad_duration_confirmed == 600.0
+
+
+class TestRegistryNeedsMoreThanOneMention:
+    """A misdetected span of several minutes will often contain one organic
+    brand mention; that is not a sponsor read."""
+
+    class _Registry:
+        def find_sponsor_in_text(self, text):
+            return 'Acme' if 'acme' in (text or '').lower() else None
+
+        def count_sponsor_mentions(self, text):
+            return (text or '').lower().count('acme')
+
+    def _validator(self, ad_text):
+        segments = [{'start': 0.0, 'end': 400.0, 'text': ad_text}]
+        return AdValidator(3600.0, segments, episode_description='',
+                           min_cut_confidence=0.80,
+                           sponsor_service=self._Registry())
+
+    def test_a_single_passing_mention_does_not_confirm(self):
+        v = self._validator('we talked about Acme once today and then moved on')
+        assert v._registry_confirms({'start': 0.0, 'end': 400.0}) is False
+
+    def test_a_repeated_mention_confirms(self):
+        v = self._validator('Acme protects you. Go to Acme dot com slash pod '
+                            'for twenty percent off your first order')
+        assert v._registry_confirms({'start': 0.0, 'end': 400.0}) is True

@@ -1,5 +1,6 @@
 import pytest
 
+from benchmark import metrics
 from benchmark.metrics import (
     BoundaryError,
     NoAdResult,
@@ -169,3 +170,60 @@ def test_trial_stdev_single_value():
 def test_trial_stdev_multiple():
     val = trial_stdev([0.85, 0.87, 0.83])
     assert val > 0
+
+
+class TestCategoryCompliance:
+    """The prompt marks category REQUIRED, but only some providers enforce a
+    schema. The audit used to be blind to it: a model that omitted it was not
+    counted as missing anything, and a model that emitted it was penalized for
+    an extra key. Tracked now so the report says which models answer it.
+    """
+
+    def test_a_named_category_counts_as_present(self):
+        v = schema_audit([{"start": 1.0, "end": 2.0, "category": "sponsor"}])
+        assert (v.category_present, v.category_missing) == (1, 0)
+
+    def test_emitting_the_category_is_not_an_extra_key(self):
+        v = schema_audit([{"start": 1.0, "end": 2.0, "category": "sponsor"}])
+        assert v.extra_keys == 0
+
+    def test_a_category_under_another_key_counts(self):
+        """Production resolves it wherever the model puts it, so the benchmark
+        scores the same shapes the live parser accepts."""
+        v = schema_audit([{"start": 1.0, "end": 2.0, "type": "self_promo"}])
+        assert v.category_present == 1
+
+    def test_an_is_it_an_ad_flag_is_not_a_category(self):
+        v = schema_audit([{"start": 1.0, "end": 2.0, "type": "ad"}])
+        assert (v.category_present, v.category_missing) == (0, 1)
+
+    def test_no_category_at_all_counts_as_missing(self):
+        v = schema_audit([{"start": 1.0, "end": 2.0, "advertiser": "Acme"}])
+        assert (v.category_present, v.category_missing) == (0, 1)
+
+    def test_a_missing_category_is_not_a_missing_required_field(self):
+        """It is still a usable detection; it just loses per-category actions."""
+        v = schema_audit([{"start": 1.0, "end": 2.0}])
+        assert v.missing_required == 0
+        assert v.category_missing == 1
+
+
+class TestFallbackCategoryResolver:
+    """When the app package is not importable the fallback has to score the
+    same vocabulary production does."""
+
+    def test_a_category_outside_the_vocabulary_is_not_present(self):
+        assert metrics._fallback_resolve_category(
+            {"category": "advertisement"}) is None
+
+    def test_a_known_category_is_still_present(self):
+        assert metrics._fallback_resolve_category(
+            {"category": "self_promo"}) == "self_promo"
+
+    def test_the_fallback_vocabulary_matches_production(self):
+        from config import SEGMENT_CATEGORIES
+
+        assert metrics._fallback_categories() == tuple(SEGMENT_CATEGORIES)
+
+    def test_the_report_can_say_which_resolver_ran(self):
+        assert metrics.CATEGORY_RESOLVER in ("production", "fallback")

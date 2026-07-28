@@ -9,6 +9,14 @@ from utils.constants import (
     INVALID_SPONSOR_VALUES,
     INVALID_SPONSOR_CAPTURE_WORDS,
     NON_BRAND_WORDS,
+    REASON_DESCRIPTION_WORDS,
+    REASON_DESCRIPTION_MAX,
+    SPONSOR_DOMAIN_TLDS,
+    MAX_BRAND_WORDS,
+    MAX_SPAN_WORDS,
+    squash_brand,
+    is_sponsor_reasoning_rationale,
+    mentions_advertising,
     SEED_SPONSORS,
     SEED_NORMALIZATIONS,
 )
@@ -18,6 +26,43 @@ logger = logging.getLogger(__name__)
 
 # Re-export for back-compat: callers may still do `from sponsor_service import SEED_SPONSORS`.
 __all__ = ['SponsorService', 'SEED_SPONSORS', 'SEED_NORMALIZATIONS']
+
+# A brand is a capitalized run. Dot and slash are outside the character class,
+# so "Patreon.com/Show" breaks into "Patreon" and "Show" rather than one run.
+_BRAND_RUN_RE = re.compile(
+    r"[A-Z][A-Za-z0-9&'\u2019-]*(?:\s+[A-Z][A-Za-z0-9&'\u2019-]*)*")
+# Bounded quantifier: an unbounded run of [A-Za-z0-9-] here is the
+# py/polynomial-redos shape fixed in 1.1.1. 63 is the DNS label limit.
+_DOMAIN_RE = re.compile(
+    r'\b([A-Za-z0-9][A-Za-z0-9-]{0,62})\.(?:%s)\b' % '|'.join(sorted(SPONSOR_DOMAIN_TLDS)),
+    re.IGNORECASE)
+_RUN_SPLIT_RE = re.compile(r"[\s'\u2019-]+")
+_LABELER_STOPWORDS = NON_BRAND_WORDS | REASON_DESCRIPTION_WORDS
+
+
+def _brand_run_words(run: str) -> Optional[List[str]]:
+    """Words of `run` with leading filler dropped, or None if it names nothing.
+
+    Only INVALID_SPONSOR_CAPTURE_WORDS come off the front; trimming ad
+    vocabulary here cost the first word of real names ("Full Circle").
+    """
+    words = run.split()
+    while words and words[0].lower() in INVALID_SPONSOR_CAPTURE_WORDS:
+        words.pop(0)
+    if not words:
+        return None
+    run = ' '.join(words)
+    if len(run) < 3 or run.lower() in INVALID_SPONSOR_VALUES:
+        return None
+    parts = [p for p in _RUN_SPLIT_RE.split(run.lower()) if p]
+    if all(p in _LABELER_STOPWORDS for p in parts):
+        return None
+    return None if is_sponsor_reasoning_rationale(run) else words
+
+
+def _starts_any(domains):
+    """Predicate: some domain begins with the given brand head."""
+    return lambda head: any(d.startswith(head) for d in domains)
 
 
 class SponsorService:
@@ -209,6 +254,18 @@ class SponsorService:
 
         return None
 
+    def count_sponsor_mentions(self, text: str) -> int:
+        """Total registry brand mentions in text, summed over every sponsor.
+
+        Two mentions is the same evidence bar pattern learning uses; one
+        passing mention of one brand is not a sponsor read.
+        """
+        if not text:
+            return 0
+        self._refresh_cache_if_needed()
+        return sum(len(pattern.findall(text))
+                   for pattern in self._compiled_patterns.values())
+
     # ========== Export for Claude prompt / Whisper ==========
 
     def get_claude_sponsor_list(self) -> str:
@@ -259,48 +316,80 @@ class SponsorService:
 
     @staticmethod
     def extract_sponsor_from_reason(text: str) -> Optional[str]:
-        """Extract sponsor name from descriptive reason / ad-classification text.
+        """Extract a sponsor name from an LLM ad-reason string, else None.
 
-        Distinct from extract_sponsor_from_text: this targets short descriptive
-        strings produced by the LLM ("Acme sponsor read", "ad for Acme",
-        "promoting Acme") rather than full transcript text. Returns the raw
-        captured token (case preserved) when valid, else None.
+        A brand is a capitalized run narrowed to the span a domain in the same
+        text agrees with; the model rewords the reason on every run, so a
+        pattern keyed to a phrasing only covers the sample it was written for.
         """
         if not text:
             return None
-        patterns = [
-            r'^(\w+(?:\s+\w+)?)\s+(?:sponsor|ad)\s+read',
-            r'(?:this is (?:a|an) )?(\w+(?:\s+\w+)?)\s+(?:ad|advertisement|sponsor)',
-            r'(?:ad|advertisement|sponsor)(?:ship)?\s+(?:for|by|from)\s+(\w+(?:\s+\w+)?)',
-            r'promoting\s+(\w+(?:\s+\w+)?)',
-            r'brought to you by\s+(\w+(?:\s+\w+)?)',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                sponsor = match.group(1).strip()
-                if len(sponsor) < 2:
-                    continue
-                if sponsor.lower() in INVALID_SPONSOR_VALUES:
-                    continue
-                if sponsor.lower() in ('a', 'an', 'the', 'this', 'that', 'another', 'host'):
-                    continue
-                first_word = sponsor.split()[0].lower() if sponsor.split() else ''
-                if first_word in INVALID_SPONSOR_CAPTURE_WORDS:
-                    continue
-                if ' ' in sponsor and sponsor == sponsor.lower():
-                    continue
-                return sponsor
-        return None
+        # A reason that is entirely the model explaining itself names no
+        # advertiser, and a capitalized run inside it is just its first word.
+        if is_sponsor_reasoning_rationale(text):
+            return None
+        # Prose that never mentions advertising names no advertiser either.
+        # Without this the first capitalized word of any sentence becomes a
+        # brand: "Discussion of the guest's new book" gave "Discussion".
+        if not mentions_advertising(text):
+            return None
+        # Input cap, same reason as the bounded quantifiers above: this runs on
+        # whatever string the model put in the field.
+        text = text[:REASON_DESCRIPTION_MAX]
+
+        # The first advertiser named labels the break, so stop at the first
+        # usable run: a later one with a URL must not win the label.
+        words = next(
+            (w for w in (_brand_run_words(m.group(0))
+                         for m in _BRAND_RUN_RE.finditer(text)) if w),
+            None)
+        if not words:
+            return None
+
+        domains = {squash_brand(m.group(1)) for m in _DOMAIN_RE.finditer(text)}
+        # A domain names where the brand both starts and ends, so search spans
+        # rather than prefixes: that narrows "Full ZipRecruiter" without a
+        # blind leading trim. Leftmost and longest first, so "Jack Archer" is
+        # not cut to "Jack" nor "Belmont Park" to "Park".
+        span_words = words[:MAX_SPAN_WORDS]
+        spans = [(squash_brand(' '.join(span_words[i:j])), i, j)
+                 for i in range(len(span_words))
+                 for j in range(len(span_words), i, -1)]
+        for match_domain in (domains.__contains__, _starts_any(domains)):
+            for head, i, j in spans:
+                if head and match_domain(head):
+                    return ' '.join(span_words[i:j])
+        # Nothing agrees, so there is no signal for where the brand ends. Cap
+        # it: past this a run is the model describing the product, not naming
+        # a brand ("LEGO Land Discovery Center Westchester Ninjago event").
+        return ' '.join(words[:MAX_BRAND_WORDS])
 
     @staticmethod
-    def extract_sponsors_from_transcript(text: str, ad_reason: str = None) -> set:
+    def own_site_tokens(podcast_name: str) -> set:
+        """Domain labels formed from the show's own name, not advertisers.
+
+        Runs of two or more words plus the whole name; a single title word
+        can be a real brand."""
+        words = re.findall(r'[a-z0-9]+', (podcast_name or '').lower())
+        runs = [''.join(words[i:j])
+                for i in range(len(words))
+                for j in range(i + 2, len(words) + 1)]
+        runs.append(''.join(words))
+        return {token for token in runs if len(token) >= 4}
+
+    @staticmethod
+    def extract_sponsors_from_transcript(text: str, ad_reason: str = None,
+                                         exclude: set = None) -> set:
         """Extract potential sponsor names from transcript text and optional ad reason.
 
         Returns a set of lowercase brand tokens harvested from:
         - URL/domain mentions (e.g., "vention" from "ventionteams.com")
         - "dot com" speech transcriptions
         - The ad_reason field (e.g., "Vention sponsor read")
+
+        ``exclude`` drops known non-advertiser tokens (see own_site_tokens),
+        which also stops the host's own site reading as ad content at a
+        boundary.
 
         This is the multi-sponsor counterpart used by merge_same_sponsor_ads
         to test whether adjacent ad regions share a brand.
@@ -324,25 +413,17 @@ class SponsorService:
             if len(sponsor) > 2:
                 sponsors.add(sponsor)
 
-        # Extract brand name from ad reason (e.g., "Vention sponsor read" -> "vention")
-        if ad_reason:
-            reason_lower = ad_reason.lower()
-            # Look for patterns like "X sponsor read", "X ad", "ad for X"
-            reason_patterns = [
-                r'^([a-z]+)\s+(?:sponsor|ad\b)',  # "Vention sponsor read"
-                r'(?:ad for|sponsor(?:ed by)?)\s+([a-z]+)',  # "ad for Vention"
-            ]
-            for pattern in reason_patterns:
-                match = re.search(pattern, reason_lower)
-                if match:
-                    brand = match.group(1)
-                    # Filter common non-brand vocabulary (e.g. "sponsor read",
-                    # "ad segment", "complete ad segment"). NON_BRAND_WORDS is
-                    # a superset of the original inline excluded_words list.
-                    if len(brand) > 2 and brand not in NON_BRAND_WORDS:
-                        sponsors.add(brand)
+        # Brand named in the ad reason. Shares the labeler rather than keeping
+        # a second pair of phrase patterns, which only matched the two
+        # phrasings they were written for; merging then missed a brand the
+        # marker was already labeled with.
+        brand = SponsorService.extract_sponsor_from_reason(ad_reason)
+        if brand:
+            squashed = squash_brand(brand)
+            if len(squashed) > 2 and squashed not in NON_BRAND_WORDS:
+                sponsors.add(squashed)
 
-        return sponsors
+        return sponsors - (exclude or set())
 
     # ========== CRUD Wrappers ==========
 

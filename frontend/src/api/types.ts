@@ -39,6 +39,17 @@ export interface Feed {
   // Stamped when a Podping publish notification triggers this feed's
   // refresh; null when the feed has never been refreshed via Podping.
   lastPodpingAt?: string | null;
+  // Why this feed is or is not covered by podping. Null when the listener is
+  // disabled instance-wide, in which case the UI shows nothing. The UI only
+  // distinguishes received from the rest; the finer states are for API use.
+  podpingCoverage?: 'received' | 'declared' | 'host_active' | 'unseen' | 'declined' | null;
+  // Upstream <podcast:podping> declaration. podpingUses is null when the feed
+  // carries no such tag.
+  podpingUses?: boolean | null;
+  podpingHiveAccounts?: string[];
+  // When the feed's <podcast:podping> declaration was last read from a full
+  // fetch; null until one succeeds.
+  podpingCheckedAt?: string | null;
   createdAt?: string;
   lastEpisodeDate?: string;
   networkId?: string;
@@ -60,6 +71,7 @@ export interface Feed {
   silenceSnapEnabled?: boolean | null;
   transitionSnapEnabled?: boolean | null;
   maxAdDurationOverride?: number | null;
+  maxAdDurationRejectOverride?: number | null;
   cueGatedApproval?: boolean | null;
   // Layer 3 cross-fetch differential. Null means auto: the stage runs when
   // the feed looks DAI-served; an explicit true/false overrides that.
@@ -308,8 +320,8 @@ export interface AdSegment {
   // identified as the actual ad. Enables approving the trimmed span.
   reviewer_proposed_start?: number;
   reviewer_proposed_end?: number;
-  // What kind of content this span is (issue #565); defaults to 'sponsor'
-  // server-side so the key is always present in practice.
+  // What kind of content this span is (issue #565). Unset when no stage
+  // classified it; the UI shows Uncategorized.
   category?: SegmentCategory;
   // What the resolved segment-action map did with this marker's category.
   // Null when the marker predates the feature or the action never resolved.
@@ -389,6 +401,7 @@ export interface Settings {
   transcribeMaxChunkSeconds: SettingValueNumber;
   transcribeConcurrentChunks: SettingValueNumber;
   transcribeChunkOverlapSeconds: SettingValueNumber;
+  whisperApiTimeoutSeconds: SettingValueNumber;
   audioCueDetectionEnabled: SettingValueBoolean;
   audioCueFreqMinHz: SettingValueNumber;
   audioCueFreqMaxHz: SettingValueNumber;
@@ -412,6 +425,8 @@ export interface Settings {
   silenceSnapMinDurationSeconds: SettingValueNumber;
   silenceSnapMaxDistanceSeconds: SettingValueNumber;
   minContentBetweenAdsSeconds: SettingValueNumber;
+  maxAdDurationSeconds: SettingValueNumber;
+  maxAdDurationConfirmedSeconds: SettingValueNumber;
   positionalPriorEnabled: SettingValueBoolean;
   verificationMissHoldMinConfidence: SettingValueNumber;
   verificationMissAutocutMinConfidence: SettingValueNumber;
@@ -484,6 +499,7 @@ export interface Settings {
     transcribeMaxChunkSeconds: number;
     transcribeConcurrentChunks: number;
     transcribeChunkOverlapSeconds: number;
+    whisperApiTimeoutSeconds: number;
     audioCueDetectionEnabled: boolean;
     audioCueFreqMinHz: number;
     audioCueFreqMaxHz: number;
@@ -507,6 +523,8 @@ export interface Settings {
     silenceSnapMinDurationSeconds: number;
     silenceSnapMaxDistanceSeconds: number;
     minContentBetweenAdsSeconds: number;
+    maxAdDurationSeconds: number;
+    maxAdDurationConfirmedSeconds: number;
     positionalPriorEnabled: boolean;
     verificationMissHoldMinConfidence: number;
     verificationMissAutocutMinConfidence: number;
@@ -555,6 +573,7 @@ export interface UpdateSettingsPayload {
   transcribeMaxChunkSeconds?: number;
   transcribeConcurrentChunks?: number;
   transcribeChunkOverlapSeconds?: number;
+  whisperApiTimeoutSeconds?: number;
   audioCueDetectionEnabled?: boolean;
   audioCueFreqMinHz?: number;
   audioCueFreqMaxHz?: number;
@@ -578,6 +597,8 @@ export interface UpdateSettingsPayload {
   silenceSnapMinDurationSeconds?: number;
   silenceSnapMaxDistanceSeconds?: number;
   minContentBetweenAdsSeconds?: number;
+  maxAdDurationSeconds?: number;
+  maxAdDurationConfirmedSeconds?: number;
   positionalPriorEnabled?: boolean;
   verificationMissHoldMinConfidence?: number;
   verificationMissAutocutMinConfidence?: number;
@@ -892,4 +913,16 @@ export interface UpdateStatus {
 export interface UpdateCheckSettings {
   enabled: boolean;
   channel: 'stable' | 'edge';
+}
+
+export interface ReplacementAudio {
+  source: 'default' | 'uploaded';
+  canRevert: boolean;
+  exists: boolean;
+  sizeBytes: number | null;
+  updatedAt: number | null;
+  durationSeconds: number | null;
+  channels: number | null;
+  sampleRateHz: number | null;
+  reverted?: boolean;
 }

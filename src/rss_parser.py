@@ -286,7 +286,9 @@ class RSSParser:
         except requests.exceptions.ContentDecodingError as e:
             # Some servers claim gzip encoding but send malformed data
             # Retry without accepting compressed responses
-            logger.warning(f"Gzip decompression failed, retrying without compression: {e}")
+            logger.warning(
+                "Gzip decompression failed, retrying without compression: "
+                "url=%s err=%s", safe_url_for_log(url), e)
             try:
                 response = safe_get(
                     url,
@@ -402,7 +404,9 @@ class RSSParser:
 
         except requests.exceptions.ContentDecodingError as e:
             # Retry without accepting compressed responses
-            logger.warning(f"Gzip decompression failed, retrying: {e}")
+            logger.warning(
+                "Gzip decompression failed, retrying: url=%s err=%s",
+                safe_url_for_log(url), e)
             try:
                 headers['Accept-Encoding'] = 'identity'
                 response = safe_get(
@@ -445,7 +449,7 @@ class RSSParser:
             _get_rss_circuit_breaker(url).record_failure()
             return None, None, None
 
-    def parse_feed(self, feed_content: str) -> Dict:
+    def parse_feed(self, feed_content: str, source: str = None) -> Dict:
         """Parse RSS feed content.
 
         XXE defence: ``defusedxml.defuse_stdlib()`` neutralises expat's
@@ -483,13 +487,64 @@ class RSSParser:
 
             feed = feedparser.parse(feed_content)
             if feed.bozo:
-                logger.warning(f"RSS parse warning: {feed.bozo_exception}")
+                # Named: a malformed body correlates with the gzip retry above,
+                # and without the feed there is no way to tie the two together.
+                logger.warning("RSS parse warning: source=%s bytes=%d err=%s",
+                               source or 'unknown', len(feed_content or ''),
+                               feed.bozo_exception)
 
             logger.debug(f"Parsed RSS feed: {feed.feed.get('title', 'Unknown')} with {len(feed.entries)} entries")
             return feed
         except Exception as e:
             logger.error(f"Failed to parse RSS feed: {e}")
             return None
+
+    @staticmethod
+    def extract_podping_declaration(feed_content, channel=None) -> Dict:
+        """Channel-level ``<podcast:podping>`` declaration.
+
+        Per the podping tag spec, ``usesPodping="false"`` opts the feed out and
+        each nested ``<podcast:hiveAccount account="...">`` names an account
+        allowed to podping this feed. Returns uses_podping None when the feed
+        carries no such tag, which is the common case and means "unknown".
+        """
+        unknown = {'uses_podping': None, 'hive_accounts': []}
+        if not feed_content and channel is None:
+            return unknown
+
+        if channel is None:
+            try:
+                payload = (feed_content.encode('utf-8')
+                           if isinstance(feed_content, str) else feed_content)
+                root = defused_fromstring(payload)
+            except Exception as e:
+                logger.debug("Podping declaration parse failed (%s)", type(e).__name__)
+                return unknown
+            for child in list(root) if root is not None else []:
+                tag = getattr(child, 'tag', '')
+                if isinstance(tag, str) and (tag == 'channel' or tag.endswith('}channel')):
+                    channel = child
+                    break
+            if channel is None:
+                return unknown
+
+        for elem in channel:
+            if not _is_podcast_element(elem) or _podcast_localname(elem) != 'podping':
+                continue
+            raw = (elem.get('usesPodping') or '').strip().lower()
+            uses = True if not raw else raw in ('true', '1', 'yes')
+            accounts = []
+            for child in elem:
+                if not _is_podcast_element(child):
+                    continue
+                if _podcast_localname(child) != 'hiveAccount':
+                    continue
+                name = (child.get('account') or '').strip().lower()
+                if name and name not in accounts:
+                    accounts.append(name)
+            return {'uses_podping': uses, 'hive_accounts': accounts}
+
+        return unknown
 
     @staticmethod
     def extract_podcast_artwork_url(feed_content_or_parsed, channel=None) -> Optional[str]:
@@ -674,7 +729,8 @@ class RSSParser:
                 Passed explicitly, never stored on self - the module-level
                 singleton is shared across refresh worker threads.
         """
-        feed = parsed_feed if parsed_feed is not None else self.parse_feed(feed_content)
+        feed = (parsed_feed if parsed_feed is not None
+                else self.parse_feed(feed_content, source=slug))
         if not feed:
             return feed_content
 
@@ -1291,7 +1347,8 @@ class RSSParser:
             return None
         return seconds if seconds > 0 else None
 
-    def extract_episodes(self, feed_content: str, parsed_feed=None) -> List[Dict]:
+    def extract_episodes(self, feed_content: str, parsed_feed=None,
+                         source: str = None) -> List[Dict]:
         """Extract episode information from feed.
 
         Args:
@@ -1299,8 +1356,11 @@ class RSSParser:
             parsed_feed: Optional pre-parsed feedparser object. When supplied,
                 skips the internal parse_feed call so a single refresh cycle
                 does not pay the parse cost three times.
+            source: Feed identifier named in a parse warning from the fallback
+                re-parse below.
         """
-        feed = parsed_feed if parsed_feed is not None else self.parse_feed(feed_content)
+        feed = (parsed_feed if parsed_feed is not None
+                else self.parse_feed(feed_content, source=source))
         if not feed:
             return []
 

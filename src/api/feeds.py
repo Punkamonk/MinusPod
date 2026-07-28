@@ -22,10 +22,12 @@ from cancel import cancel_processing
 from processing_queue import ProcessingQueue
 from config import (
     FEED_REFRESH_FAILURE_ALERT_THRESHOLD,
+    PODPING_HOST_ACTIVE_DAYS,
     VALID_CHAPTERS_MODES,
     SEGMENT_CATEGORIES, SEGMENT_ACTIONS,
     differential_fetch_effective,
     resolve_feed_processing_mode,
+    resolve_max_ad_duration_confirmed,
 )
 from differential_fetcher import is_likely_dai_feed
 from positional_prior import compute_ad_distribution
@@ -33,9 +35,11 @@ from positional_prior import compute_ad_distribution
 # rss_parser.RSSParser take effect at call time.
 import rss_parser
 from utils.constants import EpisodeStatus
+from utils.http import safe_url_for_log
 from utils.language import LANGUAGE_CODE_RE
 from utils.opml import build_opml_xml, modified_feed_url
-from database.podcasts import EPISODE_STATUSES
+from database.podcasts import EPISODE_STATUSES, PodcastMixin
+from podping_listener import feed_url_domain
 from utils.time import utc_now_iso
 from utils.url import validate_url, SSRFError
 from utils.validation import is_valid_slug
@@ -133,7 +137,7 @@ def _validate_source_url(value):
     parser, content = _fetch_feed_content(url, timeout=15)
     if not content:
         return None, 'Could not fetch a valid RSS feed from this URL'
-    parsed = parser.parse_feed(content)
+    parsed = parser.parse_feed(content, source=safe_url_for_log(url))
     # parse_feed returns a feedparser object even for bozo input; requiring a
     # channel title or entries is what rejects HTML pages while still
     # accepting a legitimate zero-episode feed.
@@ -222,6 +226,7 @@ _CUE_FLOAT_OVERRIDE_FIELDS = [
     ('cueSnapLeadOverride',            'cue_snap_lead_override',               0.5, 30.0),
     ('cueSnapLagOverride',             'cue_snap_lag_override',                0.5, 30.0),
     ('maxAdDurationOverride',          'max_ad_duration_override',             1.0, 3600.0),
+    ('maxAdDurationRejectOverride',    'max_ad_duration_reject_override',      30.0, 3600.0),
 ]
 
 
@@ -353,14 +358,56 @@ def _podcast_base_json(podcast, feed_url) -> dict:
     }
 
 
-def _podcast_listing_fields(podcast) -> dict:
+def _podping_context(db):
+    """(enabled, is-this-domain-active) for a whole list of feeds. One set load
+    amortizes over every feed."""
+    if not db.get_setting_bool('podping_enabled', False):
+        return False, lambda domain: False
+    active = db.get_active_podping_domains(PODPING_HOST_ACTIVE_DAYS)
+    return True, lambda domain: domain in active
+
+
+def _podping_context_for_feed(db):
+    """Same for one feed: an indexed lookup rather than the whole active set."""
+    if not db.get_setting_bool('podping_enabled', False):
+        return False, lambda domain: False
+    return True, lambda domain: db.is_podping_domain_active(
+        domain, PODPING_HOST_ACTIVE_DAYS)
+
+
+def _podping_coverage(podcast, enabled, host_is_active):
+    """Why this feed is or is not covered by podping, most specific first.
+
+    None when the listener is off instance-wide: that is a global setting, not a
+    fact about this feed. The UI only distinguishes received from everything
+    else; the finer states are here for API consumers and diagnostics.
+    """
+    if not enabled:
+        return None
+    if podcast.get('podping_uses') == 0:
+        return 'declined'
+    if podcast.get('last_podping_at'):
+        return 'received'
+    if podcast.get('podping_uses') == 1:
+        return 'declared'
+    domain = feed_url_domain(podcast.get('source_url') or '')
+    return 'host_active' if domain and host_is_active(domain) else 'unseen'
+
+
+def _podcast_listing_fields(podcast, podping) -> dict:
     """Extra fields shared by the feed list and detail responses (not PATCH)."""
+    enabled, host_is_active = podping
+    declaration = PodcastMixin._podping_declaration_from_row(podcast)
     return {
         'artworkUrl': f"/api/v1/feeds/{podcast['slug']}/artwork" if podcast.get('artwork_cached') else podcast.get('artwork_url'),
         'episodeCount': podcast.get('episode_count', 0),
         'processedCount': podcast.get('processed_count', 0),
         'lastRefreshed': podcast.get('last_checked_at'),
         'lastPodpingAt': podcast.get('last_podping_at'),
+        'podpingCoverage': _podping_coverage(podcast, enabled, host_is_active),
+        'podpingUses': declaration['uses_podping'],
+        'podpingHiveAccounts': declaration['hive_accounts'],
+        'podpingCheckedAt': podcast.get('podping_checked_at'),
         **_refresh_error_fields(podcast),
         'createdAt': podcast.get('created_at'),
     }
@@ -375,13 +422,14 @@ def list_feeds():
     podcasts = db.get_all_podcasts()
     feed_auth_key = get_feed_auth_key(db)
 
+    podping = _podping_context(db)
     feeds = []
     for podcast in podcasts:
         feed_url = _public_feed_url(podcast['slug'], feed_auth_key)
 
         feeds.append({
             **_podcast_base_json(podcast, feed_url),
-            **_podcast_listing_fields(podcast),
+            **_podcast_listing_fields(podcast, podping),
             'lastEpisodeDate': podcast.get('last_episode_date'),
         })
 
@@ -426,7 +474,8 @@ def add_feed():
         parser, feed_content = _fetch_feed_content(source_url)
 
         if feed_content:
-            parsed_feed = parser.parse_feed(feed_content)
+            parsed_feed = parser.parse_feed(
+                feed_content, source=safe_url_for_log(source_url))
             if parsed_feed and parsed_feed.feed:
                 title = parsed_feed.feed.get('title', '')
                 if title:
@@ -603,7 +652,8 @@ def import_opml():
             try:
                 feed_content = rss_parser.fetch_feed(source_url)
                 if feed_content:
-                    parsed_feed = rss_parser.parse_feed(feed_content)
+                    parsed_feed = rss_parser.parse_feed(
+                        feed_content, source=safe_url_for_log(source_url))
                     if parsed_feed and parsed_feed.feed:
                         fetched_title = parsed_feed.feed.get('title', '')
                         if fetched_title:
@@ -720,7 +770,7 @@ def get_feed(slug):
 
     return json_response({
         **_podcast_base_json(podcast, feed_url),
-        **_podcast_listing_fields(podcast),
+        **_podcast_listing_fields(podcast, _podping_context_for_feed(db)),
         'description': podcast.get('description'),
         'daiLikely': dai_likely,
         'websiteUrl': podcast.get('website_url'),
@@ -809,6 +859,14 @@ def update_feed(slug):
             v, err = _normalize_cue_float_override(data[json_key], json_key, lo, hi)
             if err:
                 return error_response(err, 400)
+            if json_key == 'maxAdDurationRejectOverride' and v is not None:
+                # Above the global hard ceiling the validator would clamp it
+                # back, so the feed would show a value it never uses.
+                ceiling = resolve_max_ad_duration_confirmed(db)
+                if v > ceiling:
+                    return error_response(
+                        f'maxAdDurationRejectOverride cannot exceed the global '
+                        f'maxAdDurationConfirmedSeconds ({ceiling:.0f})', 400)
             updates[db_col] = v
 
     if 'cueCreateFromPairsOverride' in data:

@@ -25,6 +25,7 @@ from utils.language import get_pattern_language
 from utils.llm_call import call_llm, call_llm_for_window
 from utils.markers import mark_distinct_merge, note_merged_members
 from utils.prompt import format_sponsor_block, render_prompt, apply_override
+from utils.text import truncate
 from utils.time import overlap_ratio, ranges_overlap
 
 from config import (
@@ -36,6 +37,7 @@ from config import (
     HOLD_REASON_DIFFERENTIAL_UNCORROBORATED,
     DEFAULT_SEGMENT_ACTION,
     normalize_segment_category,
+    SEGMENT_CATEGORIES,
     is_cue_backed,
     is_template_cue,
     MIN_OVERLAP_TOLERANCE,
@@ -69,6 +71,8 @@ from utils.constants import (
     KNOWN_SHORT_BRANDS, canonical_sponsor,
     LEARNING_MIN_CONFIDENCE, LEARNING_MIN_CONFIDENCE_LONG,
     LEARNING_LONG_DURATION_THRESHOLD,
+    mentions_advertising,
+    PATTERN_EVIDENCE_MAX_CHARS,
     sanitize_sponsor_label,
     SHOW_SEGMENTS_PROMPT_SECTION,
 )
@@ -368,6 +372,8 @@ def dai_differential_ads(dai_differential, fp_pairs, corroborating_spans=None, *
             'confidence': 0.95,
             'sponsor': None,
             'detection_stage': 'dai_differential',
+            # A dynamically inserted block is a paid ad by definition.
+            'category': 'sponsor',
         }
         if stage_overlap:
             ad['reason'] = ('Dynamically inserted: audio differs across '
@@ -430,6 +436,30 @@ def _cue_fusion_inputs(audio_analysis, segments):
         [], audio_analysis, total_duration=total_duration)
     pair_spans = [(a['start'], a['end']) for a in pair_ads]
     return cue_marks, pair_spans
+
+
+# Merge bookkeeping: how much audio the member that supplied the current
+# category covered. Stripped before markers are returned.
+_CATEGORY_SPAN = '_category_span'
+
+
+def _with_category_span(entry: Dict) -> Dict:
+    """Stamp a merge accumulator with the audio its own category covers, before
+    a later member extends the end past what that category classified."""
+    if entry.get('category') in SEGMENT_CATEGORIES:
+        entry[_CATEGORY_SPAN] = entry['end'] - entry['start']
+    else:
+        entry.pop(_CATEGORY_SPAN, None)
+    return entry
+
+
+def _pattern_match_evidence(match, kind: str) -> str:
+    """Kind, quoted matched text, and score for the marker reason."""
+    pct = f'{match.confidence:.0%}'
+    matched = (getattr(match, 'matched_text', None) or '').strip()
+    if matched:
+        return f'{kind} "{truncate(matched, PATTERN_EVIDENCE_MAX_CHARS)}" {pct}'
+    return f'{kind} {pct}'
 
 
 class AdDetector:
@@ -1074,8 +1104,8 @@ class AdDetector:
                 pass_label.lower(), len(windows), last_error, model)
             return [], all_raw_responses, failed_windows, failure, 0, 0, 0
 
-        # Count raw LLM markers missing "category" before normalize_segment_category
-        # (at the merge seam) papers over the gap with the 'sponsor' default.
+        # Raw LLM markers with no "category": the merge seam leaves these
+        # unset, so this counts what stays uncategorized end to end.
         category_total = len(all_window_ads)
         category_missing = sum(1 for ad in all_window_ads if 'category' not in ad)
 
@@ -1092,9 +1122,8 @@ class AdDetector:
         category-less on real episodes, so ask again narrowly instead.
 
         Mutates ``ads`` in place, setting 'category' on entries the response
-        resolves, and returns how many were repaired. Never raises: a failed
-        or malformed response leaves the rest to fall through to the
-        normalize_segment_category default ('sponsor') at the merge seam.
+        resolves, and returns how many were repaired. Never raises: what it
+        cannot repair stays uncategorized.
         """
         missing = [(i, ad) for i, ad in enumerate(ads) if 'category' not in ad]
         if not missing:
@@ -1145,6 +1174,15 @@ class AdDetector:
             logger.debug(
                 f"[{slug}:{episode_id}] {window_label} category repair "
                 f"resolved {repaired}/{len(missing)}"
+            )
+        if repaired == 0 and response.content:
+            # No entries parsed and none rejected: the response is not the
+            # shape asked for. Only Anthropic enforces the schema, so log what
+            # arrived rather than reporting a bare zero.
+            logger.warning(
+                f"[{slug}:{episode_id}] {window_label} category repair "
+                f"returned nothing usable for {len(missing)} segment(s); "
+                f"raw response: {response.content[:300]!r}"
             )
         return repaired
 
@@ -1287,7 +1325,7 @@ class AdDetector:
             if foreign_language_ads:
                 final_ads = self._merge_detection_results(
                     final_ads + foreign_language_ads, segments=segments,
-                    action_map=action_map)
+                    action_map=action_map, podcast_name=podcast_name)
                 logger.info(f"[{slug}:{episode_id}] Merged {len(foreign_language_ads)} foreign language ads")
 
             total_ad_time = sum(ad['end'] - ad['start'] for ad in final_ads)
@@ -1821,7 +1859,8 @@ class AdDetector:
 
         # Merge overlapping ads
         all_ads = self._merge_detection_results(
-            all_ads, segments=segments, action_map=action_map)
+            all_ads, segments=segments, action_map=action_map,
+            podcast_name=podcast_name)
 
         # Log detection summary
         total = len(all_ads)
@@ -1843,11 +1882,12 @@ class AdDetector:
                            all_ads, pattern_matched_regions, episode_id):
         """Append a stage-1/2 pattern match to the ad and matched-region lists
         and record it for metrics and promotion. ``reason_suffix`` names the
-        match kind in the no-sponsor fallback reason."""
+        match kind in the reason."""
+        evidence = _pattern_match_evidence(match, reason_suffix)
         if match.sponsor:
-            reason = f"{match.sponsor} (pattern #{match.pattern_id})"
+            reason = f"{match.sponsor} (pattern #{match.pattern_id}, {evidence})"
         else:
-            reason = f"Pattern #{match.pattern_id} ({reason_suffix})"
+            reason = f"Pattern #{match.pattern_id} ({evidence})"
 
         all_ads.append({
             'start': match.start,
@@ -1857,9 +1897,8 @@ class AdDetector:
             'sponsor': match.sponsor,
             'detection_stage': detection_stage,
             'pattern_id': match.pattern_id,
-            # Category inherited from the matched pattern; None (pattern
-            # predates the category column) falls through to the merge
-            # seam's 'sponsor' default.
+            # Inherited from the matched pattern; None (pattern predates the
+            # category column) stays unset through the merge seam.
             'category': match.category,
         })
         pattern_matched_regions.append({
@@ -1892,35 +1931,6 @@ class AdDetector:
             if seg.get('end', 0) >= start and seg.get('start', 0) <= end:
                 text_parts.append(seg.get('text', ''))
         return ' '.join(text_parts).strip()
-
-    def _extract_sponsor_from_reason(self, reason: str) -> Optional[str]:
-        """Extract sponsor name from ad detection reason using known sponsors DB.
-
-        Args:
-            reason: Ad detection reason text (e.g., "ZipRecruiter host-read sponsor segment")
-
-        Returns:
-            Extracted sponsor name (normalized) or None
-        """
-        if not reason or not self.sponsor_service:
-            return None
-
-        # Reject garbage reason values before extraction
-        reason_lower = reason.lower().strip()
-        if reason_lower in INVALID_SPONSOR_VALUES or len(reason_lower) < 2:
-            logger.debug(f"Rejecting invalid reason for sponsor extraction: '{reason}'")
-            return None
-
-        # Use sponsor service to find canonical sponsor name from DB
-        sponsor = self.sponsor_service.find_sponsor_in_text(reason)
-        if sponsor:
-            # Validate extracted sponsor
-            sponsor_lower = sponsor.lower().strip()
-            if sponsor_lower in INVALID_SPONSOR_VALUES or len(sponsor_lower) < 2:
-                logger.debug(f"Rejecting invalid extracted sponsor: '{sponsor}'")
-                return None
-            return sponsor
-        return None
 
     def _ad_passes_learning_filters(self, ad: Dict, min_confidence: float) -> bool:
         """Apply basic eligibility filters before sponsor resolution.
@@ -1973,8 +1983,8 @@ class AdDetector:
 
         Tier 1: sponsor DB lookup on raw sponsor field
         Tier 2: sponsor DB lookup on reason text
-        Tier 3: extract from reason via regex patterns
-        Tier 4: use raw sponsor if it looks valid
+        Tier 3: use raw sponsor if it looks valid
+        Tier 4: read a brand out of the reason prose
 
         Returns the canonical sponsor name, or None if no usable sponsor.
         """
@@ -1990,15 +2000,17 @@ class AdDetector:
         if not sponsor and reason_text and self.sponsor_service:
             sponsor = self.sponsor_service.find_sponsor_in_text(reason_text)
 
-        # Tier 3: extract from reason via regex patterns
-        if not sponsor:
-            sponsor = self._extract_sponsor_from_reason(reason_text)
-
-        # Tier 4: use raw sponsor if it looks valid
+        # Tier 3: use raw sponsor if it looks valid
         if not sponsor and raw_sponsor:
             raw_lower = raw_sponsor.lower().strip()
             if raw_lower not in INVALID_SPONSOR_VALUES and len(raw_lower) >= 2:
                 sponsor = raw_sponsor
+
+        # Tier 4: read a brand out of the prose. Last because the model's own
+        # sponsor field outranks a name scraped from its explanation. The old
+        # tier 3 here repeated tier 2's DB lookup, so it could never add a hit.
+        if not sponsor and reason_text:
+            sponsor = SponsorService.extract_sponsor_from_reason(reason_text)
 
         if not sponsor:
             return None
@@ -2174,6 +2186,7 @@ class AdDetector:
                 'confidence': 0.95,  # High confidence for language detection
                 'reason': 'Non-English language segment (likely DAI ad)',
                 'detection_stage': 'language',
+                'category': 'sponsor',
                 'end_text': '[Foreign language content]'
             })
             return True
@@ -2205,7 +2218,8 @@ class AdDetector:
 
     def _merge_detection_results(self, ads: List[Dict],
                                  segments: Optional[List[Dict]] = None,
-                                 action_map: Optional[Dict[str, str]] = None) -> List[Dict]:
+                                 action_map: Optional[Dict[str, str]] = None,
+                                 podcast_name: Optional[str] = None) -> List[Dict]:
         """Merge overlapping ads from different detection stages.
 
         segments, when given, lets the merge verify transcript coverage of a
@@ -2226,7 +2240,7 @@ class AdDetector:
         # Sort by start time
         ads = sorted(ads, key=lambda x: x['start'])
 
-        merged = [ads[0].copy()]
+        merged = [_with_category_span(ads[0].copy())]
         for current in ads[1:]:
             last = merged[-1]
 
@@ -2246,8 +2260,11 @@ class AdDetector:
                     if new_last is None:
                         merged.pop()
                     else:
-                        merged[-1] = new_last
-                    merged.extend(new_entries)
+                        # Re-stamp: a split narrows the span its category
+                        # covers, and a stale figure would let a short member
+                        # relabel it later.
+                        merged[-1] = _with_category_span(new_last)
+                    merged.extend(_with_category_span(e) for e in new_entries)
                     logger.debug(
                         f"Not merging {last.get('category')!r} and "
                         f"{current.get('category')!r} (different resolved "
@@ -2269,7 +2286,7 @@ class AdDetector:
                 if (bool(last.get('differential_uncorroborated'))
                         != bool(current.get('differential_uncorroborated'))
                         and current['start'] >= last['end']):
-                    merged.append(current.copy())
+                    merged.append(_with_category_span(current.copy()))
                     continue
                 # Non-overlapping spans (touching or gapped) are distinct ads,
                 # not the same ad overlapping across stages. Touch counts too
@@ -2283,6 +2300,16 @@ class AdDetector:
                     # in so the protected union covers audio it adds past the
                     # recorded end (else a later trim could sever it).
                     note_merged_members(last, current)
+                # The label goes to the member classifying the most audio,
+                # ties to the incumbent. A member naming nothing, or naming
+                # something outside the vocabulary, displaces nothing.
+                cur_category = current.get('category')
+                if cur_category in SEGMENT_CATEGORIES:
+                    cur_span = current['end'] - current['start']
+                    if cur_span > last.get(_CATEGORY_SPAN, 0.0):
+                        last['category'] = cur_category
+                        last[_CATEGORY_SPAN] = cur_span
+
                 # Merge - prefer pattern-detected metadata
                 if current['end'] > last['end']:
                     last['end'] = current['end']
@@ -2362,19 +2389,19 @@ class AdDetector:
                         last['hold_reason'] = HOLD_REASON_DIFFERENTIAL_UNCORROBORATED
                         last['was_cut'] = False
             else:
-                merged.append(current.copy())
+                merged.append(_with_category_span(current.copy()))
 
         merged = self._merge_overlapping_accepted_duplicates(merged, action_map=action_map)
 
-        # Sanitize every surviving marker's sponsor: strips reasoning prose
-        # and bare segment names the merge above didn't already clean up
-        # (e.g. a marker that never went through either merge pass). Also the
-        # single point that stamps a validated segment category:
-        # fingerprint/text_pattern matches keep their pattern's stored
-        # category; anything unset or invalid falls through to 'sponsor'.
+        # Single point that sanitizes a sponsor label and validates a category.
+        # An unset one stays unset: stamping 'sponsor' made a real sponsor read
+        # indistinguishable from one nothing classified.
         for marker in merged:
-            marker['sponsor'] = sanitize_sponsor_label(marker.get('sponsor'))
-            marker['category'] = normalize_segment_category(marker.get('category'))
+            marker['sponsor'] = sanitize_sponsor_label(
+                marker.get('sponsor'), show_name=podcast_name)
+            if marker.get('category') not in SEGMENT_CATEGORIES:
+                marker.pop('category', None)
+            marker.pop(_CATEGORY_SPAN, None)
 
         return merged
 
@@ -2451,8 +2478,11 @@ class AdDetector:
                             # Neither side resolves to 'keep' (e.g. remove vs
                             # beep): no side is more "correct" to preserve,
                             # fall back to the higher-confidence contributor.
-                    combined['category'] = normalize_segment_category(
-                        category_source.get('category'))
+                    source_category = category_source.get('category')
+                    if source_category in SEGMENT_CATEGORIES:
+                        combined['category'] = source_category
+                    else:
+                        combined.pop('category', None)
                     result[i] = combined
                     del result[j]
                     changed = True

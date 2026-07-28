@@ -11,12 +11,13 @@ import Artwork from '../components/Artwork';
 import { EPISODE_STATUS_COLORS, isFailedStatus } from '../utils/episodeStatus';
 import { DETECTION_STAGE_META } from '../utils/detectionStage';
 import { CORROBORATION_META } from '../utils/corroboration';
-import { stripHtml } from '../utils/stripHtml';
 import { formatConfidence } from '../utils/confidence';
 import AdEditor, { AdCorrection } from '../components/AdEditor';
 import AdReviewModal from '../components/AdReviewModal';
 import type { AdSegment } from '../api/types';
 import PatternLink from '../components/PatternLink';
+import ExpandableText from '../components/ExpandableText';
+import RichText from '../components/RichText';
 import CollapsibleSection, { useCollapsibleOpen } from '../components/CollapsibleSection';
 import CueDetectionsSection from '../components/CueDetectionsSection';
 import CueCandidatesSection from '../components/CueCandidatesSection';
@@ -613,17 +614,10 @@ function EpisodeDetail() {
         )}
 
         {episode.description && (
-          <p className="mt-4 text-muted-foreground whitespace-pre-wrap wrap-break-word">
-            {stripHtml(
-              episode.description
-                .replace(/<br\s*\/?>/gi, '\n')
-                .replace(/<\/p>/gi, '\n')
-                .replace(/<\/li>/gi, '\n')
-                .replace(/<li>/gi, '- ')
-            )
-              .replace(/\n([ \t]*\n)+/g, '\n')
-              .trim()}
-          </p>
+          <RichText
+            html={episode.description}
+            className="mt-4 block text-muted-foreground wrap-break-word"
+          />
         )}
       </div>
 
@@ -780,7 +774,7 @@ function EpisodeDetail() {
                       ? `${formatTimestamp(segment.reviewer_original_start)} - ${formatTimestamp(segment.reviewer_original_end)}`
                       : `${formatTimestamp(segment.start)} - ${formatTimestamp(segment.end)}`}
                   </span>
-                  {segment.category && <SegmentCategoryBadge category={segment.category} />}
+                  <SegmentCategoryBadge category={segment.category} />
                   {segment.actionApplied === 'keep' && <KeptBadge />}
                   {segment.detection_stage && DETECTION_STAGE_META[segment.detection_stage] && (
                     <StageBadge stage={segment.detection_stage} />
@@ -880,10 +874,13 @@ function EpisodeDetail() {
                     free text (e.g., boundary extension that swept up an
                     adjacent ad's content). */}
                 {segment.reason && (
-                  <p className="text-sm text-muted-foreground mt-2 wrap-break-word">
+                  <ExpandableText
+                    label="match"
+                    className="text-sm text-muted-foreground mt-2"
+                  >
                     <span className="font-medium">Match:</span>{' '}
                     <PatternLink reason={segment.reason} />
-                  </p>
+                  </ExpandableText>
                 )}
                 {segment.reviewer_verdict === 'adjust' && (
                   <p className="text-sm text-cyan-600 dark:text-cyan-400 mt-1 font-mono">
@@ -891,9 +888,13 @@ function EpisodeDetail() {
                   </p>
                 )}
                 {segment.reviewer_verdict && segment.reviewer_reasoning && (
-                  <p className="text-xs text-muted-foreground mt-1 italic">
+                  <ExpandableText
+                    label="reviewer note"
+                    clampLines={3}
+                    className="text-xs text-muted-foreground mt-1 italic"
+                  >
                     Reviewer: {segment.reviewer_reasoning}
-                  </p>
+                  </ExpandableText>
                 )}
               </div>
             ))}
@@ -1032,7 +1033,7 @@ function EpisodeDetail() {
                       <span className="font-mono text-sm">
                         {formatTimestamp(segment.start)} - {formatTimestamp(segment.end)}
                       </span>
-                      {segment.category && <SegmentCategoryBadge category={segment.category} />}
+                      <SegmentCategoryBadge category={segment.category} />
                       {segment.actionApplied === 'keep' && <KeptBadge />}
                       {segment.detection_stage && DETECTION_STAGE_META[segment.detection_stage] && (
                         <StageBadge stage={segment.detection_stage} />
@@ -1155,26 +1156,42 @@ function EpisodeDetail() {
       )}
 
       {episode.keptMarkers && episode.keptMarkers.length > 0 && (
-        <div className="bg-card rounded-lg border border-border p-6 mb-6" data-testid="kept-segments-section">
-          <h2 className="text-xl font-semibold text-foreground mb-4">
-            Kept segments
-          </h2>
-          <div className="space-y-3">
-            {episode.keptMarkers.map((segment, index) => (
-              <div
-                key={index}
-                className="p-3 bg-secondary/50 rounded-lg"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-sm">
-                    {formatTimestamp(segment.start)} - {formatTimestamp(segment.end)}
-                  </span>
-                  {segment.category && <SegmentCategoryBadge category={segment.category} />}
-                  <KeptBadge />
+        <div className="mb-6" data-testid="kept-segments-section">
+          <CollapsibleSection
+            title={`Kept segments (${episode.keptMarkers.length})`}
+            subtitle="Detected, and left in the audio by your category actions"
+            defaultOpen={false}
+            storageKey="episode-kept-segments"
+          >
+            <div className="space-y-3">
+              {episode.keptMarkers.map((segment, index) => (
+                <div
+                  key={index}
+                  className="p-3 bg-secondary/50 rounded-lg"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    {episode.hasOriginalAudio && (
+                      <AuditionPlayButton
+                        label="this segment"
+                        playing={markerAudition.playingKey === `kept-${segment.start}-${segment.end}`}
+                        onClick={() => markerAudition.toggle(
+                          `kept-${segment.start}-${segment.end}`,
+                          markerAudioUrl,
+                          segment.start,
+                          segment.end,
+                        )}
+                      />
+                    )}
+                    <span className="font-mono text-sm">
+                      {formatTimestamp(segment.start)} - {formatTimestamp(segment.end)}
+                    </span>
+                    <SegmentCategoryBadge category={segment.category} />
+                    <KeptBadge />
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          </CollapsibleSection>
         </div>
       )}
 
@@ -1222,7 +1239,7 @@ function EpisodeDetail() {
                           <span className="font-mono text-sm">
                             {formatTimestamp(segment.start)} - {formatTimestamp(segment.end)}
                           </span>
-                          {segment.category && <SegmentCategoryBadge category={segment.category} />}
+                          <SegmentCategoryBadge category={segment.category} />
                           {segment.actionApplied === 'keep' && <KeptBadge />}
                           <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-red-500/20 text-red-600 dark:text-red-400">
                             Not cut
@@ -1257,7 +1274,12 @@ function EpisodeDetail() {
                         </p>
                       )}
                       {segment.reason && (
-                        <p className="text-sm text-muted-foreground mt-1">{segment.reason}</p>
+                        <ExpandableText
+                          label="match"
+                          className="text-sm text-muted-foreground mt-1"
+                        >
+                          {segment.reason}
+                        </ExpandableText>
                       )}
                       {!correction && (
                         <div className="flex flex-col sm:flex-row gap-2 mt-3">

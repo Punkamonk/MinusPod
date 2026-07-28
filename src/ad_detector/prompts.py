@@ -6,17 +6,20 @@ for readability; behavior is unchanged from the pre-split module.
 """
 import logging
 import json
+import re
 from typing import List, Dict, Tuple
 
 from sponsor_service import SponsorService
 from utils.prompt import format_sponsor_block, render_prompt
+from utils.text import truncate
 from utils.time import parse_timestamp
 from utils.llm_response import extract_json_ads_array
 from utils.constants import (
     INVALID_SPONSOR_VALUES, STRUCTURAL_FIELDS,
     SPONSOR_PRIORITY_FIELDS, SPONSOR_PATTERN_KEYWORDS,
-    SPONSOR_MAX_NAME_CHARS,
+    SPONSOR_MAX_NAME_CHARS, REASON_DESCRIPTION_MAX,
     is_sponsor_reasoning_rationale,
+    mentions_advertising,
     NOT_AD_CLASSIFICATIONS,
 )
 from config import (
@@ -26,6 +29,22 @@ from config import (
 )
 
 logger = logging.getLogger('podcast.claude')
+
+# Two texts can only be duplicates when their lengths are comparable; below
+# this ratio the shorter one is a fragment of the longer, which is worth
+# keeping rather than discarding.
+DUPLICATE_MIN_LENGTH_RATIO = 0.8
+
+def _singular(key: str) -> str:
+    """Drop one trailing plural. rstrip('s') stemmed 'names' to 'name' but also
+    'address' to 'addre'."""
+    lowered = key.lower()
+    return lowered[:-1] if lowered.endswith('s') else lowered
+
+
+# Sponsor field names with a trailing plural dropped, so the evidence gate
+# accepts the "sponsors" key extract_sponsor_name already reads.
+_SPONSOR_FIELD_STEMS = frozenset(_singular(f) for f in SPONSOR_PRIORITY_FIELDS)
 
 
 # User prompt template (not configurable via UI - just formats the transcript)
@@ -171,6 +190,43 @@ def _flatten_ad_envelopes(ads: List) -> List:
     return flat
 
 
+# The window prompt asks for these notes, so they arrive as prose glued to the
+# front of a description and end up in the marker a reader sees.
+_CONTINUATION_PREFIX_RE = re.compile(
+    r'^(?:continues?\s+(?:from\s+previous|in\s+next)|continued)\b[\s;,.:-]*',
+    re.IGNORECASE)
+
+
+def _drop_leading(description: str, sponsor: str) -> str:
+    """Drop a leading sponsor name from a description, so combining the two
+    does not render "Acme: Acme ad for ...". Only on a word boundary: "Box"
+    must not turn "Boxing gloves" into "ing gloves"."""
+    if not description.lower().startswith(sponsor.lower()):
+        return description
+    rest = description[len(sponsor):]
+    if rest and rest[0].isalnum():
+        return description
+    return rest.lstrip(' :,-.').strip() or description
+
+
+def _strip_continuation_prefix(text: str) -> str:
+    """Drop a leading window-continuation note from description text."""
+    return _CONTINUATION_PREFIX_RE.sub('', text or '').lstrip()
+
+
+def _flatten(value) -> str:
+    """Flatten an LLM field to text. A back-to-back break makes the model
+    answer a string field with a list, and str() would store the Python repr."""
+    if isinstance(value, (list, tuple)):
+        return ', '.join(str(v).strip() for v in value if v and str(v).strip())
+    return str(value).strip() if value else ''
+
+
+def _as_text(value) -> str:
+    """Flattened text with any leading window-continuation note dropped."""
+    return _strip_continuation_prefix(_flatten(value))
+
+
 def parse_ads_from_response(response_text: str, slug: str = None,
                               episode_id: str = None,
                               sponsor_service=None) -> List[Dict]:
@@ -182,7 +238,11 @@ def parse_ads_from_response(response_text: str, slug: str = None,
     def get_valid_value(value):
         if not value:
             return None
-        str_value = str(value).strip()
+        str_value = _flatten(value)
+        # A continuation note is window bookkeeping, not a sponsor; trimming
+        # the prefix and keeping the remainder minted labels like 'window'.
+        if _CONTINUATION_PREFIX_RE.match(str_value):
+            return None
         if len(str_value) < 2:
             return None
         if str_value.lower() in INVALID_SPONSOR_VALUES:
@@ -194,10 +254,19 @@ def parse_ads_from_response(response_text: str, slug: str = None,
         return str_value
 
     def _text_is_duplicate(a: str, b: str) -> bool:
-        """Check if two strings are essentially the same text."""
+        """Check if two strings are essentially the same text.
+
+        Length has to be comparable first. A bare sponsor name is both a
+        prefix of its own description and a full word subset of it, so
+        without this "Box" swallowed the note explaining the read and left
+        the marker saying only "Box".
+        """
         a_lower = a.lower().strip()
         b_lower = b.lower().strip()
-        if a_lower.startswith(b_lower) or b_lower.startswith(a_lower):
+        shorter, longer = sorted((a_lower, b_lower), key=len)
+        if not shorter or len(shorter) < len(longer) * DUPLICATE_MIN_LENGTH_RATIO:
+            return False
+        if longer.startswith(shorter):
             return True
         a_words = set(a_lower.split())
         b_words = set(b_lower.split())
@@ -342,17 +411,19 @@ def parse_ads_from_response(response_text: str, slug: str = None,
                             # Prefer longer descriptive text over short values
                             if description is None or len(val) > len(description):
                                 description = val
-                    if description and len(description) > 300:
-                        description = description[:297] + "..."
+                    # Kept whole (#591); the old 300/150 caps put a literal
+                    # "..." in the UI with no fuller text to expand to.
+                    description = truncate(
+                        _strip_continuation_prefix(description),
+                        REASON_DESCRIPTION_MAX)
 
                     # Combine sponsor + description in reason field
                     if description:
                         if reason and reason != 'Advertisement detected':
                             # Avoid duplication: check if description is essentially the same text
                             if not _text_is_duplicate(reason, description):
-                                if len(description) > 150:
-                                    description = description[:147] + "..."
-                                reason = f"{reason}: {description}"
+                                description = _drop_leading(description, reason)
+                                reason = f"{reason}: {description}" if description else reason
                         elif not reason or reason == 'Advertisement detected':
                             reason = description
 
@@ -373,14 +444,15 @@ def parse_ads_from_response(response_text: str, slug: str = None,
                     # instead of blocklisting content indicators (which keeps growing)
                     duration = end - start
                     has_sponsor_field = any(
-                        get_valid_value(ad.get(f))
-                        for f in SPONSOR_PRIORITY_FIELDS
+                        _singular(key) in _SPONSOR_FIELD_STEMS
+                        and get_valid_value(val)
+                        for key, val in ad.items()
                     )
                     has_known_sponsor = (
                         sponsor_service and
                         sponsor_service.find_sponsor_in_text(reason)
                     ) if reason else False
-                    has_ad_language = bool(extract_sponsor_from_text(reason)) if reason else False
+                    has_ad_language = mentions_advertising(reason)
 
                     if not has_sponsor_field and not has_known_sponsor and not has_ad_language:
                         # Low confidence + no evidence = reject regardless of duration
@@ -415,7 +487,7 @@ def parse_ads_from_response(response_text: str, slug: str = None,
                         'end': end,
                         'confidence': norm_conf,
                         'reason': reason,
-                        'end_text': ad.get('end_text') or ''
+                        'end_text': _as_text(ad.get('end_text'))
                     }
                     # Store sponsor name separately for UI display
                     # (reuses sponsor_name captured above; ad is unmutated between)
@@ -423,8 +495,9 @@ def parse_ads_from_response(response_text: str, slug: str = None,
                         ad_entry['sponsor'] = sponsor_name
                     # Pass the LLM's raw category through unvalidated; the
                     # merge seam normalizes it against SEGMENT_CATEGORIES.
-                    if ad.get('category'):
-                        ad_entry['category'] = ad.get('category')
+                    resolved_category = resolve_ad_category(ad)
+                    if resolved_category:
+                        ad_entry['category'] = resolved_category
                     valid_ads.append(ad_entry)
                 except ValueError as e:
                     logger.warning(f"[{slug}:{episode_id}] Skipping ad with invalid timestamp: {e}")
@@ -507,6 +580,72 @@ def format_category_repair_prompt(transcript_excerpt: str,
     )
 
 
+def _repair_index(value):
+    """The segment index from a repair entry, or None. Accepts the digits a
+    provider without enum enforcement may quote as a string."""
+    # bool is a subclass of int in Python; exclude it explicitly so a stray
+    # true/false in the index field cannot masquerade as 0/1.
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip('-').isdigit():
+        return int(value.strip())
+    return None
+
+
+# Spelled-out forms of the exact vocabulary: the model reaches for
+# "self-promotion" as readily as "self_promo". A position word like "pre-roll"
+# or a bare "ad" is still refused.
+_CATEGORY_ALIASES = {
+    'self_promotion': 'self_promo',
+    'selfpromo': 'self_promo',
+    'cross_promotion': 'cross_promo',
+    'crosspromo': 'cross_promo',
+    'sponsorship': 'sponsor',
+}
+
+# Keys a category can arrive under. Only Anthropic enforces the schema, so on
+# every other provider the model names fields freely; the rest of this parser
+# already tolerates that for start, end and sponsor.
+_CATEGORY_KEY_HINTS = ('categor', 'segment_type', 'classification', 'type')
+
+
+def _repair_category(value):
+    """A known category from any field, or None. Spacing, case and hyphens
+    vary between providers ("Cross-Promo"); the vocabulary does not, so only
+    formatting and the spelled-out forms are normalized. A position word like
+    "pre-roll", or a bare "ad", is not a category and stays rejected."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().lower().replace('-', '_').replace(' ', '_')
+    candidate = _CATEGORY_ALIASES.get(candidate, candidate)
+    return candidate if candidate in SEGMENT_CATEGORIES else None
+
+
+def resolve_ad_category(ad: Dict):
+    """The segment category an ad object carries, wherever it put it.
+
+    "category" first, then the other keys a model uses for the same idea. The
+    value is validated against the vocabulary either way, so a `type` of "ad"
+    or "advertisement" contributes nothing while a `type` of "self_promo"
+    is taken at face value.
+    """
+    if not isinstance(ad, dict):
+        return None
+    direct = _repair_category(ad.get('category'))
+    if direct:
+        return direct
+    for key, value in ad.items():
+        kl = str(key).lower()
+        if kl == 'category' or not any(h in kl for h in _CATEGORY_KEY_HINTS):
+            continue
+        found = _repair_category(value)
+        if found:
+            return found
+    return None
+
+
 def parse_category_repair_response(response_text: str) -> Dict[int, str]:
     """Parse the repair call's response into {index: category}.
 
@@ -525,16 +664,22 @@ def parse_category_repair_response(response_text: str) -> Dict[int, str]:
     if not isinstance(data, list):
         return {}
     resolved = {}
+    rejected = []
     for entry in data:
         if not isinstance(entry, dict):
             continue
-        idx = entry.get('index')
-        category = entry.get('category')
-        # bool is a subclass of int in Python; exclude it explicitly so a
-        # stray true/false in the index field cannot masquerade as 0/1.
-        if isinstance(idx, bool) or not isinstance(idx, int):
-            continue
-        if category not in SEGMENT_CATEGORIES:
+        idx = _repair_index(entry.get('index'))
+        category = _repair_category(entry.get('category'))
+        if idx is None or category is None:
+            rejected.append(entry)
             continue
         resolved[idx] = category
+    if rejected:
+        # Only Anthropic enforces the schema; every other provider can answer
+        # in a shape this drops, and a silent drop reads as "the model had no
+        # opinion". Say what came back so it is diagnosable.
+        logger.info(
+            "Category repair: ignored %d unusable entr%s, e.g. %s",
+            len(rejected), 'y' if len(rejected) == 1 else 'ies',
+            json.dumps(rejected[:3])[:200])
     return resolved

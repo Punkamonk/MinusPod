@@ -46,7 +46,10 @@ from config import (
     HTTP_MAX_REDIRECTS_API,
     HTTP_MAX_REDIRECTS_FEED,
     HTTP_TIMEOUT_CONNECTION_TEST,
+    CONNECTION_TEST_TIMEOUT_CEILING,
     HTTP_TIMEOUT_WHISPER,
+    WHISPER_API_TIMEOUT_MIN,
+    WHISPER_API_TIMEOUT_MAX,
     coerce_bool_setting,
     get_env_backed_int, MAX_AUDIO_DOWNLOAD_MB_MIN, MAX_AUDIO_DOWNLOAD_MB_ADVISORY,
 )
@@ -65,6 +68,13 @@ import ctranslate2
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 
 logger = logging.getLogger(__name__)
+
+# Whisper's encoder window. A clip handed to BatchedInferencePipeline longer
+# than this is silently truncated to its first 30s.
+WHISPER_CHUNK_SECONDS = 30.0
+
+# Shortest clip worth handing to the pipeline.
+MIN_CLIP_SECONDS = 0.1
 
 # Batch size tiers based on audio duration (in seconds)
 # Longer episodes need smaller batches to avoid CUDA OOM
@@ -369,6 +379,8 @@ def _get_whisper_settings() -> Dict[str, str]:
         'api_model': os.environ.get('WHISPER_API_MODEL', 'whisper-1'),
         'language': os.environ.get('WHISPER_LANGUAGE') or 'en',
         'skip_flac_compression': coerce_bool_setting(os.environ.get('SKIP_FLAC_COMPRESSION', 'false')),
+        'api_timeout': _clamp_api_timeout(
+            os.environ.get('WHISPER_API_TIMEOUT') or HTTP_TIMEOUT_WHISPER),
     }
     try:
         # Inline import: Database depends on modules that import transcriber,
@@ -392,10 +404,44 @@ def _get_whisper_settings() -> Dict[str, str]:
         skip_flac_raw = db.get_setting('skip_flac_compression')
         if skip_flac_raw is not None:
             defaults['skip_flac_compression'] = coerce_bool_setting(skip_flac_raw)
+
+        defaults['api_timeout'] = _clamp_api_timeout(db.get_setting_float(
+            'whisper_api_timeout_seconds', defaults['api_timeout']))
     except Exception as e:
         logger.warning(f"Could not read whisper settings from DB, using env defaults: {e}")
 
     return defaults
+
+
+def _clamp_api_timeout(value) -> float:
+    """Coerce and clamp a Whisper request timeout (#593).
+
+    Env vars and direct DB writes skip the API validator, so the range is
+    enforced here as well; an unusable value falls back to the shipped default.
+    """
+    try:
+        return float(min(WHISPER_API_TIMEOUT_MAX,
+                         max(WHISPER_API_TIMEOUT_MIN, float(value))))
+    except (TypeError, ValueError):
+        return float(HTTP_TIMEOUT_WHISPER)
+
+
+def _api_timeout(whisper_settings: Dict) -> float:
+    """Per-request Whisper upload timeout from a resolved settings dict."""
+    return _clamp_api_timeout(whisper_settings.get('api_timeout'))
+
+
+def _connection_test_timeout(whisper_settings: Dict = None) -> float:
+    """How long the Settings test-connection probe waits.
+
+    A backend slow enough to need a raised request timeout can also be slow to
+    cold-load a model, so the probe follows that setting rather than failing
+    while transcription works. Capped so a hung backend cannot hold the
+    settings page for the full transcription timeout.
+    """
+    settings = whisper_settings if whisper_settings is not None else _get_whisper_settings()
+    return max(HTTP_TIMEOUT_CONNECTION_TEST,
+               min(_api_timeout(settings), CONNECTION_TEST_TIMEOUT_CEILING))
 
 
 def check_whisper_connectivity(timeout: float = 5.0) -> bool:
@@ -515,18 +561,19 @@ def probe_transcription_endpoint(base_url: str, api_key: str = '',
         'timestamp_granularities[]': ['segment'],
     }
     filename, audio = _probe_upload(skip_flac_compression)
+    probe_timeout = _connection_test_timeout()
     error, status, body_bytes = run_probe(
         lambda: safe_post(
             url,
             trust=URLTrust.OPERATOR_CONFIGURED,
-            timeout=HTTP_TIMEOUT_CONNECTION_TEST,
+            timeout=probe_timeout,
             max_redirects=HTTP_MAX_REDIRECTS_API,
             files={'file': (filename, io.BytesIO(audio))},
             data=form_data,
             headers=headers,
             stream=True,
         ),
-        HTTP_TIMEOUT_CONNECTION_TEST,
+        probe_timeout,
         log_context=safe_url_for_log(url),
         slow_hint='A first request can be slow while the model loads; '
                   'try again in a minute.',
@@ -910,6 +957,27 @@ def _effective_language(language_override: Optional[str], whisper_settings: Dict
     return (whisper_settings.get('language') or 'en').strip().lower()
 
 
+def _full_span_clips(duration: Optional[float]) -> Optional[List[Dict]]:
+    """Cover the whole file with 30s clips for a VAD-off transcription.
+
+    BatchedInferencePipeline derives its chunks from VAD speech timestamps, so
+    with VAD off it needs clip_timestamps or it raises. Returns None when the
+    duration is unknown or too short to clip.
+    """
+    if not duration or duration <= 0:
+        return None
+    clips = [
+        {'start': i * WHISPER_CHUNK_SECONDS,
+         'end': min((i + 1) * WHISPER_CHUNK_SECONDS, duration)}
+        for i in range(math.ceil(duration / WHISPER_CHUNK_SECONDS))
+    ]
+    # A trailing clip under MIN_CLIP_SECONDS is dropped: too short for a word,
+    # and a boundary-straddling sliver reaches the pipeline as an empty
+    # feature array and raises.
+    return [c for c in clips
+            if c['end'] - c['start'] >= MIN_CLIP_SECONDS] or None
+
+
 class Transcriber:
     def __init__(self):
         # Model is now managed by singleton
@@ -1042,7 +1110,7 @@ class Transcriber:
                             response = safe_post(
                                 url,
                                 trust=URLTrust.OPERATOR_CONFIGURED,
-                                timeout=HTTP_TIMEOUT_WHISPER,
+                                timeout=_api_timeout(whisper_settings),
                                 max_redirects=HTTP_MAX_REDIRECTS_API,
                                 files={'file': (os.path.basename(transcribe_path), audio_file)},
                                 data=form_data,
@@ -1490,6 +1558,11 @@ class Transcriber:
             if not preprocessed:
                 preprocessed_path = self.preprocess_audio(audio_path)
             transcribe_path = preprocessed_path if preprocessed_path else audio_path
+            if preprocessed_path and not vad_filter:
+                # The no-VAD clips must cover the file actually transcribed;
+                # loudnorm can shift the duration by tens of milliseconds.
+                audio_duration = (self.get_audio_duration(preprocessed_path)
+                                  or audio_duration)
 
             # Create podcast-aware prompt with sponsor vocabulary
             initial_prompt = self.get_initial_prompt(podcast_name)
@@ -1537,6 +1610,12 @@ class Transcriber:
                             speech_pad_ms=600,  # Increased from 400 - more padding for ad segments
                             threshold=0.3  # Lower threshold = more sensitive to speech in ads
                         ) if vad_filter else None,
+                        # None here when duration probing failed: a no-VAD
+                        # span of 30s or more then still fails, and the caller
+                        # logs that as a failure rather than silence.
+                        clip_timestamps=(
+                            None if vad_filter
+                            else _full_span_clips(audio_duration)),
                     )
 
                     # Log detected language
