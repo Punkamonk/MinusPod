@@ -49,10 +49,12 @@ function detection(over: Partial<ReviewDetection> = {}): ReviewDetection {
     feedSlug: 'feed-a', feedTitle: 'Feed A',
     episodeId: 'ep-1', episodeTitle: 'Episode One',
     publishDate: '2026-07-01T00:00:00Z', hasOriginalAudio: true,
+    episodeDuration: 3600,
     processedUrl: '/episodes/feed-a/ep-1.mp3',
     start: 100, end: 130, confidence: 0.4,
     sponsor: 'Acme', reason: 'sponsor read',
     patternId: null, detectionStage: 'first_pass',
+    category: null, actionApplied: null,
     status: 'rejected', resolution: 'unresolved',
     ...over,
   };
@@ -276,9 +278,38 @@ describe('AdReviewTab row actions', () => {
     await user.click((await screen.findAllByRole('button', { name: 'Confirm ad' }))[0]);
     expect(
       await screen.findByText(
-        'Confirmed, but the recut did not start. The cut applies on the next reprocess.',
+        'Saved, but the recut did not start. The change applies on the next reprocess.',
       ),
     ).toBeTruthy();
     errSpy.mockRestore();
+  });
+});
+
+describe('AdReviewTab category filter', () => {
+  it('sends the selected category and resets to page 1', async () => {
+    renderTab();
+    const user = userEvent.setup();
+    await screen.findAllByRole('link', { name: 'Episode One' });
+    await user.selectOptions(screen.getByLabelText('Category'), 'cross_promo');
+    await waitFor(() => {
+      expect(mockGetDetections.mock.lastCall?.[0]).toMatchObject({
+        category: 'cross_promo', page: 1,
+      });
+    });
+  });
+
+  it('offers an uncategorized option distinct from all categories', async () => {
+    renderTab();
+    await screen.findAllByRole('link', { name: 'Episode One' });
+    const select = screen.getByLabelText('Category') as HTMLSelectElement;
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values[0]).toBe('');
+    expect(values).toContain('none');
+  });
+
+  it('omits the category param when set to all categories', async () => {
+    renderTab();
+    await waitFor(() => expect(mockGetDetections).toHaveBeenCalled());
+    expect(mockGetDetections.mock.calls[0][0].category).toBeUndefined();
   });
 });

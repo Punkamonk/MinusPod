@@ -14,7 +14,9 @@ from config import (
     count_pending_review,
     get_env_backed_int, MAX_ARTWORK_BYTES_MIN, MAX_ARTWORK_BYTES_MAX,
 )
-from artwork_watermark import composite_watermark, cover_badge_salt, badge_path
+from artwork_watermark import (
+    composite_watermark, cover_badge_salt, badge_path, normalize_badge_position,
+)
 from utils.episode_paths import episode_filename
 from utils.http import safe_url_for_log
 from utils.url import SSRFError
@@ -161,9 +163,7 @@ class Storage:
         Validates ``slug`` against traversal patterns and confirms the
         resolved path stays under ``self.podcasts_dir``.
         """
-        if is_dangerous_slug(slug):
-            raise PathContainmentError(f"refusing dangerous slug {slug!r}")
-        podcast_dir = _safe_join_under(self.podcasts_dir, slug)
+        podcast_dir = self._podcast_path(slug)
         podcast_dir.mkdir(exist_ok=True)
 
         # Ensure episodes directory exists
@@ -171,6 +171,12 @@ class Storage:
         episodes_dir.mkdir(exist_ok=True)
 
         return podcast_dir
+
+    def _podcast_path(self, slug: str) -> Path:
+        """Validated, contained path for a slug; does not touch the disk."""
+        if is_dangerous_slug(slug):
+            raise PathContainmentError(f"refusing dangerous slug {slug!r}")
+        return _safe_join_under(self.podcasts_dir, slug)
 
     def load_data_json(self, slug: str) -> Dict[str, Any]:
         """Load episode data for a podcast from SQLite."""
@@ -506,9 +512,17 @@ class Storage:
             logger.error(f"[{slug}] Failed to save artwork: {e}")
             return False
 
+    def podcast_dir_if_exists(self, slug: str) -> Optional[Path]:
+        """get_podcast_dir without the mkdir: read paths must not create
+        directories for probed unknown slugs."""
+        podcast_dir = self._podcast_path(slug)
+        return podcast_dir if podcast_dir.is_dir() else None
+
     def get_artwork(self, slug: str) -> Optional[Tuple[bytes, str]]:
         """Get cached artwork. Returns (data, content_type) or None."""
-        podcast_dir = self.get_podcast_dir(slug)
+        podcast_dir = self.podcast_dir_if_exists(slug)
+        if not podcast_dir:
+            return None
 
         for ext, content_type in [
             ('.jpg', 'image/jpeg'),
@@ -531,12 +545,19 @@ class Storage:
         variant_path = self.get_podcast_dir(slug) / _WATERMARK_VARIANT
         variant_path.unlink(missing_ok=True)
 
+    def _badge_position(self) -> str:
+        """Configured badge corner (issue #600). Folded into the salt so a
+        change re-composites the cached variant on the next fetch."""
+        return normalize_badge_position(self.db.get_setting('artwork_badge_position'))
+
     def get_watermarked_artwork(self, slug: str) -> Optional[Tuple[bytes, str]]:
         """Cover art with the MinusPod badge composited (issue #420), cached on
         disk as artwork-minuspod.jpg. Returns (jpeg_bytes, 'image/jpeg'), or None
         when there is no source artwork or compositing fails. save_artwork and the
         artwork refresh clear the cached variant so it recomposites."""
-        podcast_dir = self.get_podcast_dir(slug)
+        podcast_dir = self.podcast_dir_if_exists(slug)
+        if not podcast_dir:
+            return None
         variant_path = podcast_dir / _WATERMARK_VARIANT
 
         if variant_path.exists() and not self._watermark_variant_stale(
@@ -550,7 +571,8 @@ class Storage:
         source = self.get_artwork(slug)
         if not source:
             return None
-        composited = composite_watermark(source[0])
+        position = self._badge_position()
+        composited = composite_watermark(source[0], position)
         if not composited:
             return None
 
@@ -560,7 +582,7 @@ class Storage:
                 tmp.write(composited)
                 tmp_path = tmp.name
             os.replace(tmp_path, variant_path)
-            (podcast_dir / _WATERMARK_SALT).write_text(cover_badge_salt())
+            (podcast_dir / _WATERMARK_SALT).write_text(cover_badge_salt(position))
         except OSError as e:
             logger.warning(f"[{slug}] failed caching watermark: {e}")
 
@@ -570,7 +592,7 @@ class Storage:
         """Short content-addressed token for the badged cover-art URL cache-bust.
 
         Shifts when the source cover bytes or the badge (cover_badge_salt: badge
-        asset fingerprint plus BADGE_REVISION) change, and is stable otherwise,
+        asset fingerprint, BADGE_REVISION, corner) change, and is stable otherwise,
         so downstream apps (Pocket Casts et al. cache channel art by URL and
         rarely re-pull it) only re-fetch when the art actually changed. None when
         there is no readable source cover, so the caller falls back to the bare
@@ -584,7 +606,7 @@ class Storage:
         if not source:
             return None
         digest = hashlib.md5(source[0], usedforsecurity=False)
-        digest.update(cover_badge_salt().encode())
+        digest.update(cover_badge_salt(self._badge_position()).encode())
         return digest.hexdigest()[:8]
 
     def _watermark_variant_stale(self, podcast_dir, variant_path) -> bool:
@@ -600,7 +622,7 @@ class Storage:
             recorded_salt = (podcast_dir / _WATERMARK_SALT).read_text()
         except OSError:
             recorded_salt = None
-        if recorded_salt != cover_badge_salt():
+        if recorded_salt != cover_badge_salt(self._badge_position()):
             return True
         newest = 0.0
         inputs = [podcast_dir / f"artwork{ext}"

@@ -21,6 +21,9 @@ export interface ReviewDetection {
   reason: string | null;
   patternId: number | null;
   detectionStage: string | null;
+  category: string | null;
+  actionApplied: string | null;
+  episodeDuration: number | null;
   status: DetectionStatus;
   resolution: DetectionResolution;
 }
@@ -35,6 +38,14 @@ export interface DetectionCounts {
   dismissed: number;
 }
 
+export interface CutSummary {
+  count: number;
+  durationSeconds: number;
+  byCategory: Record<string, number>;
+  distinctSponsors: number;
+  distinctPodcasts: number;
+}
+
 export interface DetectionListResponse {
   detections: ReviewDetection[];
   total: number;
@@ -42,6 +53,7 @@ export interface DetectionListResponse {
   totalPages: number;
   limit: number;
   counts: DetectionCounts;
+  cutSummary: CutSummary;
 }
 
 // Type alias (not interface) so it satisfies buildQueryString's Record
@@ -54,6 +66,7 @@ export type DetectionListParams = {
   q?: string;
   sort?: DetectionSort;
   order?: 'asc' | 'desc';
+  category?: string;
 };
 
 export async function getDetections(

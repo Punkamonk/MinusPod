@@ -34,7 +34,7 @@ _SEED_ENV_VARS = (
     'AD_DETECTION_PARALLEL_WINDOWS', 'AD_REVIEWER_PARALLEL_ADS',
     'MINUSPOD_MAX_ARTWORK_BYTES', 'MINUSPOD_MAX_RSS_BYTES',
     'MAX_AUDIO_DOWNLOAD_MB', 'AUTO_PROCESS_ENABLED', 'FEED_AUTH_ENABLED',
-    'ARTWORK_WATERMARK_ENABLED',
+    'ARTWORK_WATERMARK_ENABLED', 'ARTWORK_BADGE_POSITION',
     'VAD_GAP_DETECTION_ENABLED', 'VAD_GAP_START_MIN_SECONDS',
     'VAD_GAP_MID_MIN_SECONDS', 'VAD_GAP_TAIL_MIN_SECONDS',
     'TRANSCRIBE_MAX_CHUNK_SECONDS', 'TRANSCRIBE_CONCURRENT_CHUNKS',
@@ -47,6 +47,7 @@ _SEED_ENV_VARS = (
 SEED_SNAPSHOT = {
     '_review_prompt_migrated': 'true',
     'audio_bitrate': '128k',
+    'chapter_prompt': ('sha256', 'ba78ae10ed245f1b215407d2980358cdf6aff6b5f64dfc1662c6f6848cb418b4'),
     'audio_normalize_enabled': 'false',
     'audio_normalize_intensity': 'normal',
     'auto_process_enabled': 'true',
@@ -132,6 +133,8 @@ EXPECTED_AD_RESET_KEYS = {
     'reviewer_reasoning_budget', 'reviewer_reasoning_level',
     'chapter_boundary_temperature', 'chapter_boundary_max_tokens',
     'chapter_boundary_reasoning_budget', 'chapter_boundary_reasoning_level',
+    'chapter_target_seconds', 'chapter_window_seconds',
+    'chapter_max_boundaries', 'chapter_min_duration_seconds',
     'chapter_title_temperature', 'chapter_title_max_tokens',
     'chapter_title_reasoning_budget', 'chapter_title_reasoning_level',
     'ollama_num_ctx', 'window_size_seconds', 'window_overlap_seconds',
@@ -156,6 +159,7 @@ NON_RESETTABLE_KEYS = (
     'community_sync_categories',
     'system_prompt_override', 'verification_prompt_override',
     'review_prompt_override', 'resurrect_prompt_override',
+    'chapter_prompt_override',
     'transition_threshold_db', 'volume_threshold_db',
     'nonexistent_key_xyz',
 )
@@ -365,11 +369,13 @@ class TestGetDefaults:
         # communitySyncCategories added after that (77 -> 78).
         # maxAdDurationSeconds + maxAdDurationConfirmedSeconds (78 -> 80).
         # whisperApiTimeoutSeconds added after that (80 -> 81).
+        # chapterPrompt added after that (81 -> 82).
+        # artworkBadgePosition added after that (82 -> 83).
         payload_keys = {
             spec.payload_key for spec in SETTINGS_REGISTRY.values()
             if spec.payload_key
         }
-        assert len(payload_keys) == 81
+        assert len(payload_keys) == 83
         assert 'audioCuePairOrientWindowSeconds' not in payload_keys
         assert 'audioCuePairMaxBreakFraction' in payload_keys
 
@@ -390,7 +396,7 @@ class TestShippedPromptsTrackTheDefault:
     def test_the_prompts_are_marked_refreshable(self):
         from database.settings import SETTINGS_REGISTRY
         for key in ('system_prompt', 'verification_prompt',
-                    'review_prompt', 'resurrect_prompt'):
+                    'review_prompt', 'resurrect_prompt', 'chapter_prompt'):
             assert SETTINGS_REGISTRY[key].refresh_default, key
 
     def test_nothing_else_is_refreshable(self):
@@ -398,7 +404,8 @@ class TestShippedPromptsTrackTheDefault:
         from database.settings import SETTINGS_REGISTRY
         refreshable = {k for k, s in SETTINGS_REGISTRY.items() if s.refresh_default}
         assert refreshable == {'system_prompt', 'verification_prompt',
-                               'review_prompt', 'resurrect_prompt'}
+                               'review_prompt', 'resurrect_prompt',
+                               'chapter_prompt'}
 
     def test_refreshable_defaults_report_current_text(self):
         from database.settings import iter_refreshable_defaults

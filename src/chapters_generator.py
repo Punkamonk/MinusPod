@@ -1,10 +1,16 @@
 """JSON chapters generator for Podcasting 2.0 support."""
 import logging
+import math
 import re
 from typing import List, Dict, Optional, Tuple
 
 from config import DEFAULT_CHAPTERS_MODEL as _DEFAULT_CHAPTERS_MODEL
-from config import resolve_stage_tunables, normalize_segment_category
+from config import (
+    normalize_segment_category, resolve_chapter_geometry,
+    resolve_stage_tunables,
+)
+from database import Database, DEFAULT_CHAPTER_PROMPT
+from utils.prompt import render_prompt_once, apply_override
 from utils.time import parse_timestamp, adjust_timestamp, span_inside_any_cut
 from utils.text import extract_text_from_segments
 from llm_capabilities import PASS_CHAPTER_GENERATION
@@ -16,9 +22,6 @@ from llm_client import (
 from utils.llm_call import call_llm
 
 logger = logging.getLogger(__name__)
-
-# Minimum chapter duration in seconds (3 minutes)
-MIN_CHAPTER_DURATION = 180.0
 
 # Episodes shorter than this skip AI topic detection entirely.
 MIN_DURATION_FOR_AI = 900.0
@@ -77,6 +80,11 @@ def _parse_description_anchors(description: str) -> List[Tuple[str, str]]:
     return sorted(seen.items(), key=lambda kv: parse_timestamp(kv[0]))
 
 
+def _hint_time(hint: Dict) -> float:
+    """A hint's anchor time: seam hints carry 'time', range hints 'start'."""
+    return hint.get('time', hint.get('start', 0.0))
+
+
 def _format_mmss(seconds: float) -> str:
     """Format seconds as zero-padded MM:SS, matching the prompt's own
     [MM:SS] transcript markers and example lines."""
@@ -127,7 +135,7 @@ def build_segment_hints(markers: Optional[List[Dict]], cuts: Optional[List[Dict]
                 'type': 'range', 'start': mapped_start, 'end': mapped_end,
                 'category': category,
             })
-    hints.sort(key=lambda h: h.get('time', h.get('start', 0.0)))
+    hints.sort(key=_hint_time)
     return hints
 
 
@@ -166,7 +174,6 @@ CHAPTERS_MODEL = _DEFAULT_CHAPTERS_MODEL
 def get_chapters_model() -> str:
     """Get configured chapters model from database or fall back to default."""
     try:
-        from database import Database
         db = Database()
 
         model = db.get_setting('chapters_model')
@@ -198,6 +205,8 @@ class ChaptersGenerator:
         self.api_key = api_key or get_api_key()
         self._llm_client_override: Optional[LLMClient] = None
         self._episode_id: Optional[str] = None
+        # (template, override), read once per run rather than per window.
+        self._chapter_prompt: Optional[Tuple[str, str]] = None
         # Set when topic detection or title generation fails and the run
         # degrades to a fallback; read after generate_chapters() so a
         # degraded run doesn't look like a normal short episode.
@@ -256,6 +265,19 @@ class ChaptersGenerator:
 
         return '\n'.join(lines)
 
+    def _load_chapter_prompt(self) -> Tuple[str, str]:
+        """The (template, override) settings pair, cached for the run."""
+        if self._chapter_prompt is None:
+            try:
+                db = Database()
+                template = db.get_setting('chapter_prompt') or DEFAULT_CHAPTER_PROMPT
+                override = db.get_setting('chapter_prompt_override') or ''
+            except Exception as e:
+                logger.warning(f"Could not load chapter prompt from DB: {e}")
+                template, override = DEFAULT_CHAPTER_PROMPT, ''
+            self._chapter_prompt = (template, override)
+        return self._chapter_prompt
+
     def _detect_topic_boundaries(
         self,
         transcript: str,
@@ -263,56 +285,65 @@ class ChaptersGenerator:
         end_time: float,
         num_splits: int,
         episode_description: str = None,
+        anchors: Optional[List[Tuple[str, str]]] = None,
         hints: Optional[List[Dict]] = None,
-    ) -> List[Dict]:
+        previous_title: Optional[str] = None,
+    ) -> Optional[List[Dict]]:
         """Use the LLM to detect topic boundaries in a transcript range.
 
         hints: optional candidate boundaries derived from detected ad/segment
         markers (see build_segment_hints). Empty/None leaves the prompt unchanged.
 
-        Returns list of {'original_time': float, 'title': str}.
+        previous_title: the title of the chapter this window opens inside, so a
+        windowed run does not reopen a topic the previous window just closed.
+
+        Returns a list of {'original_time': float, 'title': str}, or None when
+        the LLM call itself failed (as opposed to a legitimately empty range).
         """
         hints_block = _format_hints_block(hints or [])
+        continuation_block = (
+            f"\n\nThis segment continues the chapter \"{previous_title}\". Do not "
+            "emit a boundary for that same topic; only for a change away from it."
+            if previous_title else ""
+        )
         description_block = ""
-        if episode_description and episode_description.strip():
+        # anchors, when given, are pre-parsed (and window-filtered) show-notes
+        # candidates; otherwise fall back to parsing the raw description.
+        if anchors is None and episode_description and episode_description.strip():
             anchors = _parse_description_anchors(episode_description)
-            if anchors:
-                anchor_lines = '\n'.join(f"{ts} {title}" for ts, title in anchors)
-                description_block = (
-                    "\n\nThese candidate boundaries were extracted from the episode "
-                    "show notes. Prefer these timestamps when the transcript "
-                    "supports them. Drop any candidate that doesn't match the "
-                    "discussion. Add your own boundaries only when a major "
-                    "transition is missing from the candidates.\n\n"
-                    f"Candidate boundaries from show notes:\n{anchor_lines}"
-                )
-            else:
-                description_block = (
-                    "\n\nIf the episode description below contains explicit "
-                    "timestamp markers in MM:SS or H:MM:SS form, prefer those "
-                    "timestamps and titles over inferring your own. Otherwise "
-                    "identify topic transitions from the transcript.\n\n"
-                    f"Episode description:\n{episode_description}"
-                )
+        if anchors:
+            anchor_lines = '\n'.join(f"{ts} {title}" for ts, title in anchors)
+            description_block = (
+                "\n\nThese candidate boundaries were extracted from the episode "
+                "show notes. Prefer these timestamps when the transcript "
+                "supports them. Drop any candidate that doesn't match the "
+                "discussion. Add your own boundaries only when a major "
+                "transition is missing from the candidates.\n\n"
+                f"Candidate boundaries from show notes:\n{anchor_lines}"
+            )
+        elif episode_description and episode_description.strip():
+            description_block = (
+                "\n\nIf the episode description below contains explicit "
+                "timestamp markers in MM:SS or H:MM:SS form, prefer those "
+                "timestamps and titles over inferring your own. Otherwise "
+                "identify topic transitions from the transcript.\n\n"
+                f"Episode description:\n{episode_description}"
+            )
 
-        prompt = f"""Analyze this podcast transcript segment and identify {num_splits} major topic changes.
-
-The segment runs from {int(start_time/60)}:{int(start_time%60):02d} to {int(end_time//60)}:{int(end_time%60):02d}.
-
-For each topic change, provide the timestamp (from the [MM:SS] markers) and a short title (3-7 words).
-
-OUTPUT FORMAT:
-Return ONLY topic lines, one per line. No introduction, no explanation, no numbering.
-Each line must be exactly: MM:SS Topic Title Here
-
-Example:
-05:30 Discussion of AI Trends
-12:45 New Product Announcements
-
-Only include clear topic transitions, not minor tangents. Skip the very beginning since that's already a chapter.{description_block}{hints_block}
-
-Transcript:
-{transcript}"""
+        # Override lands on the template BEFORE variables render, and
+        # substitution is single-pass: transcript, description, and title
+        # text can never inject or reposition a placeholder.
+        base_prompt, override = self._load_chapter_prompt()
+        prompt = render_prompt_once(
+            apply_override(base_prompt, override),
+            num_splits=str(num_splits),
+            segment_start=f"{int(start_time/60)}:{int(start_time%60):02d}",
+            segment_end=f"{int(end_time//60)}:{int(end_time%60):02d}",
+            continuation_block=continuation_block,
+            description_block=description_block,
+            hints_block=hints_block,
+            transcript=transcript,
+        )
 
         try:
             max_tokens, temperature, reasoning = resolve_stage_tunables('chapter_boundary')
@@ -333,8 +364,7 @@ Transcript:
             )
             if response is None:
                 logger.error(f"Failed to detect topic boundaries: {last_error}")
-                self._topic_detection_failed = True
-                return []
+                return None
 
             result_text = response.content.strip()
             logger.info(f"LLM topic detection response ({len(result_text)} chars):\n{result_text}")
@@ -353,7 +383,9 @@ Transcript:
                 cleaned = re.sub(r'^[-*]+\s*', '', cleaned)
                 cleaned = cleaned.strip()
 
-                match = re.match(r'^(\d{1,2}:\d{2}(?::\d{2})?)\s*[-:]?\s*(.+)$', cleaned)
+                # Minutes are unbounded MM:SS in prompts, so allow 3 digits
+                # (windows past 100 minutes emit e.g. "135:42").
+                match = re.match(r'^(\d{1,3}:\d{2}(?::\d{2})?)\s*[-:]?\s*(.+)$', cleaned)
                 if match:
                     timestamp_str, title = match.groups()
                     try:
@@ -376,8 +408,7 @@ Transcript:
 
         except Exception as e:
             logger.error(f"Failed to detect topic boundaries: {e}")
-            self._topic_detection_failed = True
-            return []
+            return None
 
     def get_transcript_excerpt(
         self,
@@ -530,8 +561,9 @@ Transcript:
         self,
         chapters: List[Dict],
         episode_duration: float,
+        min_duration: float,
     ) -> List[Dict]:
-        """Drop chapters shorter than MIN_CHAPTER_DURATION by absorbing into the previous.
+        """Drop chapters shorter than min_duration by absorbing into the previous.
 
         Assumes chapters and episode_duration are already on the post-ad-removal
         timeline. First chapter is always retained.
@@ -550,13 +582,13 @@ Transcript:
             else:
                 chapter_duration = episode_duration - chapter['startTime']
 
-            if chapter_duration < MIN_CHAPTER_DURATION:
+            if chapter_duration < min_duration:
                 if chapter.get('title') and not prev.get('title'):
                     prev['title'] = chapter['title']
                     prev['needs_title'] = False
                 logger.info(
                     f"Removing short chapter at {chapter['startTime']:.0f}s "
-                    f"({chapter_duration:.0f}s < {MIN_CHAPTER_DURATION:.0f}s min): "
+                    f"({chapter_duration:.0f}s < {min_duration:.0f}s min): "
                     f"'{chapter.get('title', 'untitled')}'"
                 )
             else:
@@ -597,6 +629,90 @@ Transcript:
                 'end': adjust_timestamp(end, sorted_ads, replacement_duration),
             })
         return adjusted
+
+    def _detect_boundaries_windowed(
+        self,
+        segments: List[Dict],
+        episode_duration: float,
+        target: float,
+        window_span: float,
+        max_boundaries: int,
+        episode_description: str = None,
+        hints: Optional[List[Dict]] = None,
+    ) -> List[Dict]:
+        """Detect topic boundaries a window at a time, earliest first.
+
+        An empty window is legitimate (a stretch can be one topic); only a
+        failed call or every window coming back empty degrades the run.
+        """
+        window_count = max(1, math.ceil(episode_duration / window_span))
+        found: List[Dict] = []
+        calls = 0
+        previous_title = None
+        # Parse show-notes anchors once; each window gets only its own range.
+        # With no parseable anchors the raw description goes to window 0 only,
+        # since repeating multi-KB prose per window is real token cost.
+        all_anchors = _parse_description_anchors(episode_description or '')
+
+        for index in range(window_count):
+            if len(found) >= max_boundaries:
+                logger.info(
+                    f"Chapter boundary cap reached ({max_boundaries}); "
+                    f"skipping {window_count - index} remaining window(s)"
+                )
+                break
+            win_start = index * window_span
+            win_end = min(episode_duration, win_start + window_span)
+            if win_end - win_start < target:
+                continue
+            transcript_text = self._get_full_transcript_range(
+                segments, win_start, win_end)
+            if not transcript_text or len(transcript_text) <= 500:
+                continue
+            # Only hints overlapping this window; out-of-window lines just
+            # bloat the prompt. A range hint straddling a seam reaches both.
+            window_hints = [
+                h for h in (hints or [])
+                if (_hint_time(h) < win_end
+                    and h.get('end', _hint_time(h)) >= win_start)
+            ]
+            window_anchors = [
+                a for a in all_anchors
+                if win_start <= parse_timestamp(a[0]) < win_end
+            ]
+            remaining = max_boundaries - len(found)
+            num_splits = max(
+                1, min(remaining, int((win_end - win_start) / target)))
+            calls += 1
+            window_chapters = self._detect_topic_boundaries(
+                transcript_text, win_start, win_end, num_splits,
+                episode_description=(episode_description
+                                     if index == 0 and not all_anchors
+                                     else None),
+                anchors=window_anchors if all_anchors else None,
+                hints=window_hints,
+                previous_title=previous_title,
+            )
+            if window_chapters is None:
+                logger.warning(
+                    f"Failed to detect topic boundaries in window "
+                    f"{win_start:.0f}s-{win_end:.0f}s")
+                self._topic_detection_failed = True
+                continue
+            if window_chapters:
+                found.extend(window_chapters)
+                previous_title = window_chapters[-1].get('title') or previous_title
+
+        logger.info(
+            f"Chapter boundary detection: {calls} call(s) over {window_count} "
+            f"window(s), {len(found)} boundaries for a "
+            f"{episode_duration:.0f}s episode"
+        )
+        # Every window empty on an episode that qualified for AI boundaries is a
+        # failure, not a normal short episode.
+        if calls and not found:
+            self._topic_detection_failed = True
+        return found[:max_boundaries]
 
     def generate_chapters(
         self,
@@ -668,43 +784,23 @@ Transcript:
             'needs_title': True,
         }]
 
+        # Resolve once so detection and min-duration enforcement can never
+        # see different geometry mid-run.
+        target, window_span, max_boundaries, min_duration = resolve_chapter_geometry()
+
         if episode_duration > MIN_DURATION_FOR_AI:
             self._initialize_client()
             if self._llm_client:
-                transcript_text = self._get_full_transcript_range(segments, 0, episode_duration)
-
-                if transcript_text and len(transcript_text) > 500:
-                    num_splits = min(int(episode_duration / 600), 6)
-
-                    logger.info(
-                        f"Requesting {num_splits} topic boundaries from AI for "
-                        f"{episode_duration:.0f}s episode"
-                    )
-
-                    try:
-                        new_chapters = self._detect_topic_boundaries(
-                            transcript_text, 0, episode_duration, num_splits,
-                            episode_description=episode_description,
-                            hints=hints,
-                        )
-
-                        # A parsed-but-empty result is as much a failure as an
-                        # exception: the episode already qualified for AI
-                        # boundaries (duration and transcript length), so a
-                        # silent empty result must not look like a normal short episode.
-                        if not new_chapters and not self._topic_detection_failed:
-                            self._topic_detection_failed = True
-
-                        for ch in new_chapters:
-                            chapters.append({
-                                'startTime': ch['original_time'],
-                                'title': ch.get('title'),
-                                'source': 'ai',
-                                'needs_title': not ch.get('title'),
-                            })
-                    except Exception as e:
-                        logger.warning(f"Failed to detect topic boundaries: {e}")
-                        self._topic_detection_failed = True
+                for ch in self._detect_boundaries_windowed(
+                        segments, episode_duration,
+                        target, window_span, max_boundaries,
+                        episode_description=episode_description, hints=hints):
+                    chapters.append({
+                        'startTime': ch['original_time'],
+                        'title': ch.get('title'),
+                        'source': 'ai',
+                        'needs_title': not ch.get('title'),
+                    })
 
         chapters.sort(key=lambda x: x['startTime'])
 
@@ -714,7 +810,8 @@ Transcript:
                 deduplicated.append(ch)
         chapters = deduplicated
 
-        chapters = self._enforce_min_duration(chapters, episode_duration)
+        chapters = self._enforce_min_duration(
+            chapters, episode_duration, min_duration)
 
         chapters = self.generate_chapter_titles(
             chapters, segments, podcast_name, episode_title

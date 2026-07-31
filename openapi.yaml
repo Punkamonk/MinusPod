@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.81.23
+  version: 2.83.1
   contact:
     name: MinusPod
   license:
@@ -683,6 +683,16 @@ paths:
                     - boolean
                     - 'null'
                   description: Per-feed opt-in to detect intro, outro, and recap/housekeeping segments in addition to the always-detected ad-side categories. Null and false both mean off, the default.
+                skipSecondPass:
+                  type:
+                    - boolean
+                    - 'null'
+                  description: When true, the pass-2 verification scan of the cut audio is skipped, which roughly halves the ad-detection LLM spend on feeds whose first pass is already reliable. Held differential detections that pass 2 would have confirmed then wait for a human. Null and false both mean the second pass runs.
+                ownEpisodeGuids:
+                  type:
+                    - boolean
+                    - 'null'
+                  description: When true, the served RSS uses MinusPod episode ids as item GUIDs instead of passing upstream GUIDs through (issue 598). Switching it on a feed with subscribers makes podcast apps treat every episode as new once. Null and false both mean upstream GUIDs. New feeds are created with true.
       responses:
         '200':
           description: Feed updated successfully
@@ -1174,6 +1184,69 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /feeds/{slug}/episodes/{episode_id}/split-candidates:
+    get:
+      tags:
+        - Episodes
+      summary: Proposed divider points for a multi-sponsor ad marker
+      description: |
+        Finds ad-transition phrases in the transcript spanning the requested
+        window and maps each match back to the start of the transcript segment
+        it falls in, so the ad editor opens with dividers where a split would
+        actually cut (issue #563).
+
+        A window with no transition phrase returns no candidates and a single
+        piece. That is a valid answer, not an error: the block may genuinely be
+        one ad, and the user can still add a divider by hand.
+
+        Candidates that would leave a piece shorter than the minimum ad
+        duration are omitted, so the editor never opens in an invalid state.
+      operationId: getEpisodeSplitCandidates
+      parameters:
+        - $ref: '#/components/parameters/slug'
+        - $ref: '#/components/parameters/episode_id'
+        - in: query
+          name: start
+          required: true
+          schema: { type: number }
+        - in: query
+          name: end
+          required: true
+          schema: { type: number }
+      responses:
+        '200':
+          description: Divider candidates and the pieces they would produce
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  episodeId: { type: string }
+                  start: { type: number }
+                  end: { type: number }
+                  candidates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        time: { type: number }
+                        phrase:
+                          type: string
+                          description: The transition phrase that produced this candidate
+                  pieces:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        start: { type: number }
+                        end: { type: number }
+                        text: { type: string }
+                        sponsor: { type: string, nullable: true }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /episodes/{slug}/{episode_id}/reprocess:
     post:
       tags:
@@ -1524,6 +1597,19 @@ paths:
           pattern per sponsor segment instead of a single oversized pattern; the
           response's patternIds lists every pattern created or reused this way, and
           pattern_id/sponsor still identify the sponsor-matched primary.
+        - split (2.82.0+): Replace one marker covering back-to-back ads with N
+          single-sponsor markers (issue #563). Send `original_ad` plus
+          `split_points` (a list of times strictly inside the span) and an
+          optional `pieces` array of `{sponsor}` overrides in piece order.
+          Every resulting piece must be at least the minimum ad duration or the
+          request is rejected and the marker is left untouched. A request whose
+          original_ad matches no persisted marker returns 404. Pieces inherit
+          the original's category, detection stage, confidence, and cut state,
+          so a split never silently changes whether the audio was removed.
+          Correction rows use boundary_adjustment for the first piece and
+          create for the rest: correction_type carries a CHECK constraint
+          SQLite cannot alter in place. Response carries markerCount and
+          patternIds.
       operationId: submitCorrections
       parameters:
         - $ref: '#/components/parameters/slug'
@@ -2904,6 +2990,14 @@ paths:
             type: string
             enum: [asc, desc]
             default: desc
+        - name: category
+          in: query
+          description: >-
+            Filter by segment category. Use `none` for markers no detection
+            stage classified. Omit for every category.
+          schema:
+            type: string
+            enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap, none]
       responses:
         '200':
           description: Paginated detection list
@@ -2931,6 +3025,24 @@ paths:
                       accepted: { type: integer }
                       confirmed: { type: integer }
                       dismissed: { type: integer }
+                  cutSummary:
+                    type: object
+                    description: >-
+                      Totals over detections that were cut. Reflects the
+                      status, feed, and q filters but not the category filter,
+                      so the byCategory breakdown stays complete while the
+                      podcast selector still narrows it.
+                    properties:
+                      count: { type: integer }
+                      durationSeconds: { type: number }
+                      byCategory:
+                        type: object
+                        description: >-
+                          Count per segment category, plus a `none` key for
+                          markers with no category set.
+                        additionalProperties: { type: integer }
+                      distinctSponsors: { type: integer }
+                      distinctPodcasts: { type: integer }
         '400':
           $ref: '#/components/responses/BadRequest'
 
@@ -3349,6 +3461,12 @@ paths:
                 verificationPrompt:
                   type: string
                   description: System prompt for verification pass (post-cut re-detection of missed ads)
+                chapterPrompt:
+                  type: string
+                  description: Prompt template for chapter topic detection with placeholders {num_splits}, {segment_start}, {segment_end}, {continuation_block}, {description_block}, {hints_block}, {transcript}
+                chapterPromptOverride:
+                  type: string
+                  description: Optional override appended to the chapter topic-detection prompt (empty by default)
                 claudeModel:
                   type: string
                   description: AI model ID to use for first pass ad detection
@@ -3624,6 +3742,10 @@ paths:
                 artworkWatermarkEnabled:
                   type: boolean
                   description: When true, the served feed's channel cover art gets a MinusPod badge overlaid so the filtered feed is distinct in a podcast app (issue #420). Off by default.
+                artworkBadgePosition:
+                  type: string
+                  enum: [bottom-right, bottom-left, top-right, top-left]
+                  description: Corner the MinusPod badge is composited into (issue #600). Defaults to bottom-right.
                 feedAuthEnabled:
                   type: boolean
                   description: Require the global feed auth key on all public feed and episode URLs. Enabling generates the key if absent.
@@ -3765,6 +3887,28 @@ paths:
                   nullable: true
                   enum: [none, low, medium, high]
                   description: Reasoning effort level for chapter boundary detection (non-Anthropic).
+                chapterTargetSeconds:
+                  type: integer
+                  description: >-
+                    Target chapter length in seconds (120-3600, default 600).
+                    Sets how many boundaries each transcript window is asked
+                    for. Must not exceed chapterWindowSeconds.
+                chapterWindowSeconds:
+                  type: integer
+                  description: >-
+                    Transcript window per boundary-detection call in seconds
+                    (600-10800, default 2700). One LLM call per window.
+                chapterMaxBoundaries:
+                  type: integer
+                  description: >-
+                    Ceiling on chapter boundaries per episode (1-200, default
+                    40). Was hardcoded to 6 before 2.82.0.
+                chapterMinDurationSeconds:
+                  type: integer
+                  description: >-
+                    Shortest chapter in seconds (30-900, default 180). Shorter
+                    chapters are absorbed into the previous one. Must not exceed
+                    chapterTargetSeconds.
                 chapterTitleTemperature:
                   type: number
                   description: Temperature (0.0-2.0) for chapter title generation.
@@ -7696,6 +7840,16 @@ components:
             - boolean
             - 'null'
           description: Whether this feed detects intro, outro, and recap/housekeeping segments in addition to the always-detected ad-side categories. Null and false both mean off, the default.
+        ownEpisodeGuids:
+          type:
+            - boolean
+            - 'null'
+          description: Whether the served RSS uses MinusPod episode ids as item GUIDs (issue 598). Null and false both mean upstream GUIDs pass through. New feeds are created with true.
+        skipSecondPass:
+          type:
+            - boolean
+            - 'null'
+          description: Whether the pass-2 verification scan of the cut audio is skipped for this feed, which roughly halves the ad-detection LLM spend on feeds whose first pass is already reliable. Held differential detections that pass 2 would have confirmed then wait for a human. Null and false both mean the second pass runs.
 
     EpisodeSummary:
       type: object
@@ -7910,6 +8064,11 @@ components:
                 - boolean
                 - 'null'
               description: True when the run skipped ad detection because the feed has skipAdDetection set
+            verificationSkipped:
+              type:
+                - boolean
+                - 'null'
+              description: True when the run skipped the pass-2 verification scan because the feed has skipSecondPass set. Absent when detection was skipped outright, which already implies no verification.
             downloadedDuration:
               type: number
               description: ffprobe duration of the downloaded copy, in seconds
@@ -7955,8 +8114,10 @@ components:
                 notCut:
                   type: integer
             verificationAdsCut:
-              type: integer
-              description: Ads the second scan of the output audio found and cut; 0 means the scan came back clean
+              type:
+                - integer
+                - 'null'
+              description: Ads the second scan of the output audio found and cut. 0 means the scan ran and came back clean. Absent or null means the scan did not run, either because it was skipped (see verificationSkipped and detectionSkipped) or because it failed.
             secondsRemoved:
               type: number
 
@@ -8140,6 +8301,16 @@ components:
         reason: { type: string, nullable: true }
         patternId: { type: integer, nullable: true }
         detectionStage: { type: string, nullable: true }
+        category:
+          type: string
+          nullable: true
+          description: Segment category, or null when no stage classified the marker
+          enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap, null]
+        actionApplied:
+          type: string
+          nullable: true
+          description: Action the category resolved to for this marker
+          enum: [remove, beep, keep, null]
         status:
           type: string
           enum: [accepted, rejected, pending]
@@ -8264,6 +8435,14 @@ components:
               type: string
             isDefault:
               type: boolean
+        chapterPrompt:
+          type: object
+          description: Prompt template for chapter topic detection with placeholders {num_splits}, {segment_start}, {segment_end}, {continuation_block}, {description_block}, {hints_block}, {transcript}.
+          properties:
+            value:
+              type: string
+            isDefault:
+              type: boolean
         systemPromptOverride:
           type: object
           description: |
@@ -8294,6 +8473,14 @@ components:
         resurrectPromptOverride:
           type: object
           description: Optional per-pass override appended to the resurrect prompt (empty by default).
+          properties:
+            value:
+              type: string
+            isDefault:
+              type: boolean
+        chapterPromptOverride:
+          type: object
+          description: Optional override appended to the chapter topic-detection prompt (empty by default).
           properties:
             value:
               type: string
@@ -8785,6 +8972,15 @@ components:
               description: When true, overlays a MinusPod badge on the served feed's channel cover art (issue #420). Off by default.
             isDefault:
               type: boolean
+        artworkBadgePosition:
+          type: object
+          properties:
+            value:
+              type: string
+              enum: [bottom-right, bottom-left, top-right, top-left]
+              description: Corner the MinusPod badge is composited into (issue #600). Defaults to bottom-right.
+            isDefault:
+              type: boolean
         feedAuthEnabled:
           type: object
           properties:
@@ -8892,6 +9088,8 @@ components:
               type: string
             verificationPrompt:
               type: string
+            chapterPrompt:
+              type: string
             systemPromptOverride:
               type: string
               description: Per-pass override for the first pass; empty clears it.
@@ -8979,6 +9177,9 @@ components:
                 enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
             artworkWatermarkEnabled:
               type: boolean
+            artworkBadgePosition:
+              type: string
+              enum: [bottom-right, bottom-left, top-right, top-left]
             feedAuthEnabled:
               type: boolean
             minCutConfidence:
@@ -9188,38 +9389,65 @@ components:
     AdCorrection:
       type: object
       required:
-        - adIndex
-        - action
+        - type
       properties:
-        adIndex:
-          type: integer
-          description: Index of the ad in the episode's ad list
-        action:
+        type:
           type: string
-          enum: [confirm, reject, adjust]
+          enum: [confirm, reject, adjust, create, split]
           description: |
             - confirm: Mark detection as correct (creates/updates pattern).
-              Optionally pass adjustedStart/adjustedEnd to approve a trimmed
+              Optionally pass adjusted_start/adjusted_end to approve a trimmed
               sub-span of a held marker (e.g. the reviewer's proposed trim);
               the marker's boundaries move to the trimmed span before approval
               and only the ad portion is cut on recut.
             - reject: Mark as false positive (stores text for cross-episode exclusion)
             - adjust: Correct boundaries (also creates pattern from adjusted segment)
+            - create: Mark a brand-new ad the detector missed (top-level
+              start/end/sponsor/text_template, no original_ad)
+            - split: Replace one marker with N single-sponsor markers (see the
+              endpoint description)
+        original_ad:
+          type: object
+          description: >-
+            Existing marker to correct, matched by its start/end within
+            tolerance. Required for every type except create.
+          properties:
+            start:
+              type: number
+            end:
+              type: number
+            pattern_id:
+              type: integer
         sponsor:
           type: string
-          description: Sponsor name to associate (for confirm/adjust actions)
-        adjustedStart:
+          description: Sponsor name to associate (for confirm/adjust/create)
+        adjusted_start:
           type: number
           description: >-
             Corrected start time in seconds (required for adjust; optional for
             confirm as a trimmed approval, must lie within the original span
             and both bounds must be supplied together)
-        adjustedEnd:
+        adjusted_end:
           type: number
           description: >-
             Corrected end time in seconds (required for adjust; optional for
             confirm as a trimmed approval, must lie within the original span
             and both bounds must be supplied together)
+        split_points:
+          type: array
+          items:
+            type: number
+          description: split type only, divider times strictly inside the span
+        pieces:
+          type: array
+          items:
+            type: object
+            properties:
+              sponsor:
+                type:
+                  - string
+                  - 'null'
+          description: split type only, optional per-piece sponsor overrides
 
     ProcessingStatus:
       type: object

@@ -6,63 +6,8 @@ import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import StageTunablesSection from './StageTunablesSection';
-import type { StageTunableEntry, StageTunables, UpdateSettingsPayload } from '../../api/types';
-
-function entry<T>(value: T): StageTunableEntry<T> {
-  return { value, isDefault: true, envOverride: null };
-}
-
-const baseTunables: StageTunables = {
-  detectionTemperature: entry(null),
-  detectionMaxTokens: entry(null),
-  detectionReasoningBudget: entry(null),
-  detectionReasoningLevel: entry(null),
-  verificationTemperature: entry(null),
-  verificationMaxTokens: entry(null),
-  verificationReasoningBudget: entry(null),
-  verificationReasoningLevel: entry(null),
-  reviewerTemperature: entry(null),
-  reviewerMaxTokens: entry(null),
-  reviewerReasoningBudget: entry(null),
-  reviewerReasoningLevel: entry(null),
-  chapterBoundaryTemperature: entry(null),
-  chapterBoundaryMaxTokens: entry(null),
-  chapterBoundaryReasoningBudget: entry(null),
-  chapterBoundaryReasoningLevel: entry(null),
-  chapterTitleTemperature: entry(null),
-  chapterTitleMaxTokens: entry(null),
-  chapterTitleReasoningBudget: entry(null),
-  chapterTitleReasoningLevel: entry(null),
-  ollamaNumCtx: entry(null),
-  windowSizeSeconds: entry(null),
-  windowOverlapSeconds: entry(null),
-};
-
-const baseDefaults: Record<keyof StageTunables, number | string | null> = {
-  detectionTemperature: 0,
-  detectionMaxTokens: 4096,
-  detectionReasoningBudget: null,
-  detectionReasoningLevel: null,
-  verificationTemperature: 0,
-  verificationMaxTokens: 4096,
-  verificationReasoningBudget: null,
-  verificationReasoningLevel: null,
-  reviewerTemperature: 0,
-  reviewerMaxTokens: 4096,
-  reviewerReasoningBudget: null,
-  reviewerReasoningLevel: null,
-  chapterBoundaryTemperature: 0.1,
-  chapterBoundaryMaxTokens: 300,
-  chapterBoundaryReasoningBudget: null,
-  chapterBoundaryReasoningLevel: null,
-  chapterTitleTemperature: 0.1,
-  chapterTitleMaxTokens: 300,
-  chapterTitleReasoningBudget: null,
-  chapterTitleReasoningLevel: null,
-  ollamaNumCtx: null,
-  windowSizeSeconds: 600,
-  windowOverlapSeconds: 180,
-};
+import type { UpdateSettingsPayload } from '../../api/types';
+import { baseDefaults, baseTunables } from './tunablesTestFixtures';
 
 // openai-compatible renders the reasoning field as a <select> (not a number
 // input), so each stage block contributes exactly two number inputs

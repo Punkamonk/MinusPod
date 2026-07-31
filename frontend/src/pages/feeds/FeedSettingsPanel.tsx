@@ -642,6 +642,27 @@ function FeedSettingsPanel({ feed, slug }: Props) {
             </div>
           </div>
 
+          {/* Served-feed GUID scheme (#598) */}
+          <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
+            <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-0.5">Episode GUIDs:</span>
+            <div className="flex flex-col gap-1 flex-1 min-w-0">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <ToggleSwitch
+                  checked={feed.ownEpisodeGuids === true}
+                  onChange={(v) => updateMutation.mutate({ ownEpisodeGuids: v })}
+                  disabled={updateMutation.isPending}
+                  ariaLabel="Serve MinusPod episode IDs"
+                />
+                <span>Serve MinusPod episode IDs</span>
+              </label>
+              <p className="text-xs text-warning">
+                Uses MinusPod&apos;s own episode IDs as RSS GUIDs instead of the publisher&apos;s.
+                Switching this on an existing feed makes subscribed apps treat every
+                episode as new once. New feeds start with this on.
+              </p>
+            </div>
+          </div>
+
           {/* Feed tags (inline basic row; simple enough not to collapse) */}
           <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
             <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-0.5">Tags:</span>
@@ -941,6 +962,29 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                     nothing is scanned for ads and nothing is cut. For ad-free shows;
                     skips the ad detection cost. Pass-through, when on, takes precedence
                     and skips processing entirely.
+                  </p>
+                </div>
+              </div>
+
+              {/* Skip verification pass (#599): pass 1 still cuts, pass 2 does not run */}
+              <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
+                <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-0.5">Verification:</span>
+                <div className="flex flex-col gap-1 flex-1 min-w-0">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <ToggleSwitch
+                      checked={feed.skipSecondPass === true}
+                      onChange={(v) => updateMutation.mutate({ skipSecondPass: v })}
+                      disabled={updateMutation.isPending}
+                      ariaLabel="Skip verification pass"
+                    />
+                    <span>Skip verification pass</span>
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    The verification pass re-scans the cut audio for ads the first pass
+                    missed, at the cost of a second detection sweep. Turn this on for feeds
+                    where the first pass is already reliable. It roughly halves the
+                    ad-detection LLM spend. Held differential detections that the second
+                    pass would have confirmed then wait for you instead.
                   </p>
                 </div>
               </div>

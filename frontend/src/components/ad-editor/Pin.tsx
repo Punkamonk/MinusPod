@@ -9,8 +9,12 @@ import { formatTime } from '../../utils/adReviewHelpers';
 // 0.2s for short stingers; the ad editor leaves it at the 1.0s ad floor.
 const DEFAULT_MIN_SEPARATION = 1.0;
 
+// Keyboard nudge per Arrow press, and the coarser step Shift applies.
+const NUDGE_SECONDS = 0.1;
+const NUDGE_SECONDS_COARSE = 1.0;
+
 export interface PinProps {
-  kind: 'start' | 'end';
+  kind: 'start' | 'end' | 'divider';
   boundary: number;
   windowStart: number;
   windowDuration: number;
@@ -20,14 +24,23 @@ export interface PinProps {
   onDragMove?: (next: number) => void;
   onDragStart?: () => void;
   onDragEnd?: () => void;
-  otherBoundary: number;        // for min-separation clamp
+  // start/end clamp against each other; a divider clamps against both
+  // neighbours instead, so it takes an explicit range.
+  otherBoundary?: number;
+  minBoundary?: number;
+  maxBoundary?: number;
   minSeparation?: number;       // override the default 1.0s floor
+  // Audio length. Keyboard nudges clamp to [0, totalDuration] on top of the
+  // neighbour bounds; drag is already limited to the visible window.
+  totalDuration?: number;
 }
 
 export function Pin({
   kind, boundary, windowStart, windowDuration, containerRef,
   onChange, onDragMove, onDragStart, onDragEnd, otherBoundary,
+  minBoundary, maxBoundary,
   minSeparation = DEFAULT_MIN_SEPARATION,
+  totalDuration,
 }: PinProps) {
   const [dragging, setDragging] = useState(false);
 
@@ -40,9 +53,32 @@ export function Pin({
   const leftPct = Math.max(0, Math.min(1, relX)) * 100;
 
   const isStart = kind === 'start';
-  const color = isStart ? 'bg-emerald-500' : 'bg-rose-500';
-  const ringColor = isStart ? 'ring-emerald-500/40' : 'ring-rose-500/40';
-  const labelText = isStart ? 'START' : 'END';
+  const isDivider = kind === 'divider';
+  const color = isDivider
+    ? 'bg-amber-500'
+    : isStart ? 'bg-emerald-500' : 'bg-rose-500';
+  const ringColor = isDivider
+    ? 'ring-amber-500/40'
+    : isStart ? 'ring-emerald-500/40' : 'ring-rose-500/40';
+  const labelText = isDivider ? 'SPLIT' : isStart ? 'START' : 'END';
+
+  // The legal range for this pin, used by both drag and keyboard so they
+  // cannot disagree.
+  const rawLower = isDivider
+    ? (minBoundary ?? Number.NEGATIVE_INFINITY) + minSeparation
+    : isStart ? Number.NEGATIVE_INFINITY : (otherBoundary ?? 0) + minSeparation;
+  const rawUpper = isDivider
+    ? (maxBoundary ?? Number.POSITIVE_INFINITY) - minSeparation
+    : isStart ? (otherBoundary ?? 0) - minSeparation : Number.POSITIVE_INFINITY;
+  // A seeded piece under the separation floor inverts the neighbour range;
+  // clamping to it would snap the pin, so only the audio bound applies then.
+  const neighboursValid = rawLower <= rawUpper;
+  const lowerBound = neighboursValid ? Math.max(0, rawLower) : 0;
+  const upperBound = Math.min(
+    totalDuration ?? Number.POSITIVE_INFINITY,
+    neighboursValid ? rawUpper : Number.POSITIVE_INFINITY,
+  );
+  const clamp = (t: number) => Math.min(Math.max(t, lowerBound), upperBound);
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -59,10 +95,8 @@ export function Pin({
     const computeBoundary = (clientX: number): number => {
       const xPct = (clientX - rect.left) / rect.width;
       const clampedPct = Math.max(0, Math.min(1, xPct));
-      const t = windowStart + clampedPct * windowDuration;
-      // Min-separation: never let start cross end (and vice-versa).
-      if (isStart) return Math.min(t, otherBoundary - minSeparation);
-      return Math.max(t, otherBoundary + minSeparation);
+      // Min-separation: never let a pin cross its neighbour.
+      return clamp(windowStart + clampedPct * windowDuration);
     };
 
     const handleMove = (ev: PointerEvent) => {
@@ -85,6 +119,19 @@ export function Pin({
     window.addEventListener('pointercancel', handleUp);
   };
 
+  // role="slider" without keys was a slider screen readers announced but nobody
+  // could operate. Arrows nudge, Shift takes the coarse step.
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? NUDGE_SECONDS_COARSE : NUDGE_SECONDS;
+    let next: number | null = null;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') next = boundary - step;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') next = boundary + step;
+    if (next === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onChange(clamp(next));
+  };
+
   if (!visible) return null;
 
   // Compact pin: small colored circle pinhead, thin stem. The label
@@ -104,18 +151,23 @@ export function Pin({
         dragging ? 'cursor-grabbing' : ''
       }`}
       role="slider"
+      tabIndex={0}
+      onKeyDown={onKeyDown}
       aria-label={`${labelText} pin · ${formatTime(boundary)}`}
       aria-valuenow={Math.round(boundary * 10) / 10}
+      aria-valuemin={Number.isFinite(lowerBound) ? lowerBound : undefined}
+      aria-valuemax={Number.isFinite(upperBound) ? upperBound : undefined}
+      aria-valuetext={formatTime(boundary)}
     >
       {/* Compact circle pinhead at top. */}
       <div
         className={`absolute top-1 left-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full border-2 border-white ${color} shadow-md ${
-          dragging ? `ring-4 ${ringColor} scale-125` : ''
-        } transition-transform`}
+          dragging ? `ring-4 ${ringColor} scale-125 motion-reduce:scale-100` : ''
+        } transition-transform motion-reduce:transition-none`}
       />
       {/* Time label -- only visible while dragging or on hover. */}
       <div
-        className={`absolute -top-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded ${color} text-white text-[10px] font-bold tracking-wider whitespace-nowrap shadow-md transition-opacity duration-100 pointer-events-none ${
+        className={`absolute -top-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded ${color} text-white text-[10px] font-bold tracking-wider whitespace-nowrap shadow-md transition-opacity duration-100 motion-reduce:transition-none pointer-events-none ${
           dragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
         }`}
       >

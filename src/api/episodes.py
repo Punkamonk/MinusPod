@@ -18,9 +18,12 @@ from chapters_generator import ChaptersGenerator
 from embedded_chapters import embed_chapters
 from llm_client import start_episode_token_tracking, get_episode_token_totals
 from processing_queue import ProcessingQueue
+from split_planning import build_split_candidates, build_split_pieces
 from utils.constants import EpisodeStatus
 from utils.episode_paths import episode_public_url
-from utils.text import parse_transcript_segments
+from utils.text import (
+    extract_timed_spans_in_range, parse_transcript_segments,
+)
 from utils.time import utc_now_iso
 
 logger = logging.getLogger('podcast.api')
@@ -29,6 +32,17 @@ logger = logging.getLogger('podcast.api')
 # 'deferred' episodes (#482) are included so a stuck offline queue
 # can be force-retried or cleaned up by hand.
 REPROCESSABLE_STATUSES = ('processed', 'failed', 'permanently_failed', 'deferred')
+
+
+def _float_arg(name, default=None):
+    """Float query arg: missing or empty returns default, junk aborts 400."""
+    raw = request.args.get(name)
+    if raw is None or raw == '':
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        abort(400, description=f"{name} must be a number")
 
 
 def _check_recut_preconditions(db, slug, episode_id, episode):
@@ -228,6 +242,7 @@ def _run_stats_to_api(stats):
     return {
         'mode': stats.get('mode'),
         'detectionSkipped': stats.get('detection_skipped'),
+        'verificationSkipped': stats.get('verification_skipped'),
         'downloadedDuration': stats.get('downloaded_duration'),
         'transcriptSegments': stats.get('transcript_segments'),
         'windows': stats.get('windows'),
@@ -546,15 +561,6 @@ def get_episode_peaks(slug, episode_id):
     if err is not None:
         return err
 
-    def _f(name, default=None):
-        raw = request.args.get(name)
-        if raw is None or raw == '':
-            return default
-        try:
-            return float(raw)
-        except ValueError:
-            abort(400, description=f"{name} must be a number")
-
     def _i(name, default):
         raw = request.args.get(name)
         if raw is None or raw == '':
@@ -564,8 +570,8 @@ def get_episode_peaks(slug, episode_id):
         except ValueError:
             abort(400, description=f"{name} must be an integer")
 
-    start_seconds = _f('start', 0.0) or 0.0
-    end_seconds = _f('end')
+    start_seconds = _float_arg('start', 0.0) or 0.0
+    end_seconds = _float_arg('end')
     resolution_ms = _i('resolution_ms', 50)
 
     try:
@@ -603,17 +609,8 @@ def get_episode_transcript_span(slug, episode_id):
     if not episode:
         return error_response('Episode not found', 404)
 
-    def _f(name, default=None):
-        raw = request.args.get(name)
-        if raw is None or raw == '':
-            return default
-        try:
-            return float(raw)
-        except ValueError:
-            abort(400, description=f"{name} must be a number")
-
-    start_seconds = _f('start', 0.0) or 0.0
-    end_seconds = _f('end')
+    start_seconds = _float_arg('start', 0.0) or 0.0
+    end_seconds = _float_arg('end')
     if end_seconds is None:
         return error_response('end is required', 400)
     if start_seconds < 0 or end_seconds <= start_seconds:
@@ -634,6 +631,41 @@ def get_episode_transcript_span(slug, episode_id):
         'start': start_seconds,
         'end': end_seconds,
         'text': text or '',
+    })
+
+
+@api.route('/feeds/<slug>/episodes/<episode_id>/split-candidates', methods=['GET'])
+@log_request
+def get_episode_split_candidates(slug, episode_id):
+    """Propose divider points for a marker spanning several sponsors.
+
+    A span with no transition phrase returns one piece and no candidates,
+    a valid answer rather than an error (issue #563).
+    """
+    db = get_database()
+    episode = db.get_episode(slug, episode_id)
+    if not episode:
+        return error_response('Episode not found', 404)
+
+    start_seconds = _float_arg('start')
+    end_seconds = _float_arg('end')
+    if start_seconds is None or end_seconds is None:
+        return error_response('start and end are required', 400)
+    if start_seconds < 0 or end_seconds <= start_seconds:
+        return error_response('require 0 <= start < end', 400)
+
+    transcript = db.get_transcript_for_timestamps(slug, episode_id)
+    spans = extract_timed_spans_in_range(
+        transcript or '', start_seconds, end_seconds)
+    candidates = build_split_candidates(spans, start_seconds, end_seconds)
+    pieces = build_split_pieces(
+        spans, start_seconds, end_seconds, [c['time'] for c in candidates])
+    return json_response({
+        'episodeId': episode_id,
+        'start': start_seconds,
+        'end': end_seconds,
+        'candidates': candidates,
+        'pieces': pieces,
     })
 
 

@@ -20,11 +20,13 @@ from config import (
     MIN_CONTENT_BETWEEN_ADS_SECONDS,
     BOUNDARY_EXTENSION_WINDOW, BOUNDARY_EXTENSION_MAX,
     BOUNDARY_EXTENSION_CONNECTOR_SKIP, BOUNDARY_EXTENSION_SKIP_MAX,
+    is_edge_cue_snapped,
     AD_CONTENT_URL_PATTERNS, AD_CONTENT_PROMO_PHRASES,
     AD_CONTENT_PHONE_PATTERNS,
     MIN_KEYWORD_LENGTH, MIN_UNCOVERED_TAIL_DURATION,
     TERMINAL_SNAP_EOF_TOLERANCE_SECONDS,
     DEFAULT_SEGMENT_ACTION, normalize_segment_category,
+    PATTERN_TIGHTEN_MIN_EXCESS_SECONDS, PATTERN_TIGHTEN_MIN_CONFIDENCE,
 )
 
 logger = logging.getLogger('podcast.claude')
@@ -222,8 +224,9 @@ def refine_ad_boundaries(ads: List[Dict], segments: List[Dict]) -> List[Dict]:
         current_seg = segments[start_seg_idx]
         search_words.extend(current_seg.get('words', []))
 
-        # Search for start transition phrases
-        start_match = find_phrase_in_words(search_words, AD_START_PHRASES, search_start=True)
+        # Search for start transition phrases (never move a cue-snapped edge)
+        start_match = (None if is_edge_cue_snapped(ad, 'start') else
+                       find_phrase_in_words(search_words, AD_START_PHRASES, search_start=True))
         if start_match:
             new_start = start_match['start']
             # Only adjust if it moves start earlier (not later)
@@ -248,8 +251,9 @@ def refine_ad_boundaries(ads: List[Dict], segments: List[Dict]) -> List[Dict]:
             next_seg = segments[end_seg_idx + 1]
             search_words.extend(next_seg.get('words', []))
 
-        # Search for end transition phrases
-        end_match = find_phrase_in_words(search_words, AD_END_PHRASES, search_start=False)
+        # Search for end transition phrases (never move a cue-snapped edge)
+        end_match = (None if is_edge_cue_snapped(ad, 'end') else
+                     find_phrase_in_words(search_words, AD_END_PHRASES, search_start=False))
         if end_match:
             # For end phrases, we want the time AFTER the phrase (when content resumes)
             new_end = end_match['end']
@@ -306,7 +310,8 @@ def snap_early_ads_to_zero(ads: List[Dict], threshold: float = EARLY_AD_SNAP_THR
 
 def extend_ad_boundaries_by_content(ads: List[Dict], segments: List[Dict],
                                     extend_start: bool = True,
-                                    podcast_name: str = None) -> List[Dict]:
+                                    podcast_name: str = None,
+                                    barriers: List[Dict] = None) -> List[Dict]:
     """Extend ad boundaries by checking adjacent segments for ad-like content.
 
     For each detected ad, examines transcript text immediately before and after
@@ -323,6 +328,8 @@ def extend_ad_boundaries_by_content(ads: List[Dict], segments: List[Dict],
             pass sets this False so it only sweeps trailing CTAs)
         podcast_name: Show name, so the host's own site does not read as ad
             content at a boundary
+        barriers: Markers the walk must not extend into (defaults to ``ads``);
+            the tail pass passes the full marker set including kept and held
 
     Returns:
         List of ads with boundaries extended where ad content continues
@@ -331,11 +338,23 @@ def extend_ad_boundaries_by_content(ads: List[Dict], segments: List[Dict],
         return ads
 
     own_site = SponsorService.own_site_tokens(podcast_name)
+    if barriers is None:
+        barriers = ads
     extended = []
     for ad in ads:
         ad_copy = ad.copy()
         ad_start = ad['start']
         ad_end = ad['end']
+        # Extension may not cross into another detection's span: the
+        # neighbour is judged on its own (it may resolve to keep).
+        prior_ends = [o['end'] for o in barriers
+                      if o is not ad and o.get('end') is not None
+                      and o['end'] <= ad_start]
+        next_starts = [o['start'] for o in barriers
+                       if o is not ad and o.get('start') is not None
+                       and o['start'] >= ad_end]
+        start_cap = max([ad_start - BOUNDARY_EXTENSION_MAX] + prior_ends)
+        end_cap = min([ad_end + BOUNDARY_EXTENSION_MAX] + next_starts)
 
         # Get the ad's own text to extract sponsor names
         ad_text = get_transcript_text_for_range(segments, ad_start, ad_end).lower()
@@ -347,7 +366,8 @@ def extend_ad_boundaries_by_content(ads: List[Dict], segments: List[Dict],
             segments, ad_end, ad_end + BOUNDARY_EXTENSION_WINDOW
         ).lower()
 
-        if after_text and _text_has_ad_content(after_text, ad_sponsors):
+        if (after_text and not is_edge_cue_snapped(ad, 'end')
+                and _text_has_ad_content(after_text, ad_sponsors)):
             # Walk forward, skipping up to BOUNDARY_EXTENSION_CONNECTOR_SKIP
             # consecutive non-qualifying segments: CTA tails often sandwich a
             # connector line ("Thank you for the job you do") between sponsor
@@ -360,13 +380,13 @@ def extend_ad_boundaries_by_content(ads: List[Dict], segments: List[Dict],
             for seg in segments:
                 if seg['end'] <= ad_end:
                     continue  # fully inside the ad; a straddler still counts
-                if seg['start'] >= ad_end + BOUNDARY_EXTENSION_MAX:
+                if seg['start'] >= end_cap:
                     break  # segments are time-sorted
                 if _text_has_ad_content(seg.get('text', '').lower(), ad_sponsors):
                     # Cap at the window bound: a long qualifying segment
                     # (straddler or merged transcription) must not pull the
                     # end past the documented max extension.
-                    new_end = min(seg['end'], ad_end + BOUNDARY_EXTENSION_MAX)
+                    new_end = min(seg['end'], end_cap)
                     skipped = 0
                     skipped_time = 0.0
                 else:
@@ -387,7 +407,7 @@ def extend_ad_boundaries_by_content(ads: List[Dict], segments: List[Dict],
                 ad_copy['end_extended_by_content'] = True
 
         # Check text BEFORE ad start for continuation
-        if extend_start:
+        if extend_start and not is_edge_cue_snapped(ad, 'start'):
             before_text = get_transcript_text_for_range(
                 segments, max(0, ad_start - BOUNDARY_EXTENSION_WINDOW), ad_start
             ).lower()
@@ -396,13 +416,13 @@ def extend_ad_boundaries_by_content(ads: List[Dict], segments: List[Dict],
                 new_start = ad_start
                 # Walk backwards through segments
                 for seg in reversed(segments):
-                    if seg['end'] <= ad_start - BOUNDARY_EXTENSION_MAX:
+                    if seg['end'] <= start_cap:
                         break  # reversed walk: everything earlier is further out
                     if seg['end'] <= ad_start:
                         seg_text = seg.get('text', '').lower()
                         if _text_has_ad_content(seg_text, ad_sponsors):
                             # Same window cap as the end walk.
-                            new_start = max(seg['start'], ad_start - BOUNDARY_EXTENSION_MAX)
+                            new_start = max(seg['start'], start_cap)
                         else:
                             break
 
@@ -640,6 +660,49 @@ def _unpack_region(region) -> tuple:
     if isinstance(region, dict):
         return region['start'], region['end']
     return region[0], region[1]
+
+
+def tighten_pattern_regions(claude_ads: List[Dict], pattern_matched_regions: list,
+                            all_ads: List[Dict], action_map,
+                            slug=None, episode_id=None) -> None:
+    """Snap an oversized pattern span to the one LLM detection inside it.
+
+    A pattern span is minted from a stored average duration, so on a given
+    episode it can far overrun the actual read, while the LLM edges are
+    word-timestamped. Left oversized, the marker's edges sit far from any
+    splice evidence and the whole span gets held while the precise
+    detection is dropped as covered. Mutates the region and its marker.
+    """
+    for region in pattern_matched_regions:
+        inside = [
+            a for a in claude_ads
+            if a['start'] >= region['start'] - 1.0
+            and a['end'] <= region['end'] + 1.0
+            and (a.get('confidence') or 0) >= PATTERN_TIGHTEN_MIN_CONFIDENCE
+            and (action_map is None
+                 or resolve_category_action(a.get('category'), action_map)
+                 == DEFAULT_SEGMENT_ACTION)
+        ]
+        if len(inside) != 1:
+            continue
+        tight = inside[0]
+        excess = ((tight['start'] - region['start'])
+                  + (region['end'] - tight['end']))
+        if excess < PATTERN_TIGHTEN_MIN_EXCESS_SECONDS:
+            continue
+        for marker in all_ads:
+            if (marker.get('pattern_id') == region.get('pattern_id')
+                    and abs(marker['start'] - region['start']) < 0.01
+                    and abs(marker['end'] - region['end']) < 0.01):
+                logger.info(
+                    f"[{slug}:{episode_id}] Tightened pattern marker "
+                    f"{region['start']:.1f}s-{region['end']:.1f}s to LLM "
+                    f"bounds {tight['start']:.1f}s-{tight['end']:.1f}s "
+                    f"(pattern #{region.get('pattern_id')}, "
+                    f"overshoot {excess:.1f}s)")
+                marker['start'], marker['end'] = tight['start'], tight['end']
+                break
+        region['start'], region['end'] = tight['start'], tight['end']
 
 
 # --- Uncovered tail preservation (Fix 2) ---

@@ -47,6 +47,10 @@ class ResponseTooLargeError(Exception):
     """Raised when a streamed response exceeds the caller-supplied cap."""
 
 
+class IncompleteResponseError(Exception):
+    """Raised when a body ends before its declared Content-Length."""
+
+
 @dataclass
 class FetchResult:
     """Distinguishes success, size-cap rejection, and network failure so
@@ -60,18 +64,16 @@ class FetchResult:
 
 
 class _ChunkedResponse(Protocol):
+    headers: object
+
     def iter_content(self, chunk_size: int) -> object: ...
 
 
 def read_response_capped(
     response: _ChunkedResponse, max_bytes: int, chunk_size: int = 65536
 ) -> bytes:
-    """Stream a response body, rejecting if total bytes would exceed max_bytes.
-
-    Predictive check (``len(buf) + len(chunk) > max_bytes``) is done before
-    extending the buffer, so the cap is enforced on the exact byte count
-    rather than at chunk boundaries.
-    """
+    """Stream a response body, raising above max_bytes or on a short read:
+    a connection truncated mid-body ends iter_content without raising."""
     buf = bytearray()
     for chunk in response.iter_content(chunk_size=chunk_size):
         if not chunk:
@@ -81,7 +83,30 @@ def read_response_capped(
                 f"response exceeds {max_bytes} bytes (had {len(buf)}, chunk {len(chunk)})"
             )
         buf.extend(chunk)
+
+    expected = _declared_length(response)
+    if expected is not None and len(buf) < expected:
+        raise IncompleteResponseError(
+            f"body ended at {len(buf)} of {expected} declared bytes"
+        )
     return bytes(buf)
+
+
+def _declared_length(response: _ChunkedResponse) -> Optional[int]:
+    """Declared Content-Length, or None when absent, malformed, or the body was
+    content-encoded: iter_content decodes gzip, so the header counts encoded bytes."""
+    headers = response.headers
+    encoding = (headers.get('Content-Encoding') or '').strip().lower()
+    if encoding and encoding != 'identity':
+        return None
+    raw = headers.get('Content-Length')
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def stream_to_file_capped(response, fh, max_bytes, *, already=0, chunk_size=8192):
@@ -171,7 +196,7 @@ def get_capped(
     """GET ``url`` and return the body, enforcing a hard byte cap on the
     streamed response so a small compressed payload cannot balloon in memory.
     Always closes the session. Raises ``SSRFError``, ``requests.RequestException``,
-    or ``ResponseTooLargeError``."""
+    ``ResponseTooLargeError``, or ``IncompleteResponseError``."""
     response = safe_get(
         url, trust, max_redirects=max_redirects, timeout=timeout,
         stream=True, headers=headers,

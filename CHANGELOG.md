@@ -9,6 +9,208 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
+## [2.83.1] - 2026-07-31
+
+### Added
+
+- Per-feed "Skip verification pass" toggle (#599). The pass-2 verification
+  scan re-transcribes the cut audio and runs a second full detection sweep
+  over it, which roughly doubles the ad-detection LLM spend on every episode.
+  It had no toggle at any scope. Feed settings now has a per-feed switch that
+  skips it, so a feed whose first pass is already reliable pays for one
+  detection sweep instead of two. Held differential detections that pass 2
+  would have confirmed wait for a human instead. The toggle reuses a column
+  of the same name from the old two-pass era, so upgrading resets any value
+  left over from it and the toggle starts off on every feed. A skipped run
+  records no verification result rather than a zero, which would have read as
+  a clean second scan, and the run list labels it "(no verification)".
+
+### Fixed
+
+- An oversized learned-pattern span could swallow a precise LLM detection
+  and then hold the whole thing, leaving the ad in the audio. A pattern
+  span is minted from a stored average duration; on one episode it ran 62
+  seconds past the actual read, the exact 0.98-confidence LLM detection
+  inside it was dropped as already covered, and the bloated marker was held
+  because its edges sat far from any splice evidence. When exactly one
+  high-confidence cut-resolving LLM detection sits inside a pattern span
+  that materially overshoots it, the span now adopts the LLM bounds.
+- A feed body cut mid-character parsed as a short but valid feed. The
+  truncation detector matched the parser's missing-element errors but not
+  "not well-formed (invalid token)", which is what a partial multibyte
+  sequence produces; it is now treated as truncation, so the stored episode
+  list survives.
+- HTTP 404s from unknown-path scanner probes logged at warning in the
+  access log even after the application-level line was demoted; both now
+  log at info.
+- The waveform editor opened on the wrong part of the episode at maximum
+  zoom when reached from the Patterns page. Neither the Ad Review nor the
+  Detected Ads tab passed the episode length, so the editor fell back to
+  assuming a six-minute episode and clamped the window to the end of that
+  imaginary range. The detections API now carries the episode duration and
+  both tabs pass it through.
+
+## [2.83.0] - 2026-07-31
+
+### Added
+
+- Cover-art badge corner is configurable (#600). The MinusPod badge was
+  pinned to the bottom-right, where it covered the network logo on some
+  shows. A new "Badge position" select under Settings > Cover Art picks
+  bottom-right (default), bottom-left, top-right, or top-left, and
+  `ARTWORK_BADGE_POSITION` seeds it on a fresh deploy. The corner is part
+  of the badge cache key, and changing it clears the feed validators so the
+  served feeds re-render with a fresh cover URL instead of waiting for the
+  publisher to change something.
+
+## [2.82.2] - 2026-07-30
+
+### Added
+
+- Per-feed switch to serve MinusPod episode ids as RSS item GUIDs (#598).
+  The served feed previously mixed GUID schemes: upstream entries kept the
+  publisher's GUID while DB-appended episodes used MinusPod ids. New feeds
+  serve MinusPod ids from the first fetch; existing feeds keep upstream
+  GUIDs unless the new "Serve MinusPod episode IDs" toggle in feed settings
+  is turned on. Caveat: switching an already-subscribed feed changes every
+  item GUID, so podcast apps treat each episode as new one time.
+
+### Fixed
+
+- Settings card carets behaved differently per card: half rotated in place
+  and half jumped down a line on expand, because an appearing subtitle grew
+  the header under a centered caret (#597). The caret is pinned to the
+  title line, so every card rotates in place.
+
+## [2.82.1] - 2026-07-30
+
+### Added
+
+- Editable chapter generation prompt: the topic-detection prompt is now a
+  settings-backed template (`chapterPrompt`) with placeholders for the split
+  count, segment range, continuation/description/hint blocks, and transcript,
+  plus a `chapterPromptOverride` appended at run time. Editable in Settings
+  under Prompts and included in the prompts reset; left at the default it
+  renders the same prompt as before.
+
+### Changed
+
+- The four Chapter Density tunables (target chapter length, transcript window,
+  maximum chapters, shortest chapter) moved from LLM Tunables to the
+  Transcripts & Chapters card, next to the Generate Chapters toggle, with
+  their own Save button. The settings API payload is unchanged.
+
+### Fixed
+
+- Feed descriptions were stored clipped to 500 characters, which read as
+  visible truncation on the feed page once the UI stopped line-clamping
+  them (#596). The stored bound is now 10000 characters, which no real
+  description reaches; the full text appears after the feed's next refresh.
+- A section header action, such as the model-list refresh, no longer
+  renders a button nested inside the section's toggle button.
+
+## [2.82.0] - 2026-07-29
+
+### Added
+
+- Detected Ads tab on the patterns page: browse every ad that was cut,
+  across all feeds, filtered by podcast, segment category, and search,
+  sorted by date, confidence, or podcast. The header leads with total time
+  cut, then detection count, distinct sponsors, and distinct podcasts, with a
+  per-category breakdown. Rows play the span, open it in the waveform editor,
+  reject it (which recuts from the retained original so the audio comes back),
+  or split it.
+- Segment category filter on the patterns list and the ad review tab, with a
+  separate Uncategorized option for markers no detection stage classified.
+- Split a merged multi-sponsor ad marker into N single-sponsor ads
+  (issue #563), from a Detected Ads row or from inside the boundary review
+  editor. A new split-candidates endpoint finds ad-transition phrases in
+  the marker's transcript and maps each to a timestamp, so the editor opens
+  with dividers where a split would cut. Dividers are draggable and
+  keyboard-operable, each resulting ad takes its own sponsor, and saving
+  replaces the one marker with N markers and mints one pattern per piece.
+  Every piece must clear the minimum ad duration or the split is refused and
+  the marker is left untouched. This closes the issue: the automatic
+  multi-sponsor split shipped in 2.70.0 and the editor affordance for held and
+  not-cut rows in 2.72.0.
+- Configurable chapter density via four new LLM tunables: target chapter
+  length, transcript window per detection call, maximum chapters, and shortest
+  chapter. Available in Settings under LLM Tunables and via the settings API.
+
+### Fixed
+
+- Episode discovery silently dropped episodes when SQLite was busy. The upsert
+  ran on a bare connection, so the deferred transaction upgraded to a write
+  lock at the first insert, which fails immediately with "database is locked"
+  rather than waiting on busy_timeout, and a per-episode handler swallowed it.
+  A contended refresh logged one warning per episode and reported success
+  having discovered nothing. The batch now holds an immediate transaction,
+  lock failures abort it so the caller retries the feed, and per-row data
+  faults collapse into one summary warning.
+- A truncated feed response was parsed as a short but valid feed, so episodes
+  vanished from that feed on every refresh while the circuit breaker recorded a
+  success. The shared streaming reader enforced only an upper size bound and
+  returned whatever arrived; it now rejects a body that ends short of its
+  declared Content-Length, and both RSS fetch paths treat that as a fetch
+  failure so the stored episode list survives. A feed document whose parse
+  error signals truncation is likewise rejected rather than parsed partially.
+- Chapter generation capped every episode at 6 topic boundaries regardless of
+  length, and a single detection call over a long transcript clustered the
+  boundaries it did return, leaving hour-long chapters at the end. Detection
+  now runs per transcript window with the previous window's title carried
+  forward, and a failed window no longer discards the others' results. The
+  boundary parser also accepts timestamps past 99:59, which windowed
+  detection produces on every episode longer than that, and show-notes
+  timestamp anchors now reach every window instead of only the first.
+- Transcription repeated the same CUDA out-of-memory failures on every
+  episode. Batch size came from audio duration alone, so on a card where the
+  top tier never fits, each episode paid two OOM failures before settling on a
+  size that worked and then discarded that result. The working size is now
+  remembered per device.
+- The scheduled-backup warning about provider secrets fired on the wrong
+  condition. It warned when a master passphrase was configured, which is
+  exactly when those secrets are already encrypted at rest, and said nothing
+  in the case where they are stored in plaintext. It now warns when plaintext
+  secrets are present, names the remedy, and logs once per process rather than
+  once per backup.
+- Podping node failures logged a warning on every attempt, so a node that
+  stayed down printed once a minute indefinitely even though failover was
+  working. A node now warns on its first failure, repeats drop to debug, and
+  losing every node escalates to an error, which is the case that loses
+  pings.
+- Unauthenticated requests for feed assets and probes for unknown feed slugs
+  logged at warning level, putting routine internet background noise at the
+  same level as problems worth acting on. Both drop to info. Failed login
+  attempts stay at warning.
+- Waveform editor boundary pins declared themselves as sliders to assistive
+  technology but had no keyboard handling and no minimum or maximum, so they
+  were announced as operable and were not. Arrow keys now nudge them, Shift
+  takes a coarser step, and both bounds are exposed.
+- Scope, Origin, and Source filter labels on the patterns list were not
+  associated with their controls, so none were reachable by label.
+- Boundary heuristics could undo a cue-anchored edge and swallow neighbouring
+  audio, leaving a real ad in the episode. A text-pattern match landed on an
+  ad and cue snapping anchored its end to the feed's learned ad-break
+  stinger, then phrase refinement and the content-extension walk moved both
+  edges into surrounding speech, across a segment the detector had decided
+  to keep. The bloated marker was held for review because its edges were no
+  longer near any splice evidence, and a precise LLM detection of the same
+  ad had been dropped as redundant, so nothing was cut. Cue-snapped edges
+  are now pinned against phrase and content heuristics, the extension walk
+  stops at a neighbouring detection's span including segments the feed
+  keeps, and a learned template cue firing at a marker edge now counts as
+  splice evidence for the veto.
+- A marker could end past the end of the file. The validator clamps bounds
+  to the episode duration, but protected merge bookkeeping recorded before
+  the clamp let the reviewer re-expand the edge past it; the protected
+  bounds are now clamped the same way.
+- Requesting cover art for a feed slug that does not exist created that
+  slug's directory on disk, so scanner probes left orphan directories for
+  the refresh cycle to clean up. Artwork reads no longer create anything.
+- The corrections endpoint documentation described a request shape the
+  server never accepted; it now documents the real one, including the
+  trimmed-approval and split fields.
+
 ## [2.81.23] - 2026-07-28
 
 ### Security

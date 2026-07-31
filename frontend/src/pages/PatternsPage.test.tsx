@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router';
@@ -8,6 +8,14 @@ import PatternsPage from './PatternsPage';
 const mockGetPatterns = vi.fn().mockResolvedValue([]);
 const mockGetDetections = vi.fn().mockResolvedValue({
   detections: [], total: 0, page: 1, totalPages: 1, limit: 20,
+  counts: {
+    total: 0, needsReview: 0, pending: 0, rejected: 0,
+    accepted: 0, confirmed: 0, dismissed: 0,
+  },
+  cutSummary: {
+    count: 0, durationSeconds: 0, byCategory: {},
+    distinctSponsors: 0, distinctPodcasts: 0,
+  },
 });
 
 vi.mock('../api/patterns', async (importOriginal) => ({
@@ -77,6 +85,80 @@ describe('PatternsPage tabs', () => {
   it('opens the ad review tab from the URL', async () => {
     renderPage('/patterns?tab=ad-review');
     const tab = await screen.findByRole('tab', { name: 'Ad Review' });
+    expect(tab.getAttribute('aria-selected')).toBe('true');
+  });
+});
+
+describe('PatternsPage category filter', () => {
+  function pattern(id: number, category: string | null, sponsor: string) {
+    return {
+      id, scope: 'global', network_id: null, podcast_id: null,
+      dai_platform: null, text_template: 'x'.repeat(60),
+      intro_variants: '[]', outro_variants: '[]', sponsor,
+      confirmation_count: 0, false_positive_count: 0, last_matched_at: null,
+      created_at: '2026-01-01T00:00:00Z', created_from_episode_id: null,
+      is_active: true, disabled_at: null, disabled_reason: null,
+      category,
+    };
+  }
+
+  function seed() {
+    mockGetPatterns.mockResolvedValue([
+      pattern(1, 'sponsor', 'Acme'),
+      pattern(2, 'cross_promo', 'Beta Co'),
+      pattern(3, null, 'Gamma Co'),
+    ]);
+  }
+
+  it('narrows the list to one category', async () => {
+    seed();
+    renderPage();
+    const user = userEvent.setup();
+    await screen.findAllByText('Beta Co');
+    await user.selectOptions(screen.getByLabelText('Category:'), 'cross_promo');
+    expect(await screen.findAllByText('Beta Co')).not.toHaveLength(0);
+    expect(screen.queryByText('Acme')).toBeNull();
+    expect(screen.queryByText('Gamma Co')).toBeNull();
+  });
+
+  it('uncategorized shows only patterns with no category', async () => {
+    seed();
+    renderPage();
+    const user = userEvent.setup();
+    await screen.findAllByText('Gamma Co');
+    await user.selectOptions(screen.getByLabelText('Category:'), 'none');
+    expect(await screen.findAllByText('Gamma Co')).not.toHaveLength(0);
+    expect(screen.queryByText('Acme')).toBeNull();
+    expect(screen.queryByText('Beta Co')).toBeNull();
+  });
+
+  it('all categories keeps every pattern', async () => {
+    seed();
+    renderPage();
+    await screen.findAllByText('Acme');
+    expect(screen.queryAllByText('Beta Co')).not.toHaveLength(0);
+    expect(screen.queryAllByText('Gamma Co')).not.toHaveLength(0);
+  });
+});
+
+describe('PatternsPage detected ads tab', () => {
+  it('switches to the detected ads tab and requests cut detections', async () => {
+    renderPage();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('tab', { name: 'Detected Ads' }));
+    await waitFor(() => expect(mockGetDetections).toHaveBeenCalled());
+    expect(mockGetDetections.mock.lastCall?.[0]).toMatchObject({ status: 'accepted' });
+  });
+
+  it('opens the detected ads tab from the url', async () => {
+    renderPage('/patterns?tab=detected-ads');
+    const tab = await screen.findByRole('tab', { name: 'Detected Ads' });
+    expect(tab.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('falls back to patterns for an unknown tab param', async () => {
+    renderPage('/patterns?tab=banana');
+    const tab = await screen.findByRole('tab', { name: 'Patterns' });
     expect(tab.getAttribute('aria-selected')).toBe('true');
   });
 });

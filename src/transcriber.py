@@ -1,5 +1,6 @@
 """Transcription using Faster Whisper."""
 import io
+import json
 import logging
 import math
 import struct
@@ -16,7 +17,8 @@ from typing import List, Dict, Optional, Tuple
 from utils.audio import get_audio_duration
 from utils.errors import ServiceUnavailableError, AudioTooLargeError, AudioExtractionError
 from utils.time import format_vtt_timestamp
-from utils.gpu import clear_gpu_memory, get_available_memory_gb, get_gpu_memory_info
+from utils.gpu import (clear_gpu_memory, get_available_memory_gb,
+                       get_gpu_device_name, get_gpu_memory_info)
 from utils.url import SSRFError
 from utils.http import safe_url_for_log
 from utils.connection_probe import run_probe, parse_probe_json, rejected_detail
@@ -1318,17 +1320,73 @@ class Transcriber:
             logger.info(f"Audio duration: {duration:.1f}s ({duration/60:.1f} min)")
         return duration
 
+    # Largest batch size proven to fit this device's VRAM: recorded when a run
+    # completes after an OOM downshift, so later episodes start at a size that fits.
+    BATCH_CEILING_SETTING = 'transcribe_batch_size_ceiling'
+
+    @staticmethod
+    def _batch_ceiling_device() -> str:
+        """Device name the stored ceiling applies to; VRAM differs per GPU model."""
+        return get_gpu_device_name()
+
+    def _batch_size_ceiling(self) -> Optional[int]:
+        """Stored ceiling as a positive int, or None when unset, malformed, or
+        recorded for a different device."""
+        # Inline import: see _get_whisper_settings above, Database would be a
+        # circular import at module level.
+        from database import Database
+        try:
+            raw = Database().get_setting(self.BATCH_CEILING_SETTING)
+        except Exception as e:
+            logger.debug(f"Could not read batch size ceiling: {e}")
+            return None
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            if parsed.get('device') != self._batch_ceiling_device():
+                return None
+            size = parsed.get('size')
+        else:
+            # Legacy bare int from an earlier build: valid for the current
+            # device, rewritten in the new format on the next persist.
+            size = raw
+        try:
+            return max(1, int(size))
+        except (TypeError, ValueError):
+            return None
+
+    def record_batch_size_ceiling(self, batch_size: int) -> None:
+        """Persist batch_size as this device's ceiling. Called only after a
+        completed run, since only completion proves a size fits; ratchets down.
+        """
+        from database import Database
+        candidate = max(1, int(batch_size))
+        existing = self._batch_size_ceiling()
+        value = min(existing, candidate) if existing else candidate
+        payload = json.dumps({'device': self._batch_ceiling_device(), 'size': value})
+        try:
+            Database().set_setting(self.BATCH_CEILING_SETTING, payload)
+        except Exception as e:
+            logger.debug(f"Could not persist batch size ceiling: {e}")
+
     def get_batch_size_for_duration(self, duration_seconds: Optional[float]) -> int:
         """Get optimal batch size based on audio duration to prevent CUDA OOM."""
         if duration_seconds is None:
             # Default to conservative batch size if duration unknown
-            return 8
+            tier = 8
+        else:
+            tier = 4  # Fallback for very long episodes (> 120 min)
+            for threshold, batch_size in BATCH_SIZE_TIERS:
+                if duration_seconds < threshold:
+                    tier = batch_size
+                    break
 
-        for threshold, batch_size in BATCH_SIZE_TIERS:
-            if duration_seconds < threshold:
-                return batch_size
-
-        return 4  # Fallback for very long episodes (> 120 min)
+        ceiling = self._batch_size_ceiling()
+        return min(tier, ceiling) if ceiling else tier
 
     def clear_cuda_cache(self):
         """Clear CUDA cache to free GPU memory.
@@ -1577,6 +1635,9 @@ class Transcriber:
             else:
                 batch_size = 8  # Smaller batch for CPU
 
+            # Success-time ceiling recording needs the pre-downshift start size.
+            initial_batch_size = batch_size
+
             # Retry logic for CUDA OOM errors
             max_retries = 3
             retry_count = 0
@@ -1697,6 +1758,11 @@ class Transcriber:
 
                     duration_min = result[-1]['end'] / 60 if result else 0
                     logger.info(f"Transcription completed: {len(result)} segments, {duration_min:.1f} minutes")
+
+                    if device == "cuda" and batch_size < initial_batch_size:
+                        # Completing at the downshifted size proves it fits;
+                        # failures never persist anything.
+                        self.record_batch_size_ceiling(batch_size)
 
                     return result
 

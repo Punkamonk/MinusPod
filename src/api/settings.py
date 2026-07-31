@@ -45,6 +45,7 @@ from config import (
 # settings would break boot -- keep this the only cross-submodule import.
 from api.podcast_search import resolve_search_provider
 from ad_detector import AdDetector
+from artwork_watermark import BADGE_POSITIONS
 from audio_processor import NORMALIZE_PRESETS
 from database.settings import (
     AD_RESET_SETTING_KEYS, SETTINGS_REGISTRY,
@@ -148,6 +149,7 @@ def get_settings():
     from database import (
         DEFAULT_SYSTEM_PROMPT, DEFAULT_VERIFICATION_PROMPT,
         DEFAULT_REVIEW_PROMPT, DEFAULT_RESURRECT_PROMPT,
+        DEFAULT_CHAPTER_PROMPT,
     )
     from config import DEFAULT_AD_DETECTION_MODEL as DEFAULT_MODEL
     from config import (
@@ -204,6 +206,9 @@ def get_settings():
         registry_default('artwork_watermark_enabled'))
     artwork_watermark_enabled = (
         artwork_watermark_value.lower() in ('true', '1', 'yes'))
+    artwork_badge_position = _setting_value(
+        settings, 'artwork_badge_position',
+        registry_default('artwork_badge_position'))
     feed_auth_enabled = coerce_bool_setting(
         _setting_value(settings, 'feed_auth_enabled',
                        registry_default('feed_auth_enabled')))
@@ -425,6 +430,7 @@ def get_settings():
     # contract, hence the same coalesce on system/verification below.
     review_prompt = _setting_value(settings, 'review_prompt', DEFAULT_REVIEW_PROMPT) or DEFAULT_REVIEW_PROMPT
     resurrect_prompt = _setting_value(settings, 'resurrect_prompt', DEFAULT_RESURRECT_PROMPT) or DEFAULT_RESURRECT_PROMPT
+    chapter_prompt = _setting_value(settings, 'chapter_prompt', DEFAULT_CHAPTER_PROMPT) or DEFAULT_CHAPTER_PROMPT
 
     # Audio cue detection experiment (#350)
     audio_cue_enabled = str(_setting_value(
@@ -477,10 +483,12 @@ def get_settings():
         'reviewMaxBoundaryShift': _sv('review_max_boundary_shift', review_max_boundary_shift),
         'reviewPrompt': _sv('review_prompt', review_prompt),
         'resurrectPrompt': _sv('resurrect_prompt', resurrect_prompt),
+        'chapterPrompt': _sv('chapter_prompt', chapter_prompt),
         'systemPromptOverride': _sv('system_prompt_override', _setting_value(settings, 'system_prompt_override', '') or ''),
         'verificationPromptOverride': _sv('verification_prompt_override', _setting_value(settings, 'verification_prompt_override', '') or ''),
         'reviewPromptOverride': _sv('review_prompt_override', _setting_value(settings, 'review_prompt_override', '') or ''),
         'resurrectPromptOverride': _sv('resurrect_prompt_override', _setting_value(settings, 'resurrect_prompt_override', '') or ''),
+        'chapterPromptOverride': _sv('chapter_prompt_override', _setting_value(settings, 'chapter_prompt_override', '') or ''),
         'claudeModel': _sv('claude_model', current_model),
         'verificationModel': _sv('verification_model', verification_model),
         'whisperModel': _sv('whisper_model', whisper_model),
@@ -497,6 +505,8 @@ def get_settings():
             'only_expose_processed_default', only_expose_processed_default),
         'artworkWatermarkEnabled': _sv(
             'artwork_watermark_enabled', artwork_watermark_enabled),
+        'artworkBadgePosition': _sv(
+            'artwork_badge_position', artwork_badge_position),
         'feedAuthEnabled': _sv('feed_auth_enabled', feed_auth_enabled),
         'feedAuthKey': feed_auth_key,
         'opmlModifiedUrl': opml_modified_url,
@@ -642,7 +652,7 @@ def update_ad_detection_settings():
 
 
 def _apply_prompt_fields(db, data):
-    """Persist the four prompt strings.
+    """Persist the prompt strings.
 
     An empty/whitespace prompt is never valid (the runtime falls back to the
     default), so clearing a field and saving resets it to default rather than
@@ -653,6 +663,7 @@ def _apply_prompt_fields(db, data):
         ('verificationPrompt', 'verification_prompt', 'verification prompt'),
         ('reviewPrompt', 'review_prompt', 'review prompt'),
         ('resurrectPrompt', 'resurrect_prompt', 'resurrect prompt'),
+        ('chapterPrompt', 'chapter_prompt', 'chapter prompt'),
     ):
         if payload_key in data:
             if not str(data[payload_key] or '').strip():
@@ -668,6 +679,7 @@ def _apply_prompt_fields(db, data):
         ('verificationPromptOverride', 'verification_prompt_override'),
         ('reviewPromptOverride', 'review_prompt_override'),
         ('resurrectPromptOverride', 'resurrect_prompt_override'),
+        ('chapterPromptOverride', 'chapter_prompt_override'),
     ):
         if payload_key in data:
             db.set_setting(db_key, str(data[payload_key] or ''), is_default=False)
@@ -775,7 +787,20 @@ def _apply_processing_flags(db, data):
     if 'artworkWatermarkEnabled' in data:
         value = 'true' if data['artworkWatermarkEnabled'] else 'false'
         db.set_setting('artwork_watermark_enabled', value, is_default=False)
+        # The badge state is part of the cover URL token, and a steady feed
+        # 304-skips the re-render that would move it, so apps would keep
+        # fetching the old image. Same reason as the feed-auth clear below.
+        db.clear_all_podcast_etags()
         logger.info(f"Updated artwork watermark to: {value}")
+
+    if 'artworkBadgePosition' in data:
+        if data['artworkBadgePosition'] not in BADGE_POSITIONS:
+            return error_response(
+                f'artworkBadgePosition must be one of: {", ".join(BADGE_POSITIONS)}', 400)
+        db.set_setting('artwork_badge_position', data['artworkBadgePosition'],
+                       is_default=False)
+        db.clear_all_podcast_etags()
+        logger.info(f"Updated artwork badge position to: {data['artworkBadgePosition']}")
 
     if 'feedAuthEnabled' in data:
         enabled = data['feedAuthEnabled']
@@ -1441,24 +1466,50 @@ def _apply_stage_tunables(db, data):
         get_stage_tunable,
     )
 
+    # Effective value for a cross-field check: the submitted value when the
+    # payload carries one, else what is already stored. Both pairs below need
+    # this, so neither can be validated against a payload-only view.
+    def _effective(payload_key, db_key):
+        if payload_key in data:
+            raw = data[payload_key]
+            if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                return get_stage_tunable(db_key)
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return None
+        return get_stage_tunable(db_key)
+
     # overlap >= size would make the derived step <= 0 and break create_windows.
     if 'windowSizeSeconds' in data or 'windowOverlapSeconds' in data:
-        def _effective(payload_key, db_key):
-            if payload_key in data:
-                raw = data[payload_key]
-                if raw is None or (isinstance(raw, str) and raw.strip() == ""):
-                    return get_stage_tunable(db_key)
-                try:
-                    return int(raw)
-                except (TypeError, ValueError):
-                    return None
-            return get_stage_tunable(db_key)
-
         size_eff = _effective('windowSizeSeconds', 'window_size_seconds')
         overlap_eff = _effective('windowOverlapSeconds', 'window_overlap_seconds')
         if size_eff is not None and overlap_eff is not None and overlap_eff >= size_eff:
             return json_response({
                 'error': 'windowOverlapSeconds must be less than windowSizeSeconds'
+            }, 400)
+
+    # Chapter density geometry. Checked against effective values so a partial
+    # payload cannot pair a new value with a stored one into a combination that
+    # silently does nothing.
+    CHAPTER_GEOMETRY_KEYS = ('chapterTargetSeconds', 'chapterWindowSeconds',
+                             'chapterMinDurationSeconds')
+    if any(k in data for k in CHAPTER_GEOMETRY_KEYS):
+        target_eff = _effective('chapterTargetSeconds', 'chapter_target_seconds')
+        window_eff = _effective('chapterWindowSeconds', 'chapter_window_seconds')
+        min_eff = _effective('chapterMinDurationSeconds',
+                             'chapter_min_duration_seconds')
+        # A target larger than the window means a window can never hold one
+        # whole chapter.
+        if target_eff is not None and window_eff is not None and target_eff > window_eff:
+            return json_response({
+                'error': 'chapterTargetSeconds must not exceed chapterWindowSeconds'
+            }, 400)
+        # A minimum above the target means the absorption pass eats every
+        # chapter the target asked for.
+        if min_eff is not None and target_eff is not None and min_eff > target_eff:
+            return json_response({
+                'error': 'chapterMinDurationSeconds must not exceed chapterTargetSeconds'
             }, 400)
 
     # Coercion + provider-gating per kind. Each tuple is
@@ -1599,10 +1650,12 @@ def reset_prompts_only():
     db.reset_setting('verification_prompt')
     db.reset_setting('review_prompt')
     db.reset_setting('resurrect_prompt')
+    db.reset_setting('chapter_prompt')
 
     # Clear per-pass overrides too (empty is the no-override default state).
     for key in ('system_prompt_override', 'verification_prompt_override',
-                'review_prompt_override', 'resurrect_prompt_override'):
+                'review_prompt_override', 'resurrect_prompt_override',
+                'chapter_prompt_override'):
         db.set_setting(key, '', is_default=True)
 
     logger.info("Reset prompts to defaults")

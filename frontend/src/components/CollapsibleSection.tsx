@@ -120,8 +120,10 @@ function CollapsibleSection({
 
   return (
     <div data-search-key={resolvedKey} className={`bg-card rounded-lg border border-border${hiddenBySearch ? ' hidden' : ''}`}>
-      <button
-        type="button"
+      {/* The row div (not a wrapping button) carries the click target so a
+          button passed via headerRight never nests inside a button. */}
+      <div
+        className="w-full flex items-start justify-between p-4 sm:p-6 cursor-pointer"
         onClick={() => {
           // While searching, expansion follows the match, not isOpen, so a
           // toggle would silently flip the persisted state with no visible
@@ -131,15 +133,22 @@ function CollapsibleSection({
           setIsOpen(next);
           onToggle?.(next);
         }}
-        className="w-full flex items-center justify-between p-4 sm:p-6 text-left"
       >
-        <div className="flex-1 min-w-0">
+        {/* No handler of its own: mouse and keyboard activation bubble to
+            the row's single toggle handler above. */}
+        <button
+          type="button"
+          className="flex-1 min-w-0 text-left"
+        >
           <h2 className="text-lg font-semibold text-foreground">{title}</h2>
           {subtitle && expanded && (
             <p className="text-sm text-muted-foreground mt-0.5">{subtitle}</p>
           )}
-        </div>
-        <div className="flex items-center gap-2 ml-4 shrink-0">
+        </button>
+        {/* h-7 pins the cluster to the title line, so the caret rotates in
+            place instead of dropping when an expanded subtitle grows the
+            header (#597). */}
+        <div className="flex items-center gap-2 ml-4 shrink-0 h-7">
           {headerRight && (
             <div onClick={(e) => e.stopPropagation()}>
               {headerRight}
@@ -157,7 +166,7 @@ function CollapsibleSection({
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
         </div>
-      </button>
+      </div>
 
       <div
         ref={contentRef}

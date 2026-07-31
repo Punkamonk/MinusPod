@@ -99,6 +99,11 @@ export interface Feed {
   segmentCategoryActions?: Partial<Record<SegmentCategory, SegmentAction>> | null;
   // Also detect intro/outro/recap/housekeeping segments. Off by default.
   detectShowSegments?: boolean | null;
+  // Serve MinusPod episode ids as RSS item GUIDs (#598). Null/false pass
+  // upstream GUIDs through; new feeds are created with true.
+  ownEpisodeGuids?: boolean | null;
+  // Skip the pass-2 verification scan (#599). Null/false run it.
+  skipSecondPass?: boolean | null;
 }
 
 export interface AdDistributionZone {
@@ -214,6 +219,9 @@ export interface ProcessingRunStats {
   // Skip ad detection (#538): the run made no detection LLM calls and cut
   // nothing; stageHits/detected/verificationAdsCut are absent by design.
   detectionSkipped?: boolean | null;
+  // Skip verification (#599): pass 1 ran and cut, pass 2 did not, so
+  // verificationAdsCut is absent by design rather than 0.
+  verificationSkipped?: boolean | null;
   downloadedDuration?: number | null;
   transcriptSegments?: number;
   windows?: { total: number; failed: number } | null;
@@ -344,6 +352,8 @@ export interface SettingValueNumber {
 }
 
 export type LlmProvider = 'anthropic' | 'openai-compatible' | 'ollama' | 'openrouter';
+// Corner the MinusPod cover-art badge renders in (issue #600).
+export type BadgePosition = 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left';
 export type WhisperBackend = 'local' | 'openai-api';
 
 export interface WhisperApiConfig {
@@ -368,10 +378,12 @@ export interface Settings {
   verificationPrompt: SettingValue;
   reviewPrompt: SettingValue;
   resurrectPrompt: SettingValue;
+  chapterPrompt: SettingValue;
   systemPromptOverride: SettingValue;
   verificationPromptOverride: SettingValue;
   reviewPromptOverride: SettingValue;
   resurrectPromptOverride: SettingValue;
+  chapterPromptOverride: SettingValue;
   enableAdReview: SettingValueBoolean;
   reviewModel: SettingValue;
   reviewMaxBoundaryShift: SettingValueNumber;
@@ -385,6 +397,7 @@ export interface Settings {
   segmentCategoryActions: { value: Record<SegmentCategory, SegmentAction>; isDefault: boolean };
   onlyExposeProcessedDefault: SettingValueBoolean;
   artworkWatermarkEnabled: SettingValueBoolean;
+  artworkBadgePosition: SettingValue;
   feedAuthEnabled: SettingValueBoolean;
   feedAuthKey: string | null;
   opmlModifiedUrl: string | null;
@@ -459,6 +472,7 @@ export interface Settings {
     verificationPrompt: string;
     reviewPrompt: string;
     resurrectPrompt: string;
+    chapterPrompt: string;
     enableAdReview: boolean;
     reviewModel: string;
     reviewMaxBoundaryShift: number;
@@ -472,6 +486,7 @@ export interface Settings {
     segmentCategoryActions: Record<SegmentCategory, SegmentAction>;
     onlyExposeProcessedDefault: boolean;
     artworkWatermarkEnabled: boolean;
+    artworkBadgePosition: string;
     feedAuthEnabled: boolean;
     vttTranscriptsEnabled: boolean;
     chaptersEnabled: boolean;
@@ -540,10 +555,12 @@ export interface UpdateSettingsPayload {
   verificationPrompt?: string;
   reviewPrompt?: string;
   resurrectPrompt?: string;
+  chapterPrompt?: string;
   systemPromptOverride?: string;
   verificationPromptOverride?: string;
   reviewPromptOverride?: string;
   resurrectPromptOverride?: string;
+  chapterPromptOverride?: string;
   enableAdReview?: boolean;
   reviewModel?: string;
   reviewMaxBoundaryShift?: number;
@@ -560,6 +577,7 @@ export interface UpdateSettingsPayload {
   segmentCategoryActions?: Partial<Record<SegmentCategory, SegmentAction>>;
   onlyExposeProcessedDefault?: boolean;
   artworkWatermarkEnabled?: boolean;
+  artworkBadgePosition?: string;
   feedAuthEnabled?: boolean;
   audioBitrate?: string;
   audioNormalizeEnabled?: boolean;
@@ -639,6 +657,10 @@ export interface UpdateSettingsPayload {
   chapterBoundaryMaxTokens?: number | null;
   chapterBoundaryReasoningBudget?: number | null;
   chapterBoundaryReasoningLevel?: ReasoningLevel | null;
+  chapterTargetSeconds?: number | null;
+  chapterWindowSeconds?: number | null;
+  chapterMaxBoundaries?: number | null;
+  chapterMinDurationSeconds?: number | null;
   chapterTitleTemperature?: number | null;
   chapterTitleMaxTokens?: number | null;
   chapterTitleReasoningBudget?: number | null;
@@ -674,6 +696,10 @@ export interface StageTunables {
   chapterBoundaryMaxTokens: StageTunableEntry<number | null>;
   chapterBoundaryReasoningBudget: StageTunableEntry<number | null>;
   chapterBoundaryReasoningLevel: StageTunableEntry<ReasoningLevel | null>;
+  chapterTargetSeconds: StageTunableEntry<number | null>;
+  chapterWindowSeconds: StageTunableEntry<number | null>;
+  chapterMaxBoundaries: StageTunableEntry<number | null>;
+  chapterMinDurationSeconds: StageTunableEntry<number | null>;
   chapterTitleTemperature: StageTunableEntry<number | null>;
   chapterTitleMaxTokens: StageTunableEntry<number | null>;
   chapterTitleReasoningBudget: StageTunableEntry<number | null>;

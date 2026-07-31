@@ -130,3 +130,167 @@ def test_text_has_ad_content_phone_patterns():
     assert _text_has_ad_content('call 1-800-grainger today')
     assert _text_has_ad_content('call one eight hundred grainger')
     assert not _text_has_ad_content('thank you for the job you do')
+
+
+def test_cue_snapped_end_is_not_extended():
+    # A template-cue-anchored end must not be moved by the content walk.
+    segments = [
+        _seg(95.0, 120.0, 'sponsor copy ends here'),
+        _seg(120.0, 126.0, 'go to example dot com slash offer'),
+    ]
+    ads = [{'start': 100.0, 'end': 120.0,
+            'cue_snap': {'end': {'cue_start': 120.1, 'template_id': 1}}}]
+
+    extended = extend_ad_boundaries_by_content(ads, segments)
+
+    assert extended[0]['end'] == 120.0
+    assert 'end_extended_by_content' not in extended[0]
+
+
+def test_cue_snapped_start_is_not_extended():
+    segments = [
+        _seg(90.0, 99.0, 'visit example dot com for a discount'),
+        _seg(100.0, 120.0, 'sponsor copy for example dot com'),
+    ]
+    ads = [{'start': 100.0, 'end': 120.0,
+            'cue_snap': {'start': {'cue_end': 99.9, 'template_id': 1}}}]
+
+    extended = extend_ad_boundaries_by_content(ads, segments)
+
+    assert extended[0]['start'] == 100.0
+    assert 'start_extended_by_content' not in extended[0]
+
+
+def test_start_walk_stops_at_neighbouring_detection():
+    # The walk must not swallow an adjacent detection's span; the neighbour
+    # is judged on its own and may resolve to keep (self_promo).
+    segments = [
+        _seg(70.0, 99.0, 'support us at patreon dot com slash show'),
+        _seg(100.0, 120.0, 'sponsor read mentioning patreon dot com'),
+    ]
+    ads = [
+        {'start': 70.0, 'end': 100.0, 'category': 'self_promo'},
+        {'start': 100.0, 'end': 120.0},
+    ]
+
+    extended = extend_ad_boundaries_by_content(ads, segments)
+
+    assert extended[1]['start'] == 100.0
+    assert 'start_extended_by_content' not in extended[1]
+
+
+def test_end_walk_stops_at_neighbouring_detection():
+    segments = [
+        _seg(95.0, 120.0, 'sponsor copy ends here'),
+        _seg(120.0, 126.0, 'go to example dot com slash offer'),
+        _seg(126.0, 140.0, 'more example dot com copy'),
+    ]
+    ads = [
+        {'start': 100.0, 'end': 120.0},
+        {'start': 126.0, 'end': 140.0},
+    ]
+
+    extended = extend_ad_boundaries_by_content(ads, segments)
+
+    assert extended[0]['end'] == 126.0
+
+
+def test_refine_skips_cue_snapped_end():
+    # Phrase refinement must not move an edge the cue snap anchored.
+    from ad_detector.boundaries import refine_ad_boundaries
+
+    def _words(start, text):
+        words = []
+        t = start
+        for w in text.split():
+            words.append({'word': w, 'start': t, 'end': t + 0.4})
+            t += 0.5
+        return words
+
+    segments = [
+        {'start': 100.0, 'end': 119.5, 'text': 'sponsor copy here',
+         'words': _words(100.0, 'sponsor copy here')},
+        {'start': 120.5, 'end': 125.0, 'text': 'all right back to the show',
+         'words': _words(120.5, 'all right back to the show')},
+    ]
+    pinned = [{'start': 100.0, 'end': 120.0,
+               'cue_snap': {'end': {'cue_start': 120.1, 'template_id': 1}}}]
+    free = [{'start': 100.0, 'end': 120.0}]
+
+    assert refine_ad_boundaries(pinned, segments)[0]['end'] == 120.0
+    assert refine_ad_boundaries(free, segments)[0]['end'] > 120.0
+
+
+def test_barriers_outside_the_ads_list_still_block_extension():
+    # Keep-partitioned markers leave the ads list before refinement but must
+    # still stop the walk: a cut may not grow into a span the feed keeps.
+    segments = [
+        _seg(70.0, 99.0, 'support us at patreon dot com slash show'),
+        _seg(100.0, 120.0, 'sponsor read mentioning patreon dot com'),
+    ]
+    kept = {'start': 70.0, 'end': 100.0, 'category': 'self_promo',
+            'action_applied': 'keep'}
+    ads = [{'start': 100.0, 'end': 120.0}]
+
+    extended = extend_ad_boundaries_by_content(ads, segments,
+                                               barriers=ads + [kept])
+
+    assert extended[0]['start'] == 100.0
+    assert 'start_extended_by_content' not in extended[0]
+
+
+class TestTightenPatternRegions:
+    """An oversized pattern span adopts the LLM bounds inside it (the
+    ZipRecruiter case: a 100s pattern marker over a 38s read got held for
+    no_splice_evidence while the 0.98-confidence LLM detection was dropped)."""
+
+    def _fixture(self, claude, region_end=601.1):
+        region = {'start': 501.1, 'end': region_end, 'pattern_id': 614}
+        marker = {'start': 501.1, 'end': region_end, 'pattern_id': 614,
+                  'detection_stage': 'text_pattern'}
+        return [dict(c) for c in claude], [region], [marker]
+
+    def test_single_tight_llm_ad_wins(self):
+        from ad_detector.boundaries import tighten_pattern_regions
+        claude, regions, ads = self._fixture(
+            [{'start': 501.1, 'end': 539.2, 'confidence': 0.98,
+              'category': 'sponsor'}])
+        tighten_pattern_regions(claude, regions, ads, None)
+        assert (ads[0]['start'], ads[0]['end']) == (501.1, 539.2)
+        assert (regions[0]['start'], regions[0]['end']) == (501.1, 539.2)
+
+    def test_matching_bounds_are_untouched(self):
+        from ad_detector.boundaries import tighten_pattern_regions
+        claude, regions, ads = self._fixture(
+            [{'start': 501.1, 'end': 539.2, 'confidence': 0.98,
+              'category': 'sponsor'}], region_end=545.0)
+        tighten_pattern_regions(claude, regions, ads, None)
+        assert ads[0]['end'] == 545.0
+
+    def test_two_llm_ads_inside_leave_the_region_alone(self):
+        from ad_detector.boundaries import tighten_pattern_regions
+        claude, regions, ads = self._fixture([
+            {'start': 501.1, 'end': 530.0, 'confidence': 0.98,
+             'category': 'sponsor'},
+            {'start': 560.0, 'end': 595.0, 'confidence': 0.97,
+             'category': 'sponsor'},
+        ])
+        tighten_pattern_regions(claude, regions, ads, None)
+        assert ads[0]['end'] == 601.1
+
+    def test_low_confidence_does_not_tighten(self):
+        from ad_detector.boundaries import tighten_pattern_regions
+        claude, regions, ads = self._fixture(
+            [{'start': 501.1, 'end': 539.2, 'confidence': 0.7,
+              'category': 'sponsor'}])
+        tighten_pattern_regions(claude, regions, ads, None)
+        assert ads[0]['end'] == 601.1
+
+    def test_keep_category_detection_does_not_tighten(self):
+        from ad_detector.boundaries import tighten_pattern_regions
+        claude, regions, ads = self._fixture(
+            [{'start': 501.1, 'end': 539.2, 'confidence': 0.98,
+              'category': 'self_promo'}])
+        tighten_pattern_regions(claude, regions, ads,
+                                {'self_promo': 'keep'})
+        assert ads[0]['end'] == 601.1

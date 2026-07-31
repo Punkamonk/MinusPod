@@ -28,7 +28,8 @@ def seeded_detections(app_client):
     ]
     db.upsert_episode(slug, 'det-ep-1',
                       original_url='https://example.com/e1.mp3',
-                      title='Episode One', status='processed')
+                      title='Episode One', status='processed',
+                      original_duration=3600.0)
     db.save_episode_details(slug, 'det-ep-1', ad_markers=markers)
     yield {'slug': slug, 'db': db}
     db.delete_podcast(slug)
@@ -104,3 +105,91 @@ def test_resolved_detection_leaves_needs_review(app_client, seeded_detections):
     assert starts == [200.0]
     resolved = app_client.get('/api/v1/detections?status=rejected').get_json()
     assert resolved['detections'][0]['resolution'] == 'dismissed'
+
+
+@pytest.fixture
+def seeded_categories(app_client):
+    """Two cut detections with categories plus one uncategorised, so the
+    category filter and the cut summary have something to separate."""
+    db = get_database()
+    slug = 'category-feed'
+    db.create_podcast(slug, 'https://example.com/cat.xml', title='Category Feed')
+    markers = [
+        {'start': 10.0, 'end': 40.0, 'confidence': 0.9, 'sponsor': 'Acme',
+         'category': 'sponsor', 'action_applied': 'remove'},
+        {'start': 60.0, 'end': 100.0, 'confidence': 0.8, 'sponsor': 'Acme',
+         'category': 'cross_promo', 'action_applied': 'remove'},
+        {'start': 150.0, 'end': 170.0, 'confidence': 0.7},
+        {'start': 300.0, 'end': 330.0, 'confidence': 0.4, 'was_cut': False,
+         'category': 'sponsor', 'validation': {'decision': 'REJECT'}},
+    ]
+    db.upsert_episode(slug, 'cat-ep-1',
+                      original_url='https://example.com/c1.mp3',
+                      title='Episode One', status='processed')
+    db.save_episode_details(slug, 'cat-ep-1', ad_markers=markers)
+    yield {'slug': slug, 'db': db}
+    db.delete_podcast(slug)
+
+
+def test_rows_carry_category_and_action(app_client, seeded_categories):
+    _csrf(app_client)
+    body = app_client.get('/api/v1/detections?status=all').get_json()
+    by_start = {d['start']: d for d in body['detections']}
+    assert by_start[10.0]['category'] == 'sponsor'
+    assert by_start[10.0]['actionApplied'] == 'remove'
+    assert by_start[150.0]['category'] is None
+
+
+def test_category_filter_narrows_rows(app_client, seeded_categories):
+    _csrf(app_client)
+    body = app_client.get(
+        '/api/v1/detections?status=all&category=cross_promo').get_json()
+    assert [d['start'] for d in body['detections']] == [60.0]
+
+
+def test_category_none_matches_uncategorised(app_client, seeded_categories):
+    _csrf(app_client)
+    body = app_client.get('/api/v1/detections?status=all&category=none').get_json()
+    assert [d['start'] for d in body['detections']] == [150.0]
+
+
+def test_invalid_category_is_rejected(app_client, seeded_categories):
+    _csrf(app_client)
+    resp = app_client.get('/api/v1/detections?category=banana')
+    assert resp.status_code == 400
+
+
+def test_cut_summary_counts_only_cut_detections(app_client, seeded_categories):
+    _csrf(app_client)
+    body = app_client.get('/api/v1/detections?status=all').get_json()
+    cut = body['cutSummary']
+    # The REJECT marker was not cut and must not appear in any total.
+    assert cut['count'] == 3
+    assert cut['durationSeconds'] == 90.0
+    assert cut['byCategory']['sponsor'] == 1
+    assert cut['byCategory']['cross_promo'] == 1
+    assert cut['byCategory']['none'] == 1
+    assert cut['distinctSponsors'] == 1
+    assert cut['distinctPodcasts'] == 1
+
+
+def test_cut_summary_survives_the_category_filter(app_client, seeded_categories):
+    """Filtering to one category must not collapse the breakdown, or the header
+    could never show the mix it exists to show."""
+    _csrf(app_client)
+    body = app_client.get(
+        '/api/v1/detections?status=all&category=sponsor').get_json()
+    # Both sponsor markers, cut and rejected: category is orthogonal to status.
+    assert sorted(d['start'] for d in body['detections']) == [10.0, 300.0]
+    assert body['cutSummary']['byCategory']['cross_promo'] == 1
+    assert body['cutSummary']['count'] == 3
+
+
+def test_detections_carry_the_episode_duration(app_client, seeded_detections):
+    """The waveform editor slices its window against this; without it the
+    editor assumes a short default and opens on the wrong part of the
+    episode at max zoom."""
+    _csrf(app_client)
+    body = app_client.get('/api/v1/detections?status=all').get_json()
+    assert body['detections']
+    assert all(d['episodeDuration'] == 3600.0 for d in body['detections'])

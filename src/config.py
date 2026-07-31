@@ -169,6 +169,13 @@ def is_cue_backed(ad) -> bool:
             or ad.get('detection_stage') in ('cue_pair', 'manual'))
 
 
+def is_edge_cue_snapped(ad, edge: str) -> bool:
+    """True when the given edge ('start' or 'end') was snapped to a template
+    cue. A cue-anchored edge is measured evidence; text heuristics (phrase
+    refinement, content extension) must not move it."""
+    return bool((ad.get('cue_snap') or {}).get(edge))
+
+
 def is_pending_review(marker) -> bool:
     """A marker awaiting a human decision: held for review and not cut. Single
     source of truth for the pending-review bucket and count. Missing was_cut
@@ -244,6 +251,8 @@ NETWORK_TO_GLOBAL_THRESHOLD = 2    # Networks needed for global promotion
 PROMOTION_SIMILARITY_THRESHOLD = 0.75  # TF-IDF similarity for pattern merging
 SPONSOR_GLOBAL_THRESHOLD = 3       # Podcasts with same sponsor for global promotion
 PATTERN_CORRECTION_OVERLAP_THRESHOLD = 0.5  # 50% overlap triggers duration correction
+PATTERN_TIGHTEN_MIN_EXCESS_SECONDS = 15.0  # Pattern span overshoot before LLM bounds win
+PATTERN_TIGHTEN_MIN_CONFIDENCE = 0.9       # LLM confidence needed to tighten a pattern span
 # Minimum fraction of a span a user correction must cover to match it.
 # Single source for the validator's force-accept checks and the
 # auto-approve idempotency check in processing.py: a correction that would
@@ -608,6 +617,15 @@ def resolve_feed_processing_mode(podcast_row):
     if podcast_row.get('detection_mode') == DETECTION_MODE_KEEP_CONTENT:
         return PROCESSING_MODE_KEEP_CONTENT
     return PROCESSING_MODE_STANDARD
+
+
+def resolve_skip_second_pass(podcast_row):
+    """Whether the feed opts out of the pass-2 verification scan (issue #599).
+
+    Per-feed only, like detect_show_segments: there is no global default that
+    could silently disable verification everywhere. NULL/0 runs pass 2.
+    """
+    return bool(podcast_row and podcast_row.get('skip_second_pass'))
 
 
 # Per-feed chapter mode (issue #560): whether to preserve publisher-embedded
@@ -1286,7 +1304,9 @@ STAGE_TUNABLE_DEFAULTS = {
     'reviewer_reasoning_level': None,
     # chapter generation: boundary detection
     'chapter_boundary_temperature': 0.1,
-    'chapter_boundary_max_tokens': 300,
+    # 1500, not 300: at chapter_max_boundaries lines of "MM:SS Title" the old
+    # cap truncated the response. It never bound at the previous hard limit of 6.
+    'chapter_boundary_max_tokens': 1500,
     'chapter_boundary_reasoning_budget': None,
     'chapter_boundary_reasoning_level': None,
     # chapter generation: title generation
@@ -1294,6 +1314,12 @@ STAGE_TUNABLE_DEFAULTS = {
     'chapter_title_max_tokens': 500,
     'chapter_title_reasoning_budget': None,
     'chapter_title_reasoning_level': None,
+    # chapter density (global, not per-stage). Replaces a hardcoded
+    # min(duration / 600, 6) that capped every episode at 7 chapters.
+    'chapter_target_seconds': 600,
+    'chapter_window_seconds': 2700,
+    'chapter_max_boundaries': 40,
+    'chapter_min_duration_seconds': 180,
     # ollama context window (provider-scoped, not per-stage)
     'ollama_num_ctx': None,
     # detection window geometry (global, not per-stage)
@@ -1322,6 +1348,12 @@ STAGE_TUNABLE_RANGES = {
     'reviewer_max_tokens': (128, 32768),
     'chapter_boundary_max_tokens': (128, 32768),
     'chapter_title_max_tokens': (128, 32768),
+    # chapter density. Cross-field constraints (min <= target <= window) are
+    # enforced at the API layer, like the detection window pair below.
+    'chapter_target_seconds': (120, 3600),
+    'chapter_window_seconds': (600, 10800),
+    'chapter_max_boundaries': (1, 200),
+    'chapter_min_duration_seconds': (30, 900),
     # reasoning_budget (Anthropic extended thinking)
     'detection_reasoning_budget': (1024, 65536),
     'verification_reasoning_budget': (1024, 65536),
@@ -1490,10 +1522,30 @@ STAGE_TUNABLE_PAYLOAD_KEYS = (
     ('chapterTitleMaxTokens',          'chapter_title_max_tokens',        'int'),
     ('chapterTitleReasoningBudget',    'chapter_title_reasoning_budget',  'budget'),
     ('chapterTitleReasoningLevel',     'chapter_title_reasoning_level',   'level'),
+    ('chapterTargetSeconds',           'chapter_target_seconds',          'int'),
+    ('chapterWindowSeconds',           'chapter_window_seconds',          'int'),
+    ('chapterMaxBoundaries',           'chapter_max_boundaries',          'int'),
+    ('chapterMinDurationSeconds',      'chapter_min_duration_seconds',    'int'),
     ('ollamaNumCtx',                   'ollama_num_ctx',                  'ollama_ctx'),
     ('windowSizeSeconds',              'window_size_seconds',             'int'),
     ('windowOverlapSeconds',           'window_overlap_seconds',          'int'),
 )
+
+
+def resolve_chapter_geometry(settings: Optional[dict] = None):
+    """Read (target, window, max_boundaries, min_duration) for chapter density.
+
+    Clamped so a stored combination that slipped past API validation, or an env
+    override that never saw it, still yields workable geometry: target no larger
+    than the window, min_duration no larger than target.
+    """
+    target = get_stage_tunable('chapter_target_seconds', settings=settings)
+    window = get_stage_tunable('chapter_window_seconds', settings=settings)
+    max_boundaries = get_stage_tunable('chapter_max_boundaries', settings=settings)
+    min_duration = get_stage_tunable('chapter_min_duration_seconds', settings=settings)
+    target = min(target, window)
+    min_duration = min(min_duration, target)
+    return target, window, max_boundaries, min_duration
 
 
 def resolve_stage_tunables(prefix: str, settings: Optional[dict] = None):
@@ -1541,6 +1593,11 @@ def _validate_audio_bitrate(value: str) -> bool:
 
 def _validate_bool_string(value: str) -> bool:
     return str(value).strip().lower() in ('true', 'false', '1', '0', 'yes', 'no')
+
+
+def _validate_badge_position(value: str) -> bool:
+    from artwork_watermark import BADGE_POSITIONS  # lazy: keeps Pillow out of config import
+    return value in BADGE_POSITIONS
 
 
 # Truthy set shared by every boolean settings coercion. Mirror in
@@ -1689,6 +1746,7 @@ ENV_BACKED_SETTINGS = (
     ('auto_process_enabled', 'AUTO_PROCESS_ENABLED', 'true', _validate_bool_string),
     ('feed_auth_enabled', 'FEED_AUTH_ENABLED', 'false', _validate_bool_string),
     ('artwork_watermark_enabled', 'ARTWORK_WATERMARK_ENABLED', 'false', _validate_bool_string),
+    ('artwork_badge_position', 'ARTWORK_BADGE_POSITION', 'bottom-right', _validate_badge_position),
 )
 
 

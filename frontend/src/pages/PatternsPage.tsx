@@ -19,18 +19,23 @@ import { SegmentCategoryBadge } from '../components/SegmentCategoryBadge';
 import { PatternImportDialog } from '../components/PatternImportDialog';
 import { PatternExportDialog } from '../components/PatternExportDialog';
 import { formatDate } from '../utils/format';
+import {
+  SEGMENT_CATEGORY_FILTER_OPTIONS, UNSET_CATEGORY,
+} from '../utils/segmentCategory';
 import AdReviewTab from './patterns/AdReviewTab';
+import DetectedAdsTab from './patterns/DetectedAdsTab';
 import { btnOutline } from '../components/buttonStyles';
 
 type ScopeFilter = 'all' | 'global' | 'network' | 'podcast';
 type OriginFilter = 'all' | 'auto' | 'user';
 type SourceFilter = 'all' | 'local' | 'community' | 'imported';
-type PatternsTab = 'patterns' | 'ad-review';
+type PatternsTab = 'patterns' | 'ad-review' | 'detected-ads';
 
 function PatternsPage() {
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all');
   const [originFilter, setOriginFilter] = useState<OriginFilter>('all');
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const [categoryFilter, setCategoryFilter] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [showInactive, setShowInactive] = useState(false);
   const [selectedPattern, setSelectedPattern] = useState<AdPattern | null>(null);
@@ -43,8 +48,9 @@ function PatternsPage() {
   const limit = 20;
   const [searchParams, setSearchParams] = useSearchParams();
 
+  const tabParam = searchParams.get('tab');
   const activeTab: PatternsTab =
-    searchParams.get('tab') === 'ad-review' ? 'ad-review' : 'patterns';
+    tabParam === 'ad-review' || tabParam === 'detected-ads' ? tabParam : 'patterns';
 
   const switchTab = (tab: PatternsTab) => {
     setSearchParams(tab === 'patterns' ? {} : { tab });
@@ -124,6 +130,9 @@ function PatternsPage() {
     const filtered = patterns?.filter(pattern => {
       if (originFilter === 'user' && pattern.created_by !== 'user') return false;
       if (originFilter === 'auto' && pattern.created_by === 'user') return false;
+      if (categoryFilter === UNSET_CATEGORY && pattern.category) return false;
+      if (categoryFilter && categoryFilter !== UNSET_CATEGORY
+          && pattern.category !== categoryFilter) return false;
       if (searchQuery) {
         const query = searchQuery.toLowerCase();
         return (
@@ -154,7 +163,7 @@ function PatternsPage() {
 
       return sortDirection === 'asc' ? comparison : -comparison;
     });
-  }, [patterns, originFilter, searchQuery, sortField, sortDirection]);
+  }, [patterns, originFilter, categoryFilter, searchQuery, sortField, sortDirection]);
 
   // Pagination
   const totalPages = Math.ceil((sortedPatterns?.length || 0) / limit);
@@ -223,7 +232,11 @@ function PatternsPage() {
       />
 
       <div role="tablist" className="flex gap-1 border-b border-border mb-6">
-        {([['patterns', 'Patterns'], ['ad-review', 'Ad Review']] as const).map(
+        {([
+          ['patterns', 'Patterns'],
+          ['detected-ads', 'Detected Ads'],
+          ['ad-review', 'Ad Review'],
+        ] as const).map(
           ([key, label]) => (
             <button
               key={key}
@@ -242,6 +255,7 @@ function PatternsPage() {
         )}
       </div>
 
+      {activeTab === 'detected-ads' && <DetectedAdsTab />}
       {activeTab === 'ad-review' && <AdReviewTab />}
 
       {activeTab === 'patterns' && (<>
@@ -303,8 +317,9 @@ function PatternsPage() {
         <div className="flex flex-wrap gap-4 items-center">
           {/* Scope filter */}
           <div className="flex items-center gap-2">
-            <label className="text-sm text-muted-foreground">Scope:</label>
+            <label htmlFor="patterns-scope" className="text-sm text-muted-foreground">Scope:</label>
             <select
+              id="patterns-scope"
               value={scopeFilter}
               onChange={(e) => {
                 setScopeFilter(e.target.value as ScopeFilter);
@@ -321,8 +336,9 @@ function PatternsPage() {
 
           {/* Origin filter */}
           <div className="flex items-center gap-2">
-            <label className="text-sm text-muted-foreground">Origin:</label>
+            <label htmlFor="patterns-origin" className="text-sm text-muted-foreground">Origin:</label>
             <select
+              id="patterns-origin"
               value={originFilter}
               onChange={(e) => {
                 setOriginFilter(e.target.value as OriginFilter);
@@ -338,8 +354,9 @@ function PatternsPage() {
 
           {/* Source filter */}
           <div className="flex items-center gap-2">
-            <label className="text-sm text-muted-foreground">Source:</label>
+            <label htmlFor="patterns-source" className="text-sm text-muted-foreground">Source:</label>
             <select
+              id="patterns-source"
               value={sourceFilter}
               onChange={(e) => {
                 setSourceFilter(e.target.value as SourceFilter);
@@ -351,6 +368,24 @@ function PatternsPage() {
               <option value="local">Local</option>
               <option value="community">Community</option>
               <option value="imported">Imported</option>
+            </select>
+          </div>
+
+          {/* Category filter */}
+          <div className="flex items-center gap-2">
+            <label htmlFor="patterns-category" className="text-sm text-muted-foreground">Category:</label>
+            <select
+              id="patterns-category"
+              value={categoryFilter}
+              onChange={(e) => {
+                setCategoryFilter(e.target.value);
+                setPage(1);
+              }}
+              className="px-3 py-1.5 text-sm bg-secondary border border-border rounded"
+            >
+              {SEGMENT_CATEGORY_FILTER_OPTIONS.map(([value, label]) => (
+                <option key={value || 'all'} value={value}>{label}</option>
+              ))}
             </select>
           </div>
 
