@@ -200,6 +200,14 @@ def list_episodes(slug):
     })
 
 
+def _secure_artwork_url(url):
+    """Publisher episode cover, or None when it is not https.
+
+    There is no episode artwork proxy, so the client uses the feed cover.
+    """
+    return url if (url or '').startswith('https://') else None
+
+
 def _episode_base_json(ep):
     """Shared camelCase fields for the episode list and detail serializers.
 
@@ -228,7 +236,7 @@ def _episode_base_json(ep):
         # to mark cue templates or replay original audio) (#350).
         'hasOriginalAudio': bool(ep.get('original_file')),
         'error': ep.get('error_message'),
-        'artworkUrl': ep.get('artwork_url'),
+        'artworkUrl': _secure_artwork_url(ep.get('artwork_url')),
         'pendingReviewCount': ep.get('pending_review_count', 0),
     }
 

@@ -181,6 +181,10 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
                     forced_reason = 'artwork missing'
                 elif podcast and not podcast.get('podping_checked_at'):
                     forced_reason = 'podping declaration never read'
+                elif podcast and not podcast.get('channel_metadata_at'):
+                    # Rows written before the raw-XML read can hold a live
+                    # item's description or link (#596).
+                    forced_reason = 'channel metadata never read from raw XML'
                 if forced_reason:
                     refresh_logger.info(
                         f"[{slug}] Feed unchanged (304) but {forced_reason}, forcing full fetch")
@@ -239,25 +243,50 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
             status_service.complete_feed_refresh(slug, 0)
             return False
         if parsed_feed and parsed_feed.feed:
-            title = parsed_feed.feed.get('title')
+            # feedparser flattens <podcast:liveItem> into the channel dict,
+            # so read the raw children and fall back per field (#596).
+            channel_elem = rss_parser.find_channel_element(feed_content)
+            fields = rss_parser.resolve_channel_fields(
+                feed_content, parsed_feed=parsed_feed, channel=channel_elem)
+
+            title = fields['title'] or None
             # 10k bounds a pathological feed without visibly truncating real
             # descriptions (#596; the old 500 cap surfaced once the UI
             # stopped line-clamping).
-            description = parsed_feed.feed.get('description', '')[:10000]
+            description = fields['description'][:10000]
 
             # Extract artwork URL from RAW xml (feedparser corrupts the
             # channel image with the last per-episode itunes:image it sees).
-            artwork_url = rss_parser.extract_podcast_artwork_url(feed_content)
+            artwork_url = rss_parser.extract_podcast_artwork_url(
+                feed_content, channel=channel_elem)
 
             # Channel-level <link> is the show's website (#521); only keep
             # real http(s) URLs. Refreshed with the rest of the metadata.
-            website_url = (parsed_feed.feed.get('link') or '').strip()
+            website_url = fields['link'].strip()
             if not website_url.startswith(('http://', 'https://')):
                 website_url = None
 
             # Upstream <podcast:podping> declaration (#579): who may podping
             # this feed, and whether it opts out entirely.
-            podping = rss_parser.extract_podping_declaration(feed_content)
+            podping = rss_parser.extract_podping_declaration(
+                feed_content, channel=channel_elem)
+
+            # Captured before the write below: download_artwork re-reads the
+            # row, so once the new URL is stored it compares it against itself.
+            prev = podcast or {}
+            artwork_changed = bool(artwork_url) and artwork_url != prev.get('artwork_url')
+            changed = [
+                name for name, before, after in (
+                    ('title', prev.get('title'), title),
+                    ('description', prev.get('description'), description),
+                    ('artwork', prev.get('artwork_url'), artwork_url),
+                    ('website', prev.get('website_url'), website_url),
+                )
+                if after and before != after
+            ]
+            if changed:
+                refresh_logger.info(
+                    f"[{slug}] Feed metadata changed upstream: {', '.join(changed)}")
 
             # Update podcast metadata (and ETag if available) in a single DB call
             update_kwargs = dict(
@@ -267,8 +296,14 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
                 website_url=website_url,
                 **podping_declaration_columns(
                     podping.get('uses_podping'), podping.get('hive_accounts')),
+                channel_metadata_at=utc_now_iso(),
                 last_checked_at=utc_now_iso()
             )
+            if artwork_changed:
+                # Clear the cache flag with the URL: a download that then
+                # fails would otherwise leave the row claiming the new cover
+                # is cached, and no later refresh would retry it.
+                update_kwargs['artwork_cached'] = 0
             # On force=True, always overwrite the stored ETag/Last-Modified --
             # even with None -- so a server that drops the header on this
             # response can't cause the next conditional GET to send a stale
@@ -283,7 +318,7 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
             # episode-level tags and the user_tags layer.
             try:
                 from utils.community_tags import map_itunes_category
-                raw_cats = rss_parser.extract_podcast_categories(parsed_feed)
+                raw_cats = fields['categories']
                 rss_tags = sorted({
                     tag for cat in raw_cats
                     if (tag := map_itunes_category(cat))
@@ -293,7 +328,7 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
                 refresh_logger.warning(f"[{slug}] iTunes category mapping failed: {e}")
 
             # Detect DAI platform and network from feed metadata
-            feed_author = parsed_feed.feed.get('author', '')
+            feed_author = fields['author']
             network_info = pattern_service.update_podcast_metadata(
                 podcast_id=slug,
                 feed_url=feed_url,
@@ -308,9 +343,10 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
                     f"network={network_info.get('network_id')}"
                 )
 
-            # Download artwork if available
+            # A changed URL forces the fetch: the row already carries it.
             if artwork_url:
-                storage.download_artwork(slug, artwork_url)
+                storage.download_artwork(slug, artwork_url,
+                                         force=artwork_changed)
 
         # Discover all episodes from the feed (upsert as 'discovered').
         # Pass parsed_feed so extract_episodes does not re-parse the same
@@ -510,12 +546,12 @@ def refresh_feed_artwork(slug, podcast=None):
     if not podcast or not podcast.get('source_url'):
         return False
     try:
-        # Re-pull the source cover (a no-op when it is already cached, which
-        # skips save_artwork), then drop the cached badge variant explicitly so
-        # it recomposites with the current badge rendering and toggle even when
-        # the upstream cover itself has not changed.
+        # force, because the guard reads the same URL back off the row and
+        # would always match; without it this only cleared the badge variant.
+        # Then drop the cached badge so it recomposites with the current
+        # badge rendering even when the cover itself has not changed.
         if podcast.get('artwork_url'):
-            storage.download_artwork(slug, podcast['artwork_url'])
+            storage.download_artwork(slug, podcast['artwork_url'], force=True)
         storage.clear_watermark_cache(slug)
     except Exception as e:
         refresh_logger.warning(f"[{slug}] artwork refresh failed: {e}")

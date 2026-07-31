@@ -8,6 +8,7 @@ import { SegmentCategoryBadge, KeptBadge } from '../components/SegmentCategoryBa
 import PrevNextLink from '../components/PrevNextLink';
 import LoadingSpinner from '../components/LoadingSpinner';
 import Artwork from '../components/Artwork';
+import { episodeArtworkSrc } from '../utils/artworkUrl';
 import { EPISODE_STATUS_COLORS, isFailedStatus } from '../utils/episodeStatus';
 import { DETECTION_STAGE_META } from '../utils/detectionStage';
 import { CORROBORATION_META } from '../utils/corroboration';
@@ -124,9 +125,8 @@ function EpisodeDetail() {
     enabled: !!slug && !!episodeId,
   });
 
-  // Feed query is used only for its ``artworkUrl`` field; the API returns
-  // either the cached endpoint path or the upstream URL depending on cache
-  // state, mirroring the dashboard fallback chain.
+  // Fetched only for ``artworkUrl``, the fallback when the episode
+  // declares no cover of its own.
   const { data: feed } = useQuery({
     queryKey: ['feed', slug],
     queryFn: () => getFeed(slug!),
@@ -408,7 +408,7 @@ function EpisodeDetail() {
         <div className="flex gap-4">
           <div className="w-16 h-16 sm:w-24 sm:h-24 shrink-0">
             <Artwork
-              src={feed?.artworkUrl || `/api/v1/feeds/${slug}/artwork`}
+              src={episodeArtworkSrc(slug!, episode.artworkUrl, feed?.artworkUrl)}
               alt="Podcast artwork"
               className="w-full h-full object-cover rounded-lg"
             />

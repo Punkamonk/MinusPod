@@ -330,6 +330,9 @@ class SchemaMixin:
             # means never, which is what lets a 304 force one full fetch to
             # read it instead of waiting for the feed to change (#579).
             ('podping_checked_at', 'TEXT'),
+            # When a full body was last read with the raw-<channel> logic.
+            # NULL lets a 304 force one full fetch to repair the row (#596).
+            ('channel_metadata_at', 'TEXT'),
             # Per-feed segment category action overrides (issue #565): partial
             # JSON map of category -> action, merged over the global
             # segment_category_actions setting at resolve time.
@@ -1319,6 +1322,13 @@ class SchemaMixin:
             conn.rollback()
             logger.error(f"legacy skip_second_pass reset failed: {e}")
 
+        # Repair covers left stale by the skipped-download bug (#596).
+        try:
+            self._run_redownload_stale_artwork(conn)
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"artwork re-download priming failed: {e}")
+
         # Refresh default prompts to mention audio cue evidence (#350).
         # Marker phrase per prompt is unique to this revision and idempotent:
         # only overwrite a prompt that is still the stored default and lacks
@@ -1768,6 +1778,31 @@ class SchemaMixin:
         )
         conn.commit()
         logger.info("opus48-cost-fix: complete")
+
+    def _run_redownload_stale_artwork(self, conn):
+        """One-time artwork_cached clear so every cover re-downloads once (#596).
+
+        While the changed-URL download was being skipped, the row stored the
+        new URL against the old image on disk, so change detection alone
+        cannot repair those feeds: the stored URL already matches.
+        """
+        gate = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE name = 'redownload_stale_artwork'"
+        ).fetchone()
+        if gate is not None:
+            return
+
+        cur = conn.execute(
+            "UPDATE podcasts SET artwork_cached = 0 WHERE artwork_cached")
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (name) VALUES "
+            "('redownload_stale_artwork')"
+        )
+        conn.commit()
+        logger.info(
+            "Migration: queued %d feed(s) for one artwork re-download (#596)",
+            cur.rowcount,
+        )
 
     def _run_reset_legacy_skip_second_pass(self, conn):
         """One-time reset of `podcasts.skip_second_pass` values from the old column.
