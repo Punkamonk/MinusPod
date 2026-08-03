@@ -1,8 +1,8 @@
-import { useState, useMemo } from 'react';
-import { Pencil } from 'lucide-react';
-import { useParams, Link } from 'react-router';
+import { useState, useMemo, useRef, useEffect } from 'react';
+import { Pencil, Trash2 } from 'lucide-react';
+import { useParams, Link, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getFeed, feedsQueryOptions, getEpisodes, refreshFeed, updateFeed, reprocessAllEpisodes, ReprocessAllResult, bulkEpisodeAction, BulkAction, UpdateFeedPayload } from '../api/feeds';
+import { getFeed, feedsQueryOptions, getEpisodes, refreshFeed, updateFeed, reprocessAllEpisodes, ReprocessAllResult, bulkEpisodeAction, BulkAction, UpdateFeedPayload, deleteFeed } from '../api/feeds';
 import type { BulkActionResult } from '../api/types';
 import { useLocalStorageState } from '../hooks/useLocalStorageState';
 import { sortFeeds, FeedSortBy, DASHBOARD_SORT_KEY, DEFAULT_FEED_SORT } from '../utils/feedSort';
@@ -68,6 +68,7 @@ function reprocessModeVerb(mode: string): string {
 function FeedDetail() {
   const { slug } = useParams<{ slug: string }>();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editTitle, setEditTitle] = useState('');
   const [showReprocessConfirm, setShowReprocessConfirm] = useState(false);
@@ -84,6 +85,10 @@ function FeedDetail() {
   // Selection state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  // Delete confirms by a second click within 3s, matching the dashboard.
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [bulkResult, setBulkResult] = useState<BulkActionResult | null>(null);
 
   const { data: feed, isLoading: feedLoading, error: feedError } = useQuery({
@@ -129,6 +134,34 @@ function FeedDetail() {
       queryClient.invalidateQueries({ queryKey: ['episodes', slug] });
     },
   });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteFeed(slug!),
+    onMutate: () => setActionError(null),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['feeds'] });
+      navigate('/');
+    },
+    onError: (err) => {
+      setDeleteConfirm(false);
+      setActionError((err as Error).message);
+    },
+  });
+
+  // The timer outlives the page on a successful delete, which navigates away.
+  useEffect(() => () => {
+    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+  }, []);
+
+  const handleDeleteFeed = () => {
+    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+    if (deleteConfirm) {
+      deleteMutation.mutate();
+    } else {
+      setDeleteConfirm(true);
+      deleteTimerRef.current = setTimeout(() => setDeleteConfirm(false), 3000);
+    }
+  };
 
   const updateMutation = useMutation({
     mutationFn: (data: UpdateFeedPayload) => updateFeed(slug!, data),
@@ -370,9 +403,16 @@ function FeedDetail() {
               labelClassName="text-sm"
             />
           </div>
-          <div className="flex gap-2">
+          {/* Wraps rather than overflowing: every child is whitespace-nowrap, so
+              without this the group keeps its intrinsic width and pushes the last
+              button through the card's padding on a narrow screen. No
+              items-center, so the buttons keep flex's default stretch and the
+              icon-only delete stays the same height as the labelled ones. */}
+          <div className="flex flex-wrap justify-end gap-2">
             <DropdownMenu
-              triggerLabel={reprocessAllMutation.isPending ? 'Queuing...' : 'Reprocess All'}
+              triggerLabel={reprocessAllMutation.isPending ? 'Queuing...' : (
+                <><span className="sm:hidden">Reprocess</span><span className="hidden sm:inline">Reprocess All</span></>
+              )}
               triggerClassName={`px-3 py-1.5 sm:px-4 sm:py-2 text-sm rounded ${btnSecondary} disabled:opacity-50 transition-colors flex items-center gap-2 whitespace-nowrap`}
               disabled={reprocessAllMutation.isPending}
               title="Reprocess all processed episodes"
@@ -405,7 +445,9 @@ function FeedDetail() {
               ]}
             />
             <DropdownMenu
-              triggerLabel={refreshMutation.isPending ? 'Refreshing...' : 'Refresh Feed'}
+              triggerLabel={refreshMutation.isPending ? 'Refreshing...' : (
+                <><span className="sm:hidden">Refresh</span><span className="hidden sm:inline">Refresh Feed</span></>
+              )}
               triggerClassName={`px-3 py-1.5 sm:px-4 sm:py-2 text-sm rounded ${btnPrimary} disabled:opacity-50 transition-colors flex items-center gap-2 whitespace-nowrap`}
               disabled={refreshMutation.isPending}
               title="Refresh feed"
@@ -422,6 +464,17 @@ function FeedDetail() {
                 },
               ]}
             />
+            {/* Same button and confirm flow as the dashboard's feed cards. */}
+            <button
+              onClick={handleDeleteFeed}
+              disabled={deleteMutation.isPending}
+              className={`inline-flex items-center justify-center gap-2 px-3 py-1.5 sm:px-4 sm:py-2 text-sm rounded ${btnDestructive} disabled:opacity-50 transition-colors`}
+              title="Delete feed"
+              aria-label="Delete feed"
+            >
+              <Trash2 className="w-4 h-4 sm:hidden" />
+              <span className="hidden sm:inline">Delete</span>
+            </button>
           </div>
         </div>
       </div>
@@ -705,6 +758,31 @@ function FeedDetail() {
           </div>
         </Modal>
       )}
+      {/* Same bottom-right confirm/error toasts the dashboard uses. */}
+      {(deleteConfirm || actionError) && (
+        <div className="fixed bottom-4 right-4 flex flex-col items-end gap-2">
+          {actionError && (
+            <div className="max-w-sm bg-destructive/10 border border-destructive text-destructive rounded-lg p-4 shadow-lg text-sm flex items-start gap-3">
+              <span className="flex-1">{actionError}</span>
+              <button
+                onClick={() => setActionError(null)}
+                aria-label="Dismiss error"
+                className="shrink-0 text-destructive/70 hover:text-destructive"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          )}
+          {deleteConfirm && (
+            <div className="bg-card border border-border rounded-lg p-4 shadow-lg">
+              <p className="text-sm text-foreground">Click delete again to confirm</p>
+            </div>
+          )}
+        </div>
+      )}
+
     </div>
   );
 }
