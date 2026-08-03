@@ -121,29 +121,34 @@ class AudioAnalyzer:
 
         return settings
 
-    def _load_cue_config(self, feed_id: Optional[int] = None):
+    def _load_cue_config(self, feed_id: Optional[int] = None, force: bool = False,
+                         errors: Optional[List[str]] = None):
         """Resolve the audio cue detector for this run (issue #350).
 
         This analyzer is a long-lived singleton, so reading the settings here --
         not at construction -- lets the Settings toggle take effect without a
         container restart. Gated by the master ``audio_cue_detection_enabled``
-        toggle. When it is on:
+        toggle, unless ``force`` is set (cue-only preset runs): force bypasses
+        the toggle for the template path only, since forcing the spectral
+        fallback would mint pair candidates from coarse bursts.
 
         1. If the feed has at least one enabled cue template, use the per-feed
            template matcher -- it finds the exact user-marked sound.
         2. Otherwise fall back to the spectral burst detector.
 
-        When the toggle is off, no cue detector runs, so boundary snap and the
-        cue prompt block stay inert. Both detectors expose ``.detect(audio_path)``
-        and emit the same ``audio_cue`` ``AudioSegmentSignal``, so the analyze()
-        invocation and all downstream consumers are identical. Returns
-        ``(enabled, detector)``; the detector is None when cue detection is off
-        or no DB is available.
+        When the toggle is off, no cue detector runs, unless ``force`` is set
+        and the template matcher fails to load: that failure is logged and,
+        via ``errors``, surfaced on the analysis result rather than silent.
+        Both detectors expose ``.detect(audio_path)`` and emit the same
+        ``audio_cue`` ``AudioSegmentSignal``. Returns ``(enabled, detector)``;
+        the detector is None when cue detection is off or no DB is available.
         """
         if not self.db:
             return False, None
         try:
-            if not self.db.get_setting_bool('audio_cue_detection_enabled', default=False):
+            globally_enabled = self.db.get_setting_bool(
+                'audio_cue_detection_enabled', default=False)
+            if not force and not globally_enabled:
                 return False, None
 
             # Per-feed templates take precedence when the feed has any enabled.
@@ -153,14 +158,26 @@ class AudioAnalyzer:
                 if feed_id is not None else []
             )
             if templates:
-                score = resolve_cue_template_score(self.db, feed_id)
-                near_miss_floor = resolve_near_miss_floor(score)
-                matcher = AudioCueTemplateMatcher(
-                    templates=templates, score_threshold=score,
-                    formant_atten_db=self.db.get_setting_float(
-                        'audio_cue_formant_atten_db', AUDIO_CUE_FORMANT_ATTEN_DB),
-                    near_miss_floor=near_miss_floor,
-                )
+                try:
+                    score = resolve_cue_template_score(self.db, feed_id)
+                    near_miss_floor = resolve_near_miss_floor(score)
+                    matcher = AudioCueTemplateMatcher(
+                        templates=templates, score_threshold=score,
+                        formant_atten_db=self.db.get_setting_float(
+                            'audio_cue_formant_atten_db', AUDIO_CUE_FORMANT_ATTEN_DB),
+                        near_miss_floor=near_miss_floor,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Cue detection: feed_id={feed_id} matcher construction "
+                        f"failed: {e}")
+                    if force:
+                        msg = (f"Cue detection: force requested for feed_id={feed_id} "
+                               f"but matcher construction failed: {e}")
+                        logger.error(msg)
+                        if errors is not None:
+                            errors.append(msg)
+                    return False, None
                 if matcher.is_usable:
                     logger.info(
                         f"Cue detection: using {len(templates)} per-feed "
@@ -171,6 +188,19 @@ class AudioAnalyzer:
                     f"Cue detection: feed_id={feed_id} templates failed to "
                     "load; falling back to spectral detector"
                 )
+                if force:
+                    # force (cue-only) with no usable matcher cuts nothing from
+                    # templates this run; surface it instead of failing silently.
+                    msg = (f"Cue detection: force requested for feed_id={feed_id} "
+                           f"but {len(templates)} template(s) produced no usable "
+                           f"matcher")
+                    logger.error(msg)
+                    if errors is not None:
+                        errors.append(msg)
+
+            # Force alone must never activate the spectral fallback.
+            if not globally_enabled:
+                return False, None
 
             from config import (
                 AUDIO_CUE_FREQ_MIN_HZ, AUDIO_CUE_FREQ_MAX_HZ,
@@ -248,6 +278,7 @@ class AudioAnalyzer:
         run_parallel: bool = False,
         status_callback: Optional[callable] = None,
         feed_id: Optional[int] = None,
+        force_cue_detection: bool = False,
     ) -> AudioAnalysisResult:
         """
         Run audio analysis (volume + transition detection).
@@ -259,6 +290,8 @@ class AudioAnalyzer:
             status_callback: Optional callback(stage, progress) for status updates
             feed_id: Optional feed PK; when set, selects the per-feed cue
                 template matcher over the spectral fallback (issue #350)
+            force_cue_detection: Bypass the global cue toggle for the
+                per-feed template path (cue-only preset runs)
 
         Returns:
             AudioAnalysisResult with all detected signals
@@ -290,7 +323,8 @@ class AudioAnalyzer:
 
         # Resolve per-run component config up front so independent components
         # can be scheduled together. These are DB reads only -- no audio I/O.
-        cue_enabled, cue_detector = self._load_cue_config(feed_id=feed_id)
+        cue_enabled, cue_detector = self._load_cue_config(
+            feed_id=feed_id, force=force_cue_detection, errors=errors)
         silence_detector = self._load_silence_config(feed_id=feed_id)
         splice_enabled = self._splice_enabled()
 

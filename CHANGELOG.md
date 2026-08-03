@@ -9,6 +9,151 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
+## [2.84.5] - 2026-08-02
+
+### Fixed
+
+- The experimental label on the per-feed pair-synthesis override no longer
+  pushes its dropdown out of line with the rest of the cue tuning controls.
+  It now sits at the end of the row, after the "Empty = use global" hint.
+
+## [2.84.4] - 2026-08-02
+
+### Fixed
+
+- `react-dom` is pinned to the same version as `react` again. A dependency
+  bump moved `react` to 19.2.8 and left `react-dom` at 19.2.7, and React
+  refuses to run when the two differ, which stopped every frontend test file
+  from loading. Production builds strip that check, so the shipped UI was not
+  affected, but the mismatch is unsupported either way.
+- A podcast whose artwork URL serves the wrong content type is no longer
+  refetched on every feed refresh. The download failed, left the cached flag
+  unset, and so ran again the next cycle, costing a request and a warning
+  every few minutes for as long as the publisher's host stayed broken. A
+  failed URL is now remembered for six hours. Changing the artwork URL, or
+  refreshing artwork by hand, retries at once.
+- Container startup reports when it cannot change ownership of entries under
+  the data directory, rather than continuing silently (issue #604). A
+  container that dropped `CAP_CHOWN` fails every entry, and without the
+  warning the only symptom was the app being unable to write.
+- Sponsor guessing no longer treats a capitalized filler word as a brand.
+  The word after an ad transition phrase was compared against the skip list
+  with its original case, so a transcript reading "brought to you by The
+  folks at ..." produced a sponsor named "The", and "by Today Show" produced
+  "Today". Split patterns feed this name to the known-sponsor table, so a
+  junk brand could be created there. The comparison now folds case and also
+  rejects the shared extraction-failure vocabulary the detector and pattern
+  creation already use, plus show-credit verbs such as "produced", which
+  follow the sponsor read closely enough to be picked up as brands.
+
+## [2.84.3] - 2026-08-02
+
+### Changed
+
+- Cue-driven ad cutting is now labelled experimental in the UI: the global
+  "Create ads from cue pairs" toggle, the per-feed pair-synthesis override, and
+  the cue-only processing preset. These are the paths that can cut audio from
+  audio-cue evidence alone, without an LLM reading the span. Cue snapping and
+  silence snapping are deliberately not labelled, since they only move the
+  edges of a cut the detector already found.
+
+## [2.84.2] - 2026-08-02
+
+### Fixed
+
+- An unrecognized `WHISPER_DEVICE` now transcribes on CPU with a warning
+  instead of failing every chunk (issue #605). CTranslate2 accepts only `cpu`
+  and `cuda`, and the value went to it unvalidated while the CUDA availability
+  check and the compute-type fallback were both keyed on the exact string
+  `cuda`, so a near miss such as `gpu` skipped every guard and left gaps in the
+  transcript. The system status endpoint now reports the effective device
+  rather than the raw setting.
+- The container startup ownership scan says so when it cannot read part of the
+  data directory, instead of reporting zero unowned files. A container without
+  `CAP_DAC_OVERRIDE` cannot traverse every entry, and a silent zero reads as
+  "nothing to migrate".
+
+### Changed
+
+- The GPU image now ships PyTorch built against CUDA 12.9 instead of 12.6, so
+  it carries kernels for Blackwell cards (sm_120, the RTX 50 series) and for
+  sm_100. Still a CUDA 12.x wheel, so the driver floor stays at 525. The trade
+  is that CUDA 12.9 drops the sm_50, sm_60, and sm_70 kernels 12.6 carried, so
+  Maxwell, Pascal, and Volta cards will now print an unsupported-architecture
+  warning from PyTorch. Transcription is unaffected on those cards because
+  CTranslate2 does the transcribing and is compiled separately; PyTorch is
+  only used here to report VRAM, and a failed reading falls back to default
+  chunk sizing. The GPU image grows by about 1.6 GB.
+
+## [2.84.1] - 2026-08-02
+
+### Fixed
+
+- Ad detections are no longer dropped when a local model answers with the
+  singular `{"ad": [...]}` wrapper instead of `{"ads": [...]}`. The response
+  parser already accepted several wrapper spellings but not this one, so a
+  window with real detections parsed as zero ads. Seen with Ollama models
+  such as qwen2.5, which have no strict schema enforcement to hold them to
+  the requested key. Thanks to @combwizard for the report and the fix
+  (PR #603).
+- Container startup no longer skips the data-directory ownership migration
+  when `find` cannot read part of the volume (issue #604). Under
+  `set -o pipefail` an unreadable entry failed the whole pipeline, and the
+  inline `|| echo 0` fallback appended a second value instead of replacing
+  the count, leaving `0\n0` for the numeric comparison to reject with an
+  arithmetic syntax error. Installs on network-mounted volumes (NFS with
+  root_squash, for example) hit this most often, which is also where the
+  ownership migration matters most.
+
+## [2.84.0] - 2026-08-01
+
+### Added
+
+- Per-feed processing mode is now a single writable preset instead of three
+  separate controls. `processingMode` on the feed PATCH endpoint accepts
+  `standard`, `keep_content`, `skip_detection`, or `passthrough` and writes
+  the underlying `passthroughEnabled`, `skipAdDetection`, and `detectionMode`
+  columns canonically in one request; sending it together with any of those
+  three fields is rejected with a 400. The three legacy fields are still
+  accepted on their own for existing API callers. Feed settings now offer
+  one "Processing mode" select covering all four states, replacing the old
+  detection-mode dropdown plus the separate "Skip ad detection" and
+  "Pass-through" toggles.
+- New `cue_only` processing mode: cuts come from cue pairs and previously
+  learned ad patterns, with no LLM detection call. It requires the feed to have
+  at least one enabled `ad_break_start` template and one enabled
+  `ad_break_end` template; enabling the mode is rejected with a 400
+  otherwise, since a boundary-only cue (the `ad_break_boundary` type) can
+  pair across show content without an LLM pass to catch the mistake.
+  Fingerprint, text-pattern, and cross-fetch differential detection still
+  run; the LLM detection pass, LLM reviewer, pass-2 verification, and LLM
+  redetection are all off in this mode (redetection returns a 409).
+- Per-feed `cueOnlySafety` policy for `cue_only` feeds. `hold_new` (the
+  default) holds a template's synthesized cuts for review until it has 3
+  episodes with a paired start/end match; `auto_cut` cuts immediately but
+  still holds any pair scoring below 0.90 confidence. Holds carry the new
+  `cue_template_unproven` or `cue_low_confidence` reason.
+- Cue template drift detection: the template list now shows each template's
+  last match and a "quiet" badge, and a `cue_only` run fires the new
+  `Cue Template Quiet` webhook and email event when a previously-matching
+  enabled template records no matches across the feed's last 5
+  telemetry-recorded episodes.
+- Per-feed `skipTranscription` toggle, valid only under `cue_only` mode.
+  Skipping transcription stops generated chapters and removes transcript
+  search and VTT subtitles for those episodes, but publisher chapters
+  (embedded ID3 or linked Podcasting 2.0 JSON) still get remapped onto the
+  cut audio. Runs are labeled "(cue-only)" and, when transcription is
+  skipped, also "(no transcript)" in the episode's run list.
+
+### Fixed
+
+- Cue-only template eligibility is now enforced on template edits and
+  deletes, not just on the `processingMode` PATCH. Disabling, retyping, or
+  deleting a `cue_only` feed's last enabled `ad_break_start` or
+  `ad_break_end` template returns a 409 instead of silently leaving the feed
+  unable to cut anything; a network-scope template mutation checks every
+  sibling feed on the network too, not just the template's owner.
+
 ## [2.83.3] - 2026-07-31
 
 ### Added

@@ -169,6 +169,54 @@ class CueDetectionMixin:
             (podcast_id,)).fetchall()
         return [(r['match_score'], r['verdict']) for r in rows]
 
+    def cue_template_paired_episode_counts(self, podcast_id: int) -> Dict[int, int]:
+        """Distinct episodes per template with a paired outcome; cue-only safety input."""
+        conn = self.get_connection()
+        rows = conn.execute(
+            """SELECT template_id, COUNT(DISTINCT episode_id) AS n
+               FROM cue_detections
+               WHERE podcast_id = ? AND template_id IS NOT NULL AND outcome = 'pair'
+               GROUP BY template_id""",
+            (podcast_id,),
+        ).fetchall()
+        return {r['template_id']: r['n'] for r in rows}
+
+    def cue_template_recent_activity(self, podcast_id: int,
+                                     recent_episodes: int = 5) -> List[Dict]:
+        """Per-template last match / quiet flag for drift surfacing (issue #599).
+
+        Quiet: matched at least once ever, but zero above-threshold rows in
+        the feed's ``recent_episodes`` most recently-seen episodes.
+        """
+        conn = self.get_connection()
+        recent = [r['episode_id'] for r in conn.execute(
+            """SELECT episode_id, MAX(created_at) AS seen FROM cue_detections
+               WHERE podcast_id = ? GROUP BY episode_id
+               ORDER BY seen DESC LIMIT ?""", (podcast_id, recent_episodes))]
+        # Recency folded into the grouped query (was one SELECT-1 per matched
+        # template); recent_hit_expr is only meaningful when recent is non-empty.
+        placeholders = ','.join('?' * len(recent))
+        recent_hit_expr = (
+            f"MAX(CASE WHEN {_ABOVE_THRESHOLD} AND episode_id IN ({placeholders}) "
+            f"THEN 1 ELSE 0 END)" if recent else "0"
+        )
+        params = (*recent, podcast_id) if recent else (podcast_id,)
+        rows = conn.execute(
+            f"""SELECT template_id,
+                      MAX(CASE WHEN {_ABOVE_THRESHOLD} THEN created_at END) AS last_match,
+                      COUNT(DISTINCT CASE WHEN {_ABOVE_THRESHOLD} THEN episode_id END) AS matched,
+                      {recent_hit_expr} AS recent_hit
+               FROM cue_detections
+               WHERE podcast_id = ? AND template_id IS NOT NULL
+               GROUP BY template_id""", params).fetchall()
+        out = []
+        for r in rows:
+            # No episodes recorded yet -> quiet stays False regardless of matched.
+            quiet = bool(r['matched']) and bool(recent) and not bool(r['recent_hit'])
+            out.append({'templateId': r['template_id'], 'lastMatchAt': r['last_match'],
+                        'matchedEpisodes': r['matched'], 'quiet': quiet})
+        return out
+
     def cue_template_verdict_scores(self, podcast_id: int) -> List[Dict]:
         """Reviewed scores grouped per template, for verdict hints."""
         conn = self.get_connection()

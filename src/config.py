@@ -50,6 +50,8 @@ HOLD_REASON_DIFFERENTIAL_UNCORROBORATED = 'differential_uncorroborated'
 # confidence to auto-cut, too high to silently discard (see
 # _gate_verification_ads_by_confidence's fall-through in processing.py).
 HOLD_REASON_VERIFICATION_MISS = 'verification_miss'
+HOLD_REASON_CUE_TEMPLATE_UNPROVEN = 'cue_template_unproven'
+HOLD_REASON_CUE_LOW_CONFIDENCE = 'cue_low_confidence'
 
 # Segment categories (issue #565): what kind of content a marker spans. A
 # marker may carry none: unset means no stage classified it, and only action
@@ -567,6 +569,7 @@ KEEP_CONTENT_MAX_SINGLE_AD_SECONDS = 420.0  # absolute cap: one cut longer than 
 
 DETECTION_MODE_BLACKLIST = 'blacklist'
 DETECTION_MODE_KEEP_CONTENT = 'keep_content'
+DETECTION_MODE_CUE_ONLY = 'cue_only'
 DETECTION_MODES = (DETECTION_MODE_BLACKLIST, DETECTION_MODE_KEEP_CONTENT)
 
 
@@ -588,19 +591,19 @@ def resolve_detection_mode(db, slug):
 
 # Per-feed processing mode: the effective pipeline behavior resolved from
 # three independent podcasts columns (passthrough_enabled, skip_ad_detection,
-# detection_mode). The columns are deliberately NOT exclusive (issue #537):
-# a user can leave skip-detection set while temporarily enabling passthrough;
-# precedence decides which one wins.
+# detection_mode). Columns remain independent for legacy per-field writes (issue #537),
+# but a processingMode preset write canonicalizes all three.
 PROCESSING_MODE_PASSTHROUGH = 'passthrough'
 PROCESSING_MODE_SKIP_DETECTION = 'skip_detection'
 PROCESSING_MODE_KEEP_CONTENT = 'keep_content'
 PROCESSING_MODE_STANDARD = 'standard'
+PROCESSING_MODE_CUE_ONLY = 'cue_only'
 
 
 def resolve_feed_processing_mode(podcast_row):
     """Effective processing mode from an already-fetched podcasts row.
 
-    Precedence: passthrough > skip_ad_detection > keep_content > standard.
+    Precedence: passthrough > skip_ad_detection > keep_content > cue_only > standard.
     This matches the pipeline's historical branch ordering: passthrough
     returned before the skip check ran, and a skipped detection stage never
     consulted detection_mode. Keep-content semantics mirror
@@ -616,7 +619,27 @@ def resolve_feed_processing_mode(podcast_row):
         return PROCESSING_MODE_SKIP_DETECTION
     if podcast_row.get('detection_mode') == DETECTION_MODE_KEEP_CONTENT:
         return PROCESSING_MODE_KEEP_CONTENT
+    if podcast_row.get('detection_mode') == DETECTION_MODE_CUE_ONLY:
+        return PROCESSING_MODE_CUE_ONLY
     return PROCESSING_MODE_STANDARD
+
+
+# Invariant: resolve_feed_processing_mode(updates) == mode for every entry
+# below (guarded by test_round_trip_through_resolver).
+PROCESSING_MODE_COLUMN_UPDATES = {
+    PROCESSING_MODE_PASSTHROUGH: {
+        'passthrough_enabled': 1, 'skip_ad_detection': 0, 'detection_mode': None},
+    PROCESSING_MODE_SKIP_DETECTION: {
+        'passthrough_enabled': 0, 'skip_ad_detection': 1, 'detection_mode': None},
+    PROCESSING_MODE_KEEP_CONTENT: {
+        'passthrough_enabled': 0, 'skip_ad_detection': 0,
+        'detection_mode': DETECTION_MODE_KEEP_CONTENT},
+    PROCESSING_MODE_STANDARD: {
+        'passthrough_enabled': 0, 'skip_ad_detection': 0, 'detection_mode': None},
+    PROCESSING_MODE_CUE_ONLY: {
+        'passthrough_enabled': 0, 'skip_ad_detection': 0,
+        'detection_mode': DETECTION_MODE_CUE_ONLY},
+}
 
 
 def resolve_skip_second_pass(podcast_row):
@@ -626,6 +649,24 @@ def resolve_skip_second_pass(podcast_row):
     could silently disable verification everywhere. NULL/0 runs pass 2.
     """
     return bool(podcast_row and podcast_row.get('skip_second_pass'))
+
+
+CUE_ONLY_SAFETY_HOLD_NEW = 'hold_new'
+CUE_ONLY_SAFETY_AUTO_CUT = 'auto_cut'
+CUE_ONLY_SAFETY_VALUES = (CUE_ONLY_SAFETY_HOLD_NEW, CUE_ONLY_SAFETY_AUTO_CUT)
+CUE_ONLY_PROVEN_EPISODES = 3      # episodes with a paired match before a template auto-cuts
+CUE_ONLY_AUTOCUT_CONFIDENCE = 0.90  # auto_cut safety floor, above the 0.85 pair floor
+
+
+def resolve_skip_transcription(podcast_row):
+    """Per-feed transcription opt-out; only honored in cue_only mode."""
+    return bool(podcast_row and podcast_row.get('skip_transcription'))
+
+
+def resolve_cue_only_safety(podcast_row):
+    """Per-feed cue-only safety policy; unknown or unset means hold_new."""
+    value = (podcast_row or {}).get('cue_only_safety')
+    return value if value in CUE_ONLY_SAFETY_VALUES else CUE_ONLY_SAFETY_HOLD_NEW
 
 
 # Per-feed chapter mode (issue #560): whether to preserve publisher-embedded
@@ -981,6 +1022,16 @@ def is_transition_cue(details):
 AUDIO_CUE_START_EDGE_ROLES = ('start', 'boundary')
 AUDIO_CUE_END_EDGE_ROLES = ('end', 'boundary')
 
+CUE_ONLY_REQUIRED_ROLES = ('start', 'end')
+
+
+def cue_only_missing_roles(rows):
+    """Required cue-only roles (start/end) with no enabled template in rows."""
+    roles = {audio_cue_type_role(r.get('cue_type') or AUDIO_CUE_TYPE_DEFAULT)
+             for r in rows if r.get('enabled')}
+    return set(CUE_ONLY_REQUIRED_ROLES) - roles
+
+
 # ============================================================
 # Audio Processing
 # ============================================================
@@ -1068,6 +1119,22 @@ WHISPER_COMPUTE_TYPES = ('auto', 'float16', 'int8_float16', 'int8', 'float32')
 WHISPER_COMPUTE_TYPE_DEFAULT = 'auto'
 # Fallback order when float16 init fails on CUDA (CC < 7.0: Pascal/Maxwell).
 WHISPER_COMPUTE_TYPE_FALLBACK_CHAIN = ('int8_float16', 'int8', 'float32')
+
+# Devices CTranslate2 accepts from us. Anything else reaches it as an unknown
+# device string and kills model init, so resolve_whisper_device() drops to CPU.
+WHISPER_DEVICES = ('cpu', 'cuda')
+WHISPER_DEVICE_DEFAULT = 'cpu'
+
+
+def resolve_whisper_device():
+    """Validated WHISPER_DEVICE. An unrecognized value degrades to CPU (#605)."""
+    raw = (os.environ.get('WHISPER_DEVICE') or WHISPER_DEVICE_DEFAULT).strip().lower()
+    if raw in WHISPER_DEVICES:
+        return raw
+    _tunable_logger.warning(
+        "WHISPER_DEVICE=%r is not one of %s; transcribing on CPU instead",
+        raw, ', '.join(WHISPER_DEVICES))
+    return WHISPER_DEVICE_DEFAULT
 
 # VAD gap detector: catches audio regions Whisper's VAD dropped (sped-up
 # disclaimers, distorted ad tails) that the transcript-based ad detectors

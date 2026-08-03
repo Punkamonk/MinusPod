@@ -111,3 +111,297 @@ def test_patch_skip_second_pass_rejects_non_bool(app_client, seeded_feed):
     resp = app_client.patch(f'/api/v1/feeds/{slug}',
                             json={'skipSecondPass': 'yes'}, headers=headers)
     assert resp.status_code == 400
+
+
+class TestProcessingModePatch:
+    @pytest.mark.parametrize('mode', [
+        'passthrough', 'skip_detection', 'keep_content', 'standard'])
+    def test_patch_processing_mode_round_trips(self, app_client, seeded_feed, mode):
+        slug = seeded_feed['slug']
+        _authed(app_client)
+        headers = _csrf_headers(app_client)
+
+        resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                                json={'processingMode': mode}, headers=headers)
+        assert resp.status_code == 200
+        assert resp.get_json()['processingMode'] == mode
+
+    def test_preset_overwrites_layered_legacy_flags(self, app_client, seeded_feed):
+        # Layer skip under passthrough via legacy fields (issue #537), then
+        # a preset write canonicalizes: standard clears both.
+        slug = seeded_feed['slug']
+        _authed(app_client)
+        headers = _csrf_headers(app_client)
+
+        app_client.patch(f'/api/v1/feeds/{slug}',
+                         json={'skipAdDetection': True}, headers=headers)
+        app_client.patch(f'/api/v1/feeds/{slug}',
+                         json={'passthroughEnabled': True}, headers=headers)
+        resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                                json={'processingMode': 'standard'}, headers=headers)
+        body = resp.get_json()
+        assert body['processingMode'] == 'standard'
+        assert body['passthroughEnabled'] is False
+        assert body['skipAdDetection'] is False
+
+    def test_legacy_fields_still_layer(self, app_client, seeded_feed):
+        # Legacy per-field semantics unchanged: passthrough off reveals skip.
+        slug = seeded_feed['slug']
+        _authed(app_client)
+        headers = _csrf_headers(app_client)
+
+        app_client.patch(f'/api/v1/feeds/{slug}',
+                         json={'skipAdDetection': True, 'passthroughEnabled': True},
+                         headers=headers)
+        resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                                json={'passthroughEnabled': False}, headers=headers)
+        assert resp.get_json()['processingMode'] == 'skip_detection'
+
+    def test_mixing_preset_and_legacy_fields_rejected(self, app_client, seeded_feed):
+        slug = seeded_feed['slug']
+        _authed(app_client)
+        headers = _csrf_headers(app_client)
+
+        resp = app_client.patch(
+            f'/api/v1/feeds/{slug}',
+            json={'processingMode': 'standard', 'passthroughEnabled': True},
+            headers=headers)
+        assert resp.status_code == 400
+        assert 'processingMode' in resp.get_json()['error']
+
+    def test_invalid_preset_rejected(self, app_client, seeded_feed):
+        slug = seeded_feed['slug']
+        _authed(app_client)
+        headers = _csrf_headers(app_client)
+
+        resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                                json={'processingMode': 'bogus'}, headers=headers)
+        assert resp.status_code == 400
+
+
+def _add_template(db, slug, cue_type, enabled=1):
+    podcast = db.get_podcast_by_slug(slug)
+    template_id = db.create_cue_template(
+        podcast_id=podcast['id'], cue_type=cue_type,
+        source_episode_id='ep1', source_offset_s=1.0, duration_s=1.0,
+        sample_rate=22050, n_coeffs=13, mfcc_blob=b'\x00' * 52)
+    if not enabled:
+        db.update_cue_template(template_id, enabled=False)
+    return template_id
+
+
+class TestCueOnlyPatch:
+    def test_cue_only_rejected_without_role_typed_templates(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']
+        _authed(client)
+        resp = client.patch(f'/api/v1/feeds/{slug}',
+                            json={'processingMode': 'cue_only'},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 400
+        assert 'ad-break start' in resp.get_json()['error']
+
+    def test_cue_only_rejected_with_boundary_only(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        _add_template(db, slug, 'ad_break_boundary')
+        resp = client.patch(f'/api/v1/feeds/{slug}',
+                            json={'processingMode': 'cue_only'},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 400
+
+    def test_cue_only_accepted_with_start_and_end(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        _add_template(db, slug, 'ad_break_start')
+        _add_template(db, slug, 'ad_break_end')
+        resp = client.patch(f'/api/v1/feeds/{slug}',
+                            json={'processingMode': 'cue_only'},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 200
+        assert resp.get_json()['processingMode'] == 'cue_only'
+
+    def test_disabled_templates_do_not_count(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        _add_template(db, slug, 'ad_break_start', enabled=0)
+        _add_template(db, slug, 'ad_break_end')
+        resp = client.patch(f'/api/v1/feeds/{slug}',
+                            json={'processingMode': 'cue_only'},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 400
+
+
+class TestCueOnlySafetyAndTranscription:
+    def _enable_cue_only(self, client, slug, db):
+        _add_template(db, slug, 'ad_break_start')
+        _add_template(db, slug, 'ad_break_end')
+        client.patch(f'/api/v1/feeds/{slug}',
+                     json={'processingMode': 'cue_only'},
+                     headers=_csrf_headers(client))
+
+    def test_safety_round_trip_and_validation(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']
+        _authed(client)
+        resp = client.patch(f'/api/v1/feeds/{slug}',
+                            json={'cueOnlySafety': 'auto_cut'},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 200
+        assert resp.get_json()['cueOnlySafety'] == 'auto_cut'
+        resp = client.patch(f'/api/v1/feeds/{slug}',
+                            json={'cueOnlySafety': 'bogus'},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 400
+        resp = client.patch(f'/api/v1/feeds/{slug}',
+                            json={'cueOnlySafety': None},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 200
+        assert resp.get_json()['cueOnlySafety'] is None
+
+    def test_skip_transcription_requires_cue_only(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        resp = client.patch(f'/api/v1/feeds/{slug}',
+                            json={'skipTranscription': True},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 400
+        self._enable_cue_only(client, slug, db)
+        resp = client.patch(f'/api/v1/feeds/{slug}',
+                            json={'skipTranscription': True},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 200
+        assert resp.get_json()['skipTranscription'] is True
+
+
+class TestRetryAdDetectionModeGuard:
+    def test_retry_ad_detection_blocked_for_cue_only(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        _add_template(db, slug, 'ad_break_start')
+        _add_template(db, slug, 'ad_break_end')
+        client.patch(f'/api/v1/feeds/{slug}', json={'processingMode': 'cue_only'},
+                     headers=_csrf_headers(client))
+        resp = client.post(f'/api/v1/feeds/{slug}/episodes/a1b2c3d4e5f6/retry-ad-detection',
+                           headers=_csrf_headers(client))
+        assert resp.status_code == 409
+        assert 'cue_only' in resp.get_json()['error']
+
+    def test_retry_ad_detection_blocked_for_skip_detection(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']
+        _authed(client)
+        client.patch(f'/api/v1/feeds/{slug}', json={'processingMode': 'skip_detection'},
+                     headers=_csrf_headers(client))
+        resp = client.post(f'/api/v1/feeds/{slug}/episodes/a1b2c3d4e5f6/retry-ad-detection',
+                           headers=_csrf_headers(client))
+        assert resp.status_code == 409
+        assert 'skip_detection' in resp.get_json()['error']
+
+
+class TestCueOnlyTemplateEligibilityGuard:
+    """A template mutation must not silently break cue-only eligibility."""
+
+    def _enable_cue_only(self, client, slug, db):
+        start_id = _add_template(db, slug, 'ad_break_start')
+        end_id = _add_template(db, slug, 'ad_break_end')
+        client.patch(f'/api/v1/feeds/{slug}', json={'processingMode': 'cue_only'},
+                     headers=_csrf_headers(client))
+        return start_id, end_id
+
+    def test_disable_last_end_template_rejected(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        _, end_id = self._enable_cue_only(client, slug, db)
+        resp = client.patch(f'/api/v1/cue-templates/{end_id}', json={'enabled': False},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 409
+
+    def test_retype_last_end_template_rejected(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        _, end_id = self._enable_cue_only(client, slug, db)
+        resp = client.patch(f'/api/v1/cue-templates/{end_id}', json={'cueType': 'show_intro'},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 409
+
+    def test_delete_last_end_template_rejected(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        _, end_id = self._enable_cue_only(client, slug, db)
+        resp = client.delete(f'/api/v1/cue-templates/{end_id}',
+                             headers=_csrf_headers(client))
+        assert resp.status_code == 409
+
+    def test_disable_retype_delete_succeed_on_standard_feed(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        disable_id = _add_template(db, slug, 'ad_break_end')
+        retype_id = _add_template(db, slug, 'ad_break_end')
+        delete_id = _add_template(db, slug, 'ad_break_end')
+        resp = client.patch(f'/api/v1/cue-templates/{disable_id}', json={'enabled': False},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 200
+        resp = client.patch(f'/api/v1/cue-templates/{retype_id}',
+                            json={'cueType': 'show_intro'}, headers=_csrf_headers(client))
+        assert resp.status_code == 200
+        resp = client.delete(f'/api/v1/cue-templates/{delete_id}',
+                             headers=_csrf_headers(client))
+        assert resp.status_code == 200
+
+    def test_disable_start_with_second_enabled_start_succeeds(self, app_client, seeded_feed):
+        client = app_client; slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        start_id, _ = self._enable_cue_only(client, slug, db)
+        _add_template(db, slug, 'ad_break_start')
+        resp = client.patch(f'/api/v1/cue-templates/{start_id}', json={'enabled': False},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 200
+
+
+class TestCueOnlyNetworkSiblingEligibilityGuard:
+    """A network-scope template mutation must also be checked against every
+    sibling feed on the same network, not just the owning feed."""
+
+    @pytest.fixture
+    def sibling(self, seeded_feed):
+        db = seeded_feed['db']
+        slug = 'pt-api-sibling'
+        db.create_podcast(slug, 'https://example.com/sibling.xml', 'Sibling')
+        db.update_podcast(seeded_feed['slug'], network_id='net-x')
+        db.update_podcast(slug, network_id='net-x')
+        yield slug
+        db.delete_podcast(slug)
+
+    def _network_end_template(self, db, owner_slug):
+        podcast = db.get_podcast_by_slug(owner_slug)
+        return db.create_cue_template(
+            podcast_id=podcast['id'], cue_type='ad_break_end',
+            source_episode_id='ep1', source_offset_s=1.0, duration_s=1.0,
+            sample_rate=22050, n_coeffs=13, mfcc_blob=b'\x00' * 52,
+            scope='network', network_id='net-x')
+
+    def test_disable_shared_end_template_rejected_naming_sibling(
+            self, app_client, seeded_feed, sibling):
+        client = app_client; owner_slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        end_id = self._network_end_template(db, owner_slug)
+        _add_template(db, sibling, 'ad_break_start')
+        client.patch(f'/api/v1/feeds/{sibling}', json={'processingMode': 'cue_only'},
+                     headers=_csrf_headers(client))
+
+        resp = client.patch(f'/api/v1/cue-templates/{end_id}', json={'enabled': False},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 409
+        assert sibling in resp.get_json()['error']
+
+    def test_disable_shared_end_template_succeeds_when_sibling_has_own(
+            self, app_client, seeded_feed, sibling):
+        client = app_client; owner_slug = seeded_feed['slug']; db = seeded_feed['db']
+        _authed(client)
+        end_id = self._network_end_template(db, owner_slug)
+        _add_template(db, sibling, 'ad_break_start')
+        _add_template(db, sibling, 'ad_break_end')
+        client.patch(f'/api/v1/feeds/{sibling}', json={'processingMode': 'cue_only'},
+                     headers=_csrf_headers(client))
+
+        resp = client.patch(f'/api/v1/cue-templates/{end_id}', json={'enabled': False},
+                            headers=_csrf_headers(client))
+        assert resp.status_code == 200

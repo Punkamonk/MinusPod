@@ -138,6 +138,60 @@ def test_labeled_scores_exclude_pending_and_below_threshold(temp_db):
     assert sorted(labeled) == [(0.7, 'rejected'), (0.9, 'confirmed')]
 
 
+def test_cue_template_paired_episode_counts(temp_db):
+    pid = temp_db.create_podcast('feed', 'http://x/rss', 'Feed')
+    temp_db.record_cue_detections(pid, 'ep1', [
+        {'template_id': 7, 'label': 'ding', 'start_s': 1, 'end_s': 2,
+         'match_score': 0.9, 'outcome': 'pair'},
+        {'template_id': 7, 'label': 'ding', 'start_s': 5, 'end_s': 6,
+         'match_score': 0.9, 'outcome': 'pair'},
+    ])
+    temp_db.record_cue_detections(pid, 'ep2', [
+        {'template_id': 7, 'label': 'ding', 'start_s': 1, 'end_s': 2,
+         'match_score': 0.9, 'outcome': 'pair'},
+    ])
+    temp_db.record_cue_detections(pid, 'ep3', [
+        {'template_id': 7, 'label': 'ding', 'start_s': 1, 'end_s': 2,
+         'match_score': 0.9, 'outcome': 'snap'},
+    ])
+    counts = temp_db.cue_template_paired_episode_counts(pid)
+    assert counts == {7: 2}
+
+
+def _quiet_row(template_id, outcome='pair'):
+    return {'template_id': template_id, 'label': 'ding', 'start_s': 1, 'end_s': 2,
+            'match_score': 0.9, 'outcome': outcome}
+
+
+def test_cue_template_recent_activity_flags_quiet(temp_db):
+    pid = temp_db.create_podcast('qfeed', 'http://x/rss', 'Feed')
+    for ep in ('ep1', 'ep2', 'ep3'):
+        temp_db.record_cue_detections(pid, ep, [_quiet_row(template_id=7, outcome='pair')])
+    for ep in ('ep4', 'ep5', 'ep6', 'ep7', 'ep8'):
+        temp_db.record_cue_detections(pid, ep, [_quiet_row(template_id=9, outcome='snap')])
+
+    # created_at has second granularity; backdate explicitly so recency
+    # ordering is deterministic regardless of insert speed.
+    conn = temp_db.get_connection()
+    episodes = ('ep1', 'ep2', 'ep3', 'ep4', 'ep5', 'ep6', 'ep7', 'ep8')
+    for i, ep in enumerate(episodes):
+        conn.execute(
+            "UPDATE cue_detections SET created_at = datetime('now', ?) "
+            "WHERE podcast_id = ? AND episode_id = ?",
+            (f'-{len(episodes) - i} minutes', pid, ep))
+    conn.commit()
+
+    activity = {a['templateId']: a for a in temp_db.cue_template_recent_activity(pid)}
+    # Template 7 only appears in ep1..ep3, all outside the 5 most recent
+    # episodes (ep4..ep8) -> quiet.
+    assert activity[7]['quiet'] is True
+    assert activity[7]['matchedEpisodes'] == 3
+    assert activity[7]['lastMatchAt'] is not None
+    # Template 9 appears in every one of the 5 most recent episodes -> not quiet.
+    assert activity[9]['quiet'] is False
+    assert activity[9]['matchedEpisodes'] == 5
+
+
 def test_template_verdict_scores_grouped(temp_db):
     pid = temp_db.create_podcast('gfeed', 'http://x/rss', 'Feed')
     temp_db.record_cue_detections(pid, 'ep1', [

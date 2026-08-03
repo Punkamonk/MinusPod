@@ -14,6 +14,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import FeedSettingsPanel from './FeedSettingsPanel';
 import type { Feed } from '../../api/types';
+import type { CueTemplate } from '../../api/cueTemplates';
 
 // CollapsibleSection defaults closed; render children unconditionally.
 vi.mock('../../components/CollapsibleSection', async (importOriginal) => {
@@ -33,6 +34,12 @@ vi.mock('../../api/feeds', () => ({
   rerenderSegments: (...args: unknown[]) => mockRerenderSegments(...args),
   CUE_SCORE_MIN: 0.30,
   CUE_SCORE_MAX: 0.99,
+}));
+
+const mockListCueTemplates = vi.fn().mockResolvedValue([]);
+
+vi.mock('../../api/cueTemplates', () => ({
+  listCueTemplates: (...args: unknown[]) => mockListCueTemplates(...args),
 }));
 
 const mockGetSettings = vi.fn();
@@ -59,6 +66,26 @@ function makeFeed(overrides: Partial<Feed> = {}): Feed {
 
 mockGetSettings.mockResolvedValue({});
 
+function makeCueTemplate(overrides: Partial<CueTemplate> = {}): CueTemplate {
+  return {
+    id: 1,
+    podcastId: 1,
+    label: 'Ad start',
+    cueType: 'ad_break_start',
+    sourceEpisodeId: 'ep-1',
+    sourceOffsetS: 10,
+    durationS: 1.5,
+    sampleRate: 22050,
+    nCoeffs: 13,
+    scope: 'podcast',
+    networkId: null,
+    enabled: true,
+    createdAt: '2026-01-01T00:00:00Z',
+    createdBy: null,
+    ...overrides,
+  };
+}
+
 function renderPanel(feed: Feed) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -72,30 +99,33 @@ function renderPanel(feed: Feed) {
 
 const SELECT_NAME = 'Fetch each episode twice to find inserted ads';
 
-describe('FeedSettingsPanel pass-through toggle (#521)', () => {
+describe('FeedSettingsPanel processing mode preset', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetSettings.mockResolvedValue({});
     mockUpdateFeed.mockResolvedValue(makeFeed());
   });
 
-  it('renders off when passthroughEnabled is unset', () => {
-    renderPanel(makeFeed());
-    const toggle = screen.getByRole('switch', { name: 'Serve episodes untouched' });
-    expect(toggle.getAttribute('aria-checked')).toBe('false');
+  it('renders one select with the five presets', () => {
+    renderPanel(makeFeed({ processingMode: 'standard' }));
+    const select = screen.getByLabelText(/processing mode/i);
+    expect(select).toBeDefined();
+    for (const label of ['Standard', 'Keep content only', 'Skip ad detection', 'Pass-through', 'Cue-only']) {
+      expect(screen.getByRole('option', { name: new RegExp(label, 'i') })).toBeDefined();
+    }
   });
 
-  it('enabling fires updateFeed with passthroughEnabled true', async () => {
-    renderPanel(makeFeed());
-    await userEvent.click(screen.getByRole('switch', { name: 'Serve episodes untouched' }));
-    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { passthroughEnabled: true });
+  it('sends processingMode on change', async () => {
+    renderPanel(makeFeed({ processingMode: 'standard' }));
+    await userEvent.selectOptions(screen.getByLabelText(/processing mode/i), 'passthrough');
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { processingMode: 'passthrough' });
   });
 
-  it('disabling fires passthroughEnabled false', async () => {
-    renderPanel(makeFeed({ passthroughEnabled: true }));
-    const toggle = screen.getByRole('switch', { name: 'Serve episodes untouched' });
-    expect(toggle.getAttribute('aria-checked')).toBe('true');
-    await userEvent.click(toggle);
-    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { passthroughEnabled: false });
+  it('does not render the legacy toggles', () => {
+    renderPanel(makeFeed({ processingMode: 'standard' }));
+    expect(screen.queryByRole('switch', { name: 'Skip ad detection' })).toBeNull();
+    expect(screen.queryByRole('switch', { name: 'Serve episodes untouched' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Detection' })).toBeNull();
   });
 });
 
@@ -464,6 +494,130 @@ describe('FeedSettingsPanel skip verification toggle (#599)', () => {
     renderPanel(makeFeed({ skipSecondPass: true }));
     await userEvent.click(screen.getByRole('switch', { name: TOGGLE_NAME }));
     expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { skipSecondPass: false });
+  });
+
+  it('is checked and disabled under cue_only, with a forced-on note', async () => {
+    renderPanel(makeFeed({ processingMode: 'cue_only' }));
+    const toggle = screen.getByRole('switch', { name: TOGGLE_NAME });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText('Forced on by cue-only mode.')).toBeDefined();
+    // Disabled: a click must not fire a PATCH.
+    await userEvent.click(toggle);
+    expect(mockUpdateFeed).not.toHaveBeenCalled();
+  });
+});
+
+describe('FeedSettingsPanel cue-only mode controls', () => {
+  const PROCESSING_SELECT_NAME = /processing mode/i;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetSettings.mockResolvedValue({});
+    mockUpdateFeed.mockResolvedValue(makeFeed());
+    mockListCueTemplates.mockResolvedValue([]);
+    // Opens the templates query gate (mirrors the panel's own storage key).
+    localStorage.setItem('feed-settings-test-feed', 'true');
+  });
+
+  it('disables the cue_only option when no qualifying templates exist', async () => {
+    renderPanel(makeFeed());
+    await waitFor(() => expect(mockListCueTemplates).toHaveBeenCalledWith('test-feed'));
+    const option = await screen.findByRole('option', { name: /cue-only/i }) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+  });
+
+  it('enables the cue_only option once an enabled start and end template exist', async () => {
+    mockListCueTemplates.mockResolvedValue([
+      makeCueTemplate({ id: 1, cueType: 'ad_break_start', enabled: true }),
+      makeCueTemplate({ id: 2, cueType: 'ad_break_end', enabled: true }),
+    ]);
+    renderPanel(makeFeed());
+    const option = await screen.findByRole('option', { name: /cue-only/i }) as HTMLOptionElement;
+    await waitFor(() => expect(option.disabled).toBe(false));
+  });
+
+  it('a disabled end template still leaves the option disabled', async () => {
+    mockListCueTemplates.mockResolvedValue([
+      makeCueTemplate({ id: 1, cueType: 'ad_break_start', enabled: true }),
+      makeCueTemplate({ id: 2, cueType: 'ad_break_end', enabled: false }),
+    ]);
+    renderPanel(makeFeed());
+    await waitFor(() => expect(mockListCueTemplates).toHaveBeenCalled());
+    const option = await screen.findByRole('option', { name: /cue-only/i }) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+  });
+
+  it('choosing cue_only sends processingMode in the PATCH', async () => {
+    mockListCueTemplates.mockResolvedValue([
+      makeCueTemplate({ id: 1, cueType: 'ad_break_start', enabled: true }),
+      makeCueTemplate({ id: 2, cueType: 'ad_break_end', enabled: true }),
+    ]);
+    renderPanel(makeFeed({ processingMode: 'standard' }));
+    const option = await screen.findByRole('option', { name: /cue-only/i }) as HTMLOptionElement;
+    await waitFor(() => expect(option.disabled).toBe(false));
+    await userEvent.selectOptions(screen.getByLabelText(PROCESSING_SELECT_NAME), 'cue_only');
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { processingMode: 'cue_only' });
+  });
+
+  it('does not render the safety select or transcription toggle outside cue_only', () => {
+    renderPanel(makeFeed({ processingMode: 'standard' }));
+    expect(screen.queryByLabelText(/cue-only safety/i)).toBeNull();
+    expect(screen.queryByRole('switch', { name: 'Skip transcription' })).toBeNull();
+  });
+
+  it('renders the safety select and transcription toggle under cue_only', () => {
+    renderPanel(makeFeed({ processingMode: 'cue_only' }));
+    expect(screen.getByLabelText(/cue-only safety/i)).toBeDefined();
+    expect(screen.getByRole('switch', { name: 'Skip transcription' })).toBeDefined();
+  });
+
+  it('the safety select defaults to hold_new and sends auto_cut on change', async () => {
+    renderPanel(makeFeed({ processingMode: 'cue_only' }));
+    const select = screen.getByLabelText(/cue-only safety/i) as HTMLSelectElement;
+    expect(select.value).toBe('hold_new');
+    await userEvent.selectOptions(select, 'auto_cut');
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { cueOnlySafety: 'auto_cut' });
+  });
+
+  it('the transcription toggle sends skipTranscription true', async () => {
+    renderPanel(makeFeed({ processingMode: 'cue_only' }));
+    await userEvent.click(screen.getByRole('switch', { name: 'Skip transcription' }));
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { skipTranscription: true });
+  });
+});
+
+describe('FeedSettingsPanel experimental labelling', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetSettings.mockResolvedValue({});
+    mockUpdateFeed.mockResolvedValue(makeFeed());
+    mockListCueTemplates.mockResolvedValue([]);
+    localStorage.setItem('feed-settings-test-feed', 'true');
+  });
+
+  it('marks the cue_only preset experimental', async () => {
+    renderPanel(makeFeed());
+    const option = await screen.findByRole('option', { name: /cue-only/i });
+    expect(option.textContent).toMatch(/experimental/i);
+  });
+
+  it('marks pair synthesis experimental, since it cuts on cue evidence alone', async () => {
+    renderPanel(makeFeed());
+    await waitFor(() => expect(screen.queryAllByText(/^Experimental$/).length).toBeGreaterThan(0));
+  });
+
+  it('keeps the badge behind the control so the row stays aligned', async () => {
+    // Every input in the cue tuning section shares one left edge. The badge
+    // trails the hint, so nothing sits between the label and the select.
+    renderPanel(makeFeed());
+    await screen.findByText('Pair synthesis:');
+    const badge = screen.getByText(/^Experimental$/);
+    const column = badge.parentElement!;
+    const select = column.querySelector('select');
+    expect(select).not.toBeNull();
+    expect(column.firstElementChild).toBe(select);
+    expect(select!.compareDocumentPosition(badge)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 

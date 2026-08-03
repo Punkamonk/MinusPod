@@ -9,10 +9,11 @@ duration.
 
 This breaks the original "cue is supporting evidence only" contract; that is
 why it is an opt-in setting (``audio_cue_create_from_pairs``). The contract
-when the setting is off is unchanged. When on, the synthesised ads carry a
-distinct ``reason`` and ``detection_stage`` so they show up in the ad
-editor as cue-only detections that the user can confirm or reject before
-they harden into patterns.
+when the setting is off is unchanged, except under the cue_only preset,
+which always forces synthesis with strict role matching regardless of the
+setting. When on, the synthesised ads carry a distinct ``reason`` and
+``detection_stage`` so they show up in the ad editor as cue-only detections
+that the user can confirm or reject before they harden into patterns.
 """
 from __future__ import annotations
 
@@ -180,6 +181,7 @@ def synthesize_ads_from_cue_pairs(
     total_duration: float = 0.0,
     max_break_fraction: float = DEFAULT_MAX_BREAK_FRACTION,
     orient_window_s: float = DEFAULT_ORIENT_WINDOW_S,
+    strict_roles: bool = False,
 ):
     """Return ``(ads, skip_diagnostics)``.
 
@@ -201,6 +203,8 @@ def synthesize_ads_from_cue_pairs(
         total_duration: Episode duration (s); 0 disables the fraction guard.
         max_break_fraction: Reject a pair spanning more than this fraction of
             ``total_duration`` -- a short-episode phantom-ad backstop.
+        strict_roles: cue_only preset. When True only role 'start' opens and
+            only 'end' closes; 'boundary' cues cannot pair.
     """
     skip_diagnostics: Dict = {}
     if not audio_analysis_result:
@@ -241,6 +245,9 @@ def synthesize_ads_from_cue_pairs(
             skip_diagnostics[_diag_key(c.template_id, c.start)] = SKIP_NO_PARTNER
         return list(ads), skip_diagnostics
 
+    start_roles = ('start',) if strict_roles else AUDIO_CUE_START_EDGE_ROLES
+    end_roles = ('end',) if strict_roles else AUDIO_CUE_END_EDGE_ROLES
+
     _orient_cues(cues, ads, orient_window_s)
 
     # Greedy left-to-right pairing: each cue starts a candidate break with
@@ -254,7 +261,7 @@ def synthesize_ads_from_cue_pairs(
         if consumed[i]:
             continue
         cue_a = cues[i]
-        if cue_a.effective_role not in AUDIO_CUE_START_EDGE_ROLES:
+        if cue_a.effective_role not in start_roles:
             # Cannot open a pair (non_ad, or demoted closer-only): phase issue.
             reasons[i] = SKIP_PHASE_MISMATCH
             continue
@@ -263,7 +270,7 @@ def synthesize_ads_from_cue_pairs(
             if consumed[j]:
                 continue
             cue_b = cues[j]
-            if cue_b.effective_role not in AUDIO_CUE_END_EDGE_ROLES:
+            if cue_b.effective_role not in end_roles:
                 continue
             gap = cue_b.start - cue_a.end
             if gap < min_break_s:
@@ -343,8 +350,8 @@ def synthesize_ads_from_cue_pairs(
     for idx, c in enumerate(cues):
         if consumed[idx] or reasons[idx] is not None:
             continue
-        if (c.effective_role in AUDIO_CUE_START_EDGE_ROLES
-                or c.effective_role in AUDIO_CUE_END_EDGE_ROLES):
+        if (c.effective_role in start_roles
+                or c.effective_role in end_roles):
             reasons[idx] = SKIP_NO_PARTNER
         else:
             reasons[idx] = SKIP_PHASE_MISMATCH
