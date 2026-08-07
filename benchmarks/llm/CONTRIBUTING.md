@@ -37,6 +37,18 @@ Your PR diff must NOT contain:
 
 PR description should include the source URL, episode title, ad count, and a sentence on why the episode strengthens the corpus (genre coverage, length, an edge case like sub-30s ads or post-roll-only).
 
+### What the corpus needs most
+
+The corpus is currently 14 episodes: 12 ad-bearing and 2 no-ad controls, all in English, mostly interview, news, and comedy formats. Sweep budget limits how fast maintainers can grow it, so episode PRs are the cheapest way to make the numbers more trustworthy. The most useful additions right now:
+
+- Non-English episodes. Nothing in the corpus tests detection outside English.
+- Scripted or fiction shows. Every current episode is conversational.
+- Feeds with dynamic ad insertion, where the inserted spot has no relationship to the surrounding content.
+- Episodes whose only ads are sub-30s network taglines or post-rolls. Short ads are the weakest detection bucket for most models and the corpus has few of them.
+- More no-ad episodes. Two controls is enough to catch gross over-flagging but not to estimate a false-positive rate.
+
+An ordinary episode from a well-represented genre still helps, but one of the above helps more.
+
 What `verify` checks (so reviewers don't have to):
 
 - `start < end` for every ad block, monotonically increasing across blocks.
@@ -45,6 +57,33 @@ What `verify` checks (so reviewers don't have to):
 - No-ad episodes use the literal marker `# Verified: no ads in this episode.` per `data/README.md`.
 
 If `verify` passes, the episode is mergeable on data quality. The reviewer's job is then narrow: source legitimacy, genre fit, and PII hygiene (see "Copyright and PII" below).
+
+## Test your change locally
+
+`benchmark run` sweeps every model in `benchmark.toml` against every corpus episode. That is the full matrix and it costs real money. But `benchmark.toml` is gitignored and yours alone, so trim it to one or two cheap models first:
+
+```toml
+[[models]]
+id = "openai/gpt-5.6-luna"
+provider = "openrouter"
+
+[[models]]
+id = "deepseek/deepseek-v4-flash-0731"
+provider = "openrouter"
+```
+
+Then:
+
+```sh
+uv run benchmark run --dry-run   # call count, before spending anything
+uv run benchmark run
+```
+
+Completed work is skipped on re-run, keyed by (model, episode, trial, window, prompt_hash), so an interrupted run resumes where it stopped. Editing the system prompt changes every key and re-runs everything.
+
+Keep a second config and pass `--config cheap.toml` if you would rather not edit your main one.
+
+`benchmark run` has no per-model or per-episode filter, so trimming the config is the way to scope a run.
 
 ## PR type 2: add a model
 
@@ -55,6 +94,8 @@ Workflow:
 3. Run `uv run benchmark validate` to confirm the config parses.
 
 Your PR diff should be one file: `benchmark.toml.example`.
+
+That template is not what the sweep reads. `benchmark.toml` is gitignored, so a maintainer copies your entry across before the next run. Retired models stay in the file with `deprecated = true` rather than being deleted, which keeps their historical rows in the report and stops the sweep from calling a slug that no longer resolves.
 
 You do not need to run the benchmark sweep yourself. Maintainers run it post-merge for cost reasons. A single episode against a single new model is roughly $0.01 to $0.30. A maintainer batches model adds before regenerating the public report.
 
@@ -69,11 +110,21 @@ uv run pytest tests/ -q
 
 All tests must pass. A schema-version bump on `calls.jsonl` or `episode_results.jsonl` requires a maintainer review thread and a migration path for existing data (see `benchmark migrate-raw` for the v1 -> v2 precedent). The current schema is v2.
 
+If your change touches scoring or rendering, regenerate the report from the committed raw data and include the new render in your PR:
+
+```sh
+uv run benchmark report
+```
+
+This reads the committed raw JSONL files and rewrites `results/report.md` plus the SVGs under `results/report_assets/`. It makes no API calls and costs nothing.
+
 For changes to the report package (`src/benchmark/report/`), charts, or the metric glossary: the bar is clarity for a deep-technical-but-not-ML-research audience, not just correctness. Reviewers will read the rendered Markdown, not just the diff.
 
 ## What's in the repo vs what your PR should include
 
-The repo holds the full benchmark state (corpus, calls, responses, and the rendered report) so anyone can audit a result without re-running. Prompts are not stored; `benchmark show-prompt <call_id>` rebuilds any prompt from the corpus and verifies it against the recorded `prompt_hash`. For your PR, you only add the files relevant to your change.
+The repo holds the full benchmark state (corpus, calls, responses, and the rendered report) so anyone can audit a result without re-running. Prompts are rebuilt on demand: `benchmark show-prompt <call_id>` reconstructs any prompt from the corpus and verifies it against the recorded `prompt_hash`. (The few files in `results/raw/prompts/` are v1-migration leftovers kept because they did not reconstruct byte-exact.) For your PR, you only add the files relevant to your change.
+
+`results/raw/` holds only the current campaign. When a sweep's roster or corpus changes enough to start fresh, a maintainer runs `benchmark rotate-raw`, which moves the raw files to `results/archive/<date>/raw/`; `benchmark archive` snapshots the rendered report the same way. `calls.jsonl` is append-only and the report does not distinguish campaigns on its own, so rotation is what keeps a new sweep's rows from silently blending with the last one's. If you are digging through raw data, check `results/archive/` for anything older than the current report.
 
 | Path | In the repo | Include in your PR if... |
 |------|-------------|--------------------------|
@@ -84,6 +135,8 @@ The repo holds the full benchmark state (corpus, calls, responses, and the rende
 | `results/raw/calls.jsonl` | yes | never. Maintainers regenerate against the new corpus or model list |
 | `results/raw/episode_results.jsonl` | yes | never |
 | `results/raw/responses/*.jsonl` | yes | never |
+| `results/archive/<date>/` | yes | never. Frozen snapshots of past campaigns (maintainer task via `benchmark archive` / `benchmark rotate-raw`) |
+| `results/parse-and-moderation.md` | yes | you're correcting or extending its analysis. It is hand-written per campaign; report code changes do not regenerate it |
 | `benchmark.toml.example` | yes | you're adding a new model (1 line change) |
 | `data/candidates/` | no (gitignored) | never. Intermediate artifacts only |
 | `benchmark.toml` (your local config) | no | never. Contains your API keys |
@@ -103,11 +156,26 @@ When unsure, open a GitHub issue with the episode URL and a one-paragraph descri
 
 ## Cost expectations
 
-- **Episode-add PR**: zero contributor cost. The capture and verify steps don't call any LLM. A maintainer runs the sweep post-merge, which adds the new episode against the existing model list.
-- **Model-add PR**: zero contributor cost. A maintainer runs the sweep against the existing corpus.
-- **Code PR**: zero. Tests run against fixture data. No LLM calls.
+Zero for all three PR types if you let a maintainer run the sweep.
+
+If you test locally, budget from measured data. One episode against one model for a single trial, across 1,050 pairs in the 2026-08 sweep:
+
+| | cost |
+|---|---|
+| cheapest | $0.0007 |
+| median | $0.0420 |
+| 90th percentile | $0.3222 |
+| most expensive | $2.4391 |
+
+The model drives that spread far more than the episode does. A short episode on a small open-weight model costs a fraction of a cent; a long one on a frontier reasoning model runs past a dollar. Pick from the cheap end while iterating.
 
 Free-tier OpenRouter models stay free during maintainer sweeps because the benchmark sends the OpenRouter attribution headers (see `src/benchmark/llm.py`).
+
+## When a model fails instead of scoring
+
+Producing no answer is different from answering badly, and the report separates them. The 2026-08 sweep saw a provider refuse transcripts on content grounds, a model whose only route rejected native JSON mode, shared-pool rate limits, and an account setting that blocked every call.
+
+`results/parse-and-moderation.md` covers the two failures a retry will not fix: a provider refusing the transcript, and a model that cannot reliably emit JSON. If a model-add PR comes back with a row full of errors, read that before concluding the model is bad.
 
 ## Where to ask
 

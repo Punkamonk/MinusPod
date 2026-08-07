@@ -4,6 +4,7 @@ from __future__ import annotations
 from benchmark import report
 from benchmark.report import charts
 from benchmark.report.aggregate import ModelStats
+from benchmark.report.sections import _error_bucket, _render_fp_windows, _render_resolved_by_retry
 from benchmark.storage import append_jsonl
 
 
@@ -183,3 +184,103 @@ def test_chart_svg_output_is_deterministic(tmp_path):
     charts._render_pareto({"m1": s}, tmp_path / "a.svg")
     charts._render_pareto({"m1": s}, tmp_path / "b.svg")
     assert (tmp_path / "a.svg").read_bytes() == (tmp_path / "b.svg").read_bytes()
+
+
+def test_moderation_block_is_counted_and_flagged():
+    """A content-moderation refusal must be counted before errored calls are
+    skipped, and must flag the row: the score above it excludes those windows."""
+    from benchmark.report.aggregate import _is_moderation_block
+    from benchmark.report.sections import _moderation_pct, _reliability_flags
+    from benchmark.report.aggregate import ModelStats
+
+    blocked = {"message": "Error code: 451 - {'error': {'message': "
+                          "'The content you provided or machine outputted is blocked.', "
+                          "'type': 'censorship_blocked'}}"}
+    assert _is_moderation_block(blocked) is True
+    assert _is_moderation_block({"message": "Insufficient credits."}) is False
+    assert _is_moderation_block({"message": "Rate limit exceeded."}) is False
+    assert _is_moderation_block({"message": "Expecting value: line 1 column 1"}) is False
+
+    s = ModelStats(model="m", moderation_blocked=130, attempted_count=855)
+    assert abs(_moderation_pct(s) - 0.15204) < 1e-4
+    assert "moderation blocked 15.2%" in _reliability_flags(s)
+
+    clean = ModelStats(model="m", moderation_blocked=0, attempted_count=855)
+    assert _moderation_pct(clean) == 0.0
+    assert "moderation" not in _reliability_flags(clean)
+
+
+def test_campaign_mixing_detects_two_prompt_hashes_per_unit():
+    """calls.jsonl accumulates campaigns unless rotated. Dedup ignores
+    prompt_hash, so a partial re-run silently keeps old rows for the units it
+    did not reach. Nothing else in the report would surface that."""
+    from benchmark.report.aggregate import campaign_mixing
+
+    def row(model, w, h):
+        return {"model": model, "episode_id": "ep", "trial": 0,
+                "window_index": w, "prompt_hash": h}
+
+    # one unit run under two prompts, one unit run twice under the same prompt
+    calls = [row("m", 0, "sha256:old"), row("m", 0, "sha256:new"),
+             row("m", 1, "sha256:new"), row("m", 1, "sha256:new")]
+    assert campaign_mixing(calls) == {"m": 1}
+
+    # a clean single-campaign file reports nothing
+    assert campaign_mixing([row("m", 0, "sha256:new"), row("m", 1, "sha256:new")]) == {}
+
+
+def test_error_bucket_classifies_moderation_and_account_errors():
+    """The failure table's classifier must agree with the aggregate-side
+    moderation detector; a 451 censorship block landing in Other hides the
+    single most production-relevant failure mode."""
+    assert _error_bucket(
+        "Error code: 451 - {'type': 'censorship_blocked', 'message': "
+        "'The content you provided or machine outputted is blocked.'}"
+    ) == "Provider content moderation rejection"
+    assert _error_bucket("Error code: 402 - This request requires more credits") == "Credits exhausted"
+    assert _error_bucket("Error code: 403 - complete the following before use: 18+ age confirmation") == "Account gating (age confirmation)"
+    assert _error_bucket("Error code: 429 - rate limit exceeded") == "Rate-limited"
+    assert _error_bucket("Expecting value: line 1 column 1") == "Other"
+
+
+def test_resolved_by_retry_reads_raw_rows_not_dedup():
+    """A unit that errored then succeeded is invisible after dedup; the retry
+    subsection must recover it from the append-only rows and skip units that
+    never recovered (those belong to the failure tables)."""
+    def row(model, w, error=None):
+        return {"model": model, "episode_id": "ep", "trial": 0,
+                "window_index": w, "error": error}
+
+    auth = {"message": "Error code: 401 - authentication_error"}
+    raw = [
+        row("m1", 0, error=auth), row("m1", 0),          # errored then succeeded
+        row("m1", 1),                                    # clean first try
+        row("m2", 0, error=auth), row("m2", 0, error=auth),  # never recovered
+    ]
+    lines = _render_resolved_by_retry(raw)
+    text = "\n".join(lines)
+    assert "### Errors resolved by retry" in text
+    assert "| `m1` | 1 | 1 | Auth failure (100%) |" in text
+    assert "`m2`" not in text
+
+    assert _render_resolved_by_retry([row("m1", 0), row("m2", 0)]) == []
+
+
+def test_fp_windows_table_lists_only_truthless_windows(make_episode):
+    """A window overlapping a truth ad must not appear no matter how many
+    models flagged it; a truthless window needs 2+ votes to make the table."""
+    ep = make_episode("ep-a", n_windows=2)          # truth ad at 0-10s, w0 spans 0-300
+    control = make_episode("ep-b", n_windows=1, no_ad=True)
+    agreement = {
+        ("ep-a", 0): {"m1": 3, "m2": 1},            # overlaps the truth ad
+        ("ep-a", 1): {"m1": 2, "m2": 1, "m3": 0},   # truthless, 2 of 3 voted
+        ("ep-b", 0): {"m1": 1, "m2": 1},            # no-ad control, tagged
+    }
+    text = "\n".join(_render_fp_windows(agreement, 3, [ep, control]))
+    assert "### Windows flagged with no truth ad" in text
+    assert "| `ep-a` | 1 | 300-600s | 2 of 3 |" in text
+    assert "| `ep-a` | 0 " not in text
+    assert "| `ep-b` (no-ad control) | 0 | 0-600s | 2 of 3 |" in text
+
+    solo_vote = {("ep-a", 1): {"m1": 1, "m2": 0, "m3": 0}}
+    assert _render_fp_windows(solo_vote, 3, [ep]) == []

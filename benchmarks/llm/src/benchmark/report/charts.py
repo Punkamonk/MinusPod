@@ -47,8 +47,47 @@ def _distinct_colors(n: int) -> list[tuple[float, ...]]:
         palette.extend(plt.get_cmap(name).colors)
     if n <= len(palette):
         return palette[:n]
-    cmap = plt.get_cmap("hsv")
-    return [cmap(i / n) for i in range(n)]
+    # Past the categorical maps, hsv sampled at n steps puts near-identical hues
+    # side by side and wraps (0 and 1 are both red), so a 75-model chart reads as
+    # repeated colours. Golden-angle hue stepping spreads them instead, and
+    # cycling lightness and saturation separates hues that land close anyway.
+    import colorsys
+    golden = 0.618033988749895
+    extra = []
+    for i in range(n - len(palette)):
+        h = (i * golden) % 1.0
+        sat = (0.55, 0.85, 0.70)[i % 3]
+        val = (0.90, 0.65, 0.78)[i % 3]
+        extra.append(colorsys.hsv_to_rgb(h, sat, val) + (1.0,))
+    return palette + extra
+
+
+def _legend_below(fig, n_entries: int, plot_height: float):
+    """Put the model legend under the plot, growing the figure to fit it.
+
+    The legend has one row per model. Clamping the reserved fraction (the old
+    behaviour) makes it overlap the axes once the roster outgrows the space, so
+    size the figure to the legend instead and keep the plot area fixed.
+    """
+    ncol = 1 if n_entries <= 6 else 2 if n_entries <= 30 else 3
+    rows = (n_entries + ncol - 1) // ncol
+    # Each entry is "model  (F1 x.xxx, $x.xxxx/ep)", so a column needs about
+    # 5in at 8pt. Widen the canvas with the column count or the labels clip.
+    width = max(fig.get_size_inches()[0], 5.2 * ncol)
+    legend_height = 0.35 + 0.19 * rows          # inches
+    # Gap keeps the x-axis label clear of the legend frame.
+    gap = 0.45
+    total = plot_height + legend_height + gap
+    fig.set_size_inches(width, total)
+    legend = fig.legend(
+        loc="lower center", bbox_to_anchor=(0.5, 0.004), ncol=ncol, fontsize=8,
+        frameon=True, edgecolor="lightgray", columnspacing=1.6,
+        handletextpad=0.6, borderpad=0.6,
+    )
+    legend.get_frame().set_alpha(0.95)
+    fig.subplots_adjust(left=0.09, right=0.97, top=1 - 0.5 / total,
+                        bottom=(legend_height + gap) / total)
+    return legend
 
 
 def _render_pareto(stats: dict[str, ModelStats], path: Path) -> None:
@@ -75,24 +114,70 @@ def _render_pareto(stats: dict[str, ModelStats], path: Path) -> None:
     ax.set_title("Cost vs F1 by model", fontsize=12, fontweight="bold")
     ax.grid(True, alpha=0.3)
 
-    ncol = 2 if len(points) > 6 else 1
-    legend = fig.legend(
-        loc="lower center",
-        bbox_to_anchor=(0.5, 0.02),
-        ncol=ncol,
-        fontsize=9,
-        frameon=True,
-        edgecolor="lightgray",
-        columnspacing=2.0,
-        handletextpad=0.7,
-        borderpad=0.8,
-    )
-    legend.get_frame().set_alpha(0.95)
+    _legend_below(fig, len(points), plot_height=9)
+    _save_svg(fig, path)
+    plt.close(fig)
 
-    # Reserve enough bottom space for the legend; 0.45 fits ~7-row 2-column legend
-    rows = (len(points) + ncol - 1) // ncol
-    bottom = min(0.55, 0.10 + 0.038 * rows)
-    fig.subplots_adjust(left=0.10, right=0.96, top=0.93, bottom=bottom)
+
+def _render_accuracy_latency(stats: dict[str, ModelStats], path: Path) -> None:
+    """Scatter of F0.5 vs p50 latency, log-x. The wall-clock companion to the
+    cost Pareto: which models make you trade accuracy for speed."""
+    plt = _plt()
+
+    points = [s for s in stats.values() if s.p50_call_latency_ms > 0]
+    points.sort(key=lambda s: (-s.avg_f05, s.p50_call_latency_ms))
+
+    colors = _distinct_colors(len(points))
+    fig, ax = plt.subplots(figsize=(11, 9))
+    for i, s in enumerate(points):
+        p50_s = s.p50_call_latency_ms / 1000
+        ax.scatter(
+            p50_s, s.avg_f05,
+            s=180, color=colors[i],
+            edgecolors="black", linewidths=0.7, zorder=3,
+            label=f"{s.model}  (F0.5 {s.avg_f05:.3f}, p50 {p50_s:.1f}s)",
+        )
+
+    ax.set_xscale("log")
+    ax.set_xlabel("p50 latency in seconds (log scale, lower is better)", fontsize=10)
+    ax.set_ylabel("F0.5 (accuracy, 0-1), higher is better", fontsize=10)
+    ax.set_title("Accuracy vs latency by model", fontsize=12, fontweight="bold")
+    ax.grid(True, alpha=0.3)
+
+    _legend_below(fig, len(points), plot_height=9)
+    _save_svg(fig, path)
+    plt.close(fig)
+
+
+def _render_cost_split_chart(stats: dict[str, ModelStats], path: Path) -> None:
+    """Stacked horizontal bars of input vs output cost per episode. A long
+    output segment on a cheap-per-token model is reasoning or verbosity spend."""
+    plt = _plt()
+    import numpy as np
+
+    rows = [s for s in stats.values() if s.input_episode_cost + s.output_episode_cost > 0]
+    if not rows:
+        return
+    rows.sort(key=lambda s: s.input_episode_cost + s.output_episode_cost)
+    labels = [s.model for s in rows]
+    inputs = [s.input_episode_cost for s in rows]
+    outputs = [s.output_episode_cost for s in rows]
+    y = np.arange(len(rows))
+
+    fig, ax = plt.subplots(figsize=(11, max(5, 0.40 * len(rows))))
+    ax.barh(y, inputs, color="#1f77b4", edgecolor="black", linewidth=0.3, label="input cost")
+    ax.barh(y, outputs, left=inputs, color="#ff7f0e", edgecolor="black", linewidth=0.3, label="output cost")
+    label_offset = (inputs[-1] + outputs[-1]) * 0.01
+    for i, (in_v, out_v) in enumerate(zip(inputs, outputs)):
+        ax.text(in_v + out_v + label_offset, i, f"${in_v + out_v:.2f}/ep", va="center", fontsize=8)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_ylim(-0.6, len(rows) - 0.4)
+    ax.set_xlabel("Cost per episode (USD) at snapshot prices", fontsize=10)
+    ax.set_title("Where the per-episode cost goes: input vs output tokens", fontsize=11, fontweight="bold")
+    ax.legend(loc="lower right", fontsize=9)
+    ax.grid(True, axis="x", alpha=0.3)
+    fig.tight_layout()
     _save_svg(fig, path)
     plt.close(fig)
 
@@ -429,12 +514,7 @@ def _render_precision_recall_chart(stats: dict[str, ModelStats], path: Path) -> 
     ax.set_ylim(-0.02, 1.02)
     ax.grid(True, alpha=0.3)
 
-    ncol = 2 if len(points) > 6 else 1
-    fig.legend(loc="lower center", bbox_to_anchor=(0.5, 0.02), ncol=ncol,
-               fontsize=8, frameon=True, edgecolor="lightgray")
-    rows = (len(points) + ncol - 1) // ncol
-    bottom = min(0.55, 0.10 + 0.035 * rows)
-    fig.subplots_adjust(left=0.10, right=0.96, top=0.90, bottom=bottom)
+    _legend_below(fig, len(points), plot_height=9)
     _save_svg(fig, path)
     plt.close(fig)
 
@@ -503,12 +583,7 @@ def _render_token_efficiency_chart(stats: dict[str, ModelStats], path: Path) -> 
     ax.set_ylim(-0.02, 1.02)
     ax.grid(True, alpha=0.3, which="both")
 
-    ncol = 2 if len(points) > 6 else 1
-    fig.legend(loc="lower center", bbox_to_anchor=(0.5, 0.02), ncol=ncol,
-               fontsize=8, frameon=True, edgecolor="lightgray")
-    rows = (len(points) + ncol - 1) // ncol
-    bottom = min(0.55, 0.10 + 0.035 * rows)
-    fig.subplots_adjust(left=0.10, right=0.96, top=0.92, bottom=bottom)
+    _legend_below(fig, len(points), plot_height=8)
     _save_svg(fig, path)
     plt.close(fig)
 

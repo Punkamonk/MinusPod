@@ -17,13 +17,76 @@ from .aggregate import (
     _assign_tiers,
     _avg_f1,
     _ci_half_width,
+    _error_message,
+    _group_by_unit,
+    _is_moderation_block,
     _per_model_alignment,
 )
+
+
+def _is_free_tier(s: ModelStats) -> bool:
+    return s.total_episode_cost == 0
 
 
 # HTTP 5xx detector for the failures classifier. Matches "500", "502", etc.
 # but not arbitrary substrings like "5 minutes".
 _SERVER_5XX_RE = re.compile(r"\b5\d{2}\b")
+
+
+def _error_bucket(msg: str) -> str:
+    m = msg.lower()
+    if _is_moderation_block(m): return "Provider content moderation rejection"
+    if "rate" in m and "limit" in m: return "Rate-limited"
+    if "timeout" in m: return "Timeout"
+    if "404" in m: return "Unknown model (404)"
+    if "temperature" in m and "deprecated" in m: return "Deprecated parameter (`temperature`)"
+    if "401" in m or "unauthor" in m: return "Auth failure"
+    if "requires more credits" in m or "error code: 402" in m: return "Credits exhausted"
+    if "age confirmation" in m: return "Account gating (age confirmation)"
+    if _SERVER_5XX_RE.search(m): return "Server-side 5xx"
+    return "Other"
+
+
+def _render_resolved_by_retry(raw_calls: list[dict]) -> list[str]:
+    """Errors that a later attempt cleared. Invisible in the final-failure
+    tables because dedup keeps the successful row."""
+    units_by_model: dict[str, int] = defaultdict(int)
+    cats_by_model: dict[str, Counter] = defaultdict(Counter)
+    for rows in _group_by_unit(raw_calls).values():
+        errored = [r for r in rows[:-1] if r.get("error")]
+        if errored and not rows[-1].get("error"):
+            model = rows[0]["model"]
+            units_by_model[model] += 1
+            for r in errored:
+                cats_by_model[model][_error_bucket(_error_message(r.get("error")))] += 1
+    if not units_by_model:
+        return []
+    total_units = sum(units_by_model.values())
+    total_attempts = sum(c.total() for c in cats_by_model.values())
+    lines = [
+        "### Errors resolved by retry",
+        "",
+        f"**{total_units} work unit(s) errored at least once before succeeding ({total_attempts} errored attempts).** "
+        "These never reach the failure tables above because the retry's successful row is what gets scored, "
+        "but they are operationally real: a deployment without retry logic would have lost every one of them. "
+        "Counts at or near a model's full work-unit total usually mean a setup problem (auth, account gating, "
+        "credit limits) that failed the whole first pass, not per-call flakiness.",
+        "",
+        "| Model | Work units | Errored attempts | Dominant cause |",
+        "|---|---:|---:|---|",
+    ]
+    for m in sorted(units_by_model, key=lambda k: -units_by_model[k]):
+        cat, cat_n = cats_by_model[m].most_common(1)[0]
+        attempts = cats_by_model[m].total()
+        lines.append(f"| `{m}` | {units_by_model[m]} | {attempts} | {cat} ({cat_n * 100.0 / attempts:.0f}%) |")
+    return lines
+
+
+def _moderation_pct(s: ModelStats) -> float:
+    """Share of attempted calls the provider refused on content grounds."""
+    if not s.attempted_count:
+        return 0.0
+    return s.moderation_blocked / s.attempted_count
 
 
 def _reliability_flags(s: ModelStats) -> str:
@@ -33,6 +96,11 @@ def _reliability_flags(s: ModelStats) -> str:
         flags.append("(!) brittle JSON")
     if s.no_ad_pass and not all(s.no_ad_pass.values()):
         flags.append("(!) fails no-ad control")
+    # A blocked window never reaches scoring, so the score above it is computed
+    # on a subset of the corpus. That is a stronger caveat than the others.
+    mod = _moderation_pct(s)
+    if mod > 0:
+        flags.append(f"(!!) moderation blocked {mod:.1%}")
     return " ".join(flags)
 
 
@@ -41,8 +109,8 @@ def _render_tldr(stats: dict[str, ModelStats], episodes: list[Episode]) -> str:
 
     accuracy_rows = sorted(stats.values(), key=lambda s: s.avg_f05, reverse=True)
     acc_tiers = _assign_tiers(accuracy_rows)
-    paid_rows = [s for s in stats.values() if s.total_episode_cost > 0]
-    free_rows = [s for s in stats.values() if s.total_episode_cost == 0]
+    paid_rows = [s for s in stats.values() if not _is_free_tier(s)]
+    free_rows = [s for s in stats.values() if _is_free_tier(s)]
     value_rows = sorted(paid_rows, key=lambda s: s.avg_f05 / s.total_episode_cost, reverse=True)
     free_by_f05 = sorted(free_rows, key=lambda s: s.avg_f05, reverse=True)
 
@@ -54,7 +122,8 @@ def _render_tldr(stats: dict[str, ModelStats], episodes: list[Episode]) -> str:
         "unless it scores consistently lower across the same episodes (paired one-sided t-test, 95%); models "
         "that trade wins episode to episode share a tier, so order within a tier is not meaningful on this "
         f"{sum(1 for e in episodes if not e.truth.is_no_ad_episode)}-episode corpus. Flags caveat a model "
-        "without changing its rank. Cost includes free-tier models (shown at $0.00)."
+        "without changing its rank."
+        + (" Cost includes free-tier models (shown at $0.00)." if free_rows else "")
     )
     lines.append("")
     lines.append("| Tier | Model | F0.5 | 95% CI | Precision | Recall | F1 | Cost / episode | p50 latency | JSON compliance | Flags |")
@@ -68,10 +137,12 @@ def _render_tldr(stats: dict[str, ModelStats], episodes: list[Episode]) -> str:
         )
 
     lines += ["", "### Best Value (F0.5 per dollar)", ""]
+    free_note = ("; they are ranked separately under Best Free-Tier below" if free_rows
+                 else " (none in this campaign's roster came back at $0.00)")
     lines.append(
         "Paid-tier only, ranked by F0.5 per dollar. Free-tier models are excluded here because F0.5 / 0 is "
-        "undefined; they are ranked separately under Best Free-Tier below. No confidence tiers on this table -- "
-        "a point ratio does not group cleanly -- but the reliability flags still apply."
+        f"undefined{free_note}. No confidence tiers on this table, since a point ratio "
+        "does not group cleanly, but the reliability flags still apply."
     )
     lines.append("")
     lines.append("| Rank | Model | F0.5/$ | F0.5 | F1 | Cost / episode | Flags |")
@@ -112,12 +183,12 @@ def _render_quick_comparison(stats: dict[str, ModelStats], episodes: list[Episod
     header = ["Model", "F1", "Cost/ep", "p50"]
     header += [ep.ep_id for ep in ad_eps]
     header += [f"{ep.ep_id} (no-ad)" for ep in no_ad_eps]
-    header += ["F1 stdev"]
+    header += ["F1 stdev", "Moderation blocked"]
 
     lines = [
         "## Quick Comparison",
         "",
-        "One row per model, one column per episode. The headline columns (`F1`, `Cost/ep`, `p50`) summarize across all episodes; the per-episode columns let you see whether a model's average hides wide swings (a model that scores well overall might still bomb on a specific genre). The right-most `F1 stdev` column averages the per-trial standard deviations across episodes; high values mean the model isn't deterministic at temperature 0.0, so its single-trial F1 number is noisy.",
+        "One row per model, one column per episode. The headline columns (`F1`, `Cost/ep`, `p50`) summarize across all episodes; the per-episode columns let you see whether a model's average hides wide swings (a model that scores well overall might still bomb on a specific genre). The right-most `F1 stdev` column averages the per-trial standard deviations across episodes; high values mean the model isn't deterministic at temperature 0.0, so its single-trial F1 number is noisy. `Moderation blocked` is the share of attempted calls the provider refused on content grounds; those windows never reach scoring, so any non-zero value means that row's F1 was computed on a subset of the corpus and is not comparable to a row at `-`.",
         "",
         "| " + " | ".join(header) + " |",
         "|" + "|".join("---" for _ in header) + "|",
@@ -137,11 +208,17 @@ def _render_quick_comparison(stats: dict[str, ModelStats], episodes: list[Episod
                 cells.append("-")
         stdevs = [s.f1_stdev_per_episode[k] for k in s.f1_stdev_per_episode]
         cells.append(f"{statistics.fmean(stdevs):.3f}" if stdevs else "-")
+        mod = _moderation_pct(s)
+        cells.append(f"{mod:.1%}" if mod > 0 else "-")
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
-def _render_how_to_read() -> str:
+def _render_how_to_read(episodes: list[Episode]) -> str:
+    no_ad = [e for e in episodes if e.truth.is_no_ad_episode]
+    n_ad_bearing = len(episodes) - len(no_ad)
+    no_ad_names = ", ".join(f"`{e.ep_id}`" for e in no_ad)
+    no_ad_windows = sum(len(e.windows) for e in no_ad)
     return (
         "## Metric Key\n\n"
         "Quick reference for the columns in every table below.\n\n"
@@ -149,11 +226,12 @@ def _render_how_to_read() -> str:
         "|--------|-------|-----------|---------------|\n"
         "| **F1 (accuracy)** | 0 to 1 | higher is better | Combined score of precision and recall against the human-verified ground-truth ad spans. F1 = 0 means the model found nothing right; F1 = 1 means it found every ad with the correct boundaries. Uses IoU >= 0.5 (predicted span must overlap truth span by at least half) to count a match. |\n"
         "| **Cost / episode** | USD | lower is better | Average dollars per episode at the current pricing snapshot. Recomputed from token counts so all rows compare at the same prices regardless of when the call ran. |\n"
-        "| **F1 / $** | ratio | higher is better | F1 divided by cost-per-episode. Cheap accurate models score highest. Free-tier models are rank-listed separately because the ratio is undefined. |\n"
+        "| **F1 / $** | ratio | higher is better | F1 divided by cost-per-episode. Cheap accurate models score highest. Free-tier models (when the roster has any) are rank-listed separately because the ratio is undefined. |\n"
         "| **p50 / p95 latency** | seconds | lower is better, with caveats | Median (p50) and tail (p95) wall-clock response time. **Note**: for models routed through OpenRouter (everything except `claude-*`), this includes OpenRouter's queueing and upstream-provider latency, not just the model itself. Treat as a load/availability indicator, not a model-quality signal. |\n"
         "| **JSON compliance** | 0 to 1 | higher is better | Fraction of responses that parsed as a clean JSON array matching the requested schema. 1.0 = always clean; lower = used object wrappers (`{ads: [...]}`), markdown fences, extra fields like `sponsor`, or required regex fallback to extract. |\n"
-        "| **No-ad episode** | PASS / FAIL | PASS desired | Negative-control test on `ep-ai-cloud-essentials` (which has no ads). PASS = zero predictions across all 15 windows. FAIL = the model false-positived on a non-ad segment, with the FP count shown. |\n"
-        "| **F1 stdev** | 0 to 1 | lower means more consistent | Standard deviation of F1 across the four ad-bearing episodes. High stdev = inconsistent across content types. |\n"
+        f"| **No-ad episode** | PASS / FAIL | PASS desired | Negative-control test on the {len(no_ad)} episode(s) verified to contain no ads ({no_ad_names}). PASS = zero predictions across all {no_ad_windows} of their windows. FAIL = the model false-positived on a non-ad segment, with the FP count shown. |\n"
+        f"| **F1 stdev** | 0 to 1 | lower means more consistent | Standard deviation of F1 across the {n_ad_bearing} ad-bearing episodes. High stdev = inconsistent across content types. |\n"
+        "| **Moderation blocked** | 0 to 100% | 0 desired | Share of attempted calls the provider refused on content grounds. Refused windows never reach scoring, so any non-zero value means that model's F1 was computed on a subset of the corpus and is not comparable to an unblocked row. |\n"
         "| **JSON mode** | `native` / `prompt-inject` / `mixed` | -- | How the model received its JSON-output instruction. `native` = provider accepted `response_format=json_object` for at least 95% of calls; `prompt-inject` = provider rejected it and the runner fell back to instructing JSON in the prompt for at least 95% of calls; `mixed` = neither path crossed the threshold (sample mostly comes from intermittent provider rejections). Reads from `json_format_used` in `calls.jsonl`. Useful when picking a model whose provider may not support native JSON mode -- a strong `JSON compliance` score from a `prompt-inject` model carries different weight than the same score from a `native` model. |\n\n"
         "### Glossary\n\n"
         "- **IoU (intersection over union)**: how much two time ranges overlap, expressed as `(overlap) / (union)`. 0 means no overlap, 1 means identical ranges. We use IoU >= 0.5 as the threshold for a predicted ad to count as matching a truth ad.\n"
@@ -164,28 +242,26 @@ def _render_how_to_read() -> str:
     )
 
 
-def _render_failures(calls: list[dict]) -> str:
+def _render_failures(calls: list[dict], raw_calls: list[dict]) -> str:
     """Surface every error row, classified, since failures often signal real
     production-relevant gotchas (provider content moderation, deprecated params,
     rate-limit ceilings) that don't show up in the aggregated F1 / cost tables.
+
+    `calls` is deduped (one row per work unit, last write wins) and drives the
+    final-failure tables. `raw_calls` is the append-only file, used to surface
+    errors that a retry later resolved.
     """
     errors = [r for r in calls if r.get("error")]
+    retry_block = _render_resolved_by_retry(raw_calls)
     if not errors:
-        return (
-            "## Failures and provider issues\n\n"
-            "No call errors observed across this run. Every (model, episode, trial, window) tuple returned a parseable response.\n"
-        )
-
-    def bucket(msg: str) -> str:
-        m = msg.lower()
-        if "data_inspection_failed" in m or "inappropriate content" in m: return "Provider content moderation rejection"
-        if "rate" in m and "limit" in m: return "Rate-limited"
-        if "timeout" in m: return "Timeout"
-        if "404" in m: return "Unknown model (404)"
-        if "temperature" in m and "deprecated" in m: return "Deprecated parameter (`temperature`)"
-        if "401" in m or "unauthor" in m: return "Auth failure"
-        if _SERVER_5XX_RE.search(m): return "Server-side 5xx"
-        return "Other"
+        head = [
+            "## Failures and provider issues",
+            "",
+            "No unresolved call errors across this run. Every (model, episode, trial, window) tuple ended with a parseable response.",
+        ]
+        if retry_block:
+            head += [""] + retry_block
+        return "\n".join(head) + "\n"
 
     by_bucket: dict[str, list[dict]] = defaultdict(list)
     by_model: dict[str, int] = defaultdict(int)
@@ -193,9 +269,8 @@ def _render_failures(calls: list[dict]) -> str:
     for r in calls:
         calls_by_model[r["model"]] += 1
     for r in errors:
-        err = r.get("error", {})
-        msg = (err.get("message") if isinstance(err, dict) else str(err)) or ""
-        by_bucket[bucket(msg)].append({**r, "_msg": msg})
+        msg = _error_message(r.get("error"))
+        by_bucket[_error_bucket(msg)].append({**r, "_msg": msg})
         by_model[r["model"]] += 1
 
     lines = [
@@ -245,6 +320,9 @@ def _render_failures(calls: list[dict]) -> str:
             lines.append(f"- ... and {len(recs) - 3} more")
         lines.append("")
 
+    if retry_block:
+        lines += retry_block + [""]
+
     lines += [
         "### Why this section exists",
         "",
@@ -258,19 +336,26 @@ def _render_failures(calls: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _render_charts_section() -> str:
+def _render_charts_section(stats: dict[str, ModelStats]) -> str:
+    pareto_sources = "Source data: [Best Accuracy](#best-accuracy-f05--iou--05), [Best Value](#best-value-f05-per-dollar)"
+    if any(_is_free_tier(s) for s in stats.values()):
+        pareto_sources += ", [Best Free-Tier](#best-free-tier-f05)"
     return (
         "## Charts\n\n"
         "### Cost vs F1 (Pareto)\n\n"
         "Each model is one colored point. Lower-left is unhelpful (expensive, inaccurate). Upper-left is the sweet spot (accurate, cheap). The legend below the chart shows each model's color next to its F1 and cost-per-episode.\n\n"
         "![Cost vs F1 by model](report_assets/pareto.svg)\n\n"
-        "Source data: [Best Accuracy](#best-accuracy-f05--iou--05), [Best Value](#best-value-f05-per-dollar), [Best Free-Tier](#best-free-tier-f05)\n\n"
+        f"{pareto_sources}\n\n"
+        "### Accuracy vs latency\n\n"
+        "F0.5 (y) against p50 latency (x, log scale). The cost Pareto above answers what accuracy costs in dollars; this one answers what it costs in wall-clock time. Upper-left is accurate and fast. MinusPod's pipeline is offline, so a slow accurate model is usable, but the chart shows which models make you choose and which don't. The OpenRouter latency caveat from the Metric Key applies.\n\n"
+        "![Accuracy vs latency by model](report_assets/accuracy_latency.svg)\n\n"
+        "Source data: [Best Accuracy](#best-accuracy-f05--iou--05) (F0.5), [Latency tail](#latency-tail) (p50)\n\n"
         "### JSON schema compliance\n\n"
         "Fraction of each model's responses that parsed as a clean JSON array. 1.0 means every response came back exactly as requested; lower numbers mean the parser had to recover from markdown fences, object wrappers, or extra fields.\n\n"
         "![JSON compliance per model](report_assets/compliance.svg)\n\n"
         "Source data: [Per-Model Detail](#per-model-detail) (`JSON compliance` field)\n\n"
         "### F1 by episode (heatmap)\n\n"
-        "F1 score for each (model, episode) pair. Greener is more accurate, redder is less. The no-ad episode is excluded. It has no F1 because it's a PASS/FAIL negative control.\n\n"
+        "F1 score for each (model, episode) pair. Greener is more accurate, redder is less. The no-ad episodes are excluded. They have no F1 because they're PASS/FAIL negative controls.\n\n"
         "![F1 score per model and episode](report_assets/episodes.svg)\n\n"
         "Source data: [Quick Comparison](#quick-comparison), [Per-Episode Detail](#per-episode-detail)\n\n"
         "### Confidence calibration (heatmap)\n\n"
@@ -301,6 +386,10 @@ def _render_charts_section() -> str:
         "Scatter of output tokens per detected ad (x, log scale) vs F1 (y). Upper-left is the efficient zone: high accuracy with few output tokens. Right-side points are reasoning-heavy models that emit chain-of-thought alongside their JSON. The chart answers whether the extra tokens buy more F1 or just burn output budget. A model that lands far right at modest F1 is paying for reasoning that didn't help.\n\n"
         "![Token efficiency vs F1](report_assets/token_efficiency.svg)\n\n"
         "Source data: [Output token efficiency](#output-token-efficiency) table\n\n"
+        "### Cost split (input vs output)\n\n"
+        "Stacked horizontal bars per model: blue is the input share of per-episode cost, orange is the output share, total labeled at the right, sorted by total ascending. Every model reads the same transcripts, so a long blue bar is an expensive input price and a long orange bar is a talkative model. Reasoning models show up as mostly orange.\n\n"
+        "![Cost split per model](report_assets/cost_split.svg)\n\n"
+        "Source data: [Cost breakdown (input vs output)](#cost-breakdown-input-vs-output) table\n\n"
         "### Trial variance (determinism check)\n\n"
         "Horizontal bars of mean F1 stdev across episodes per model. All trials run at temperature 0.0 so well-behaved models cluster near zero. Bars are color-graded: green below 0.02 (effectively deterministic), yellow 0.02-0.05 (slight noise), red above 0.05 (single-trial F1 numbers from this model should be treated with suspicion). Dotted reference lines mark the 0.02 and 0.05 thresholds.\n\n"
         "![Trial F1 variance per model](report_assets/trial_variance.svg)\n\n"
@@ -438,9 +527,9 @@ def _render_methodology(cfg, episodes, *, pricing_snapshot: pricing.PricingSnaps
         "Reproducibility settings used for this run. The benchmark sends the same prompts MinusPod sends in production (same system prompt, same sponsor list, same windowing) so the F1 numbers here are directly relevant to production accuracy decisions. Cost is recomputed at report time from token counts against the active pricing snapshot, so all rows compare at the same prices regardless of when the actual call ran.",
         "",
         f"- Trials per (model, episode): **{cfg.run.trials}**, temperature {cfg.run.temperature}",
-        f"- max_tokens: 4096 (matches MinusPod production)",
+        "- max_tokens: 4096 (matches MinusPod production)",
         f"- response_format: {cfg.run.response_format} (with prompt-injection fallback when provider rejects native)",
-        f"- Window size: 10 min, overlap: 3 min (imported from MinusPod's create_windows)",
+        "- Window size: 10 min, overlap: 3 min (imported from MinusPod's create_windows)",
         f"- Pricing snapshot: {pricing_snapshot.captured_at}",
         f"- Corpus episodes: {len(episodes)}",
     ]
@@ -619,7 +708,11 @@ def _render_run_metadata(
     total_calls = len(calls)
     successful = sum(1 for c in calls if not c.get("error"))
     failed = total_calls - successful
-    lifetime_actual = sum(float(c.get("total_cost_usd_at_runtime", 0.0)) for c in (raw_calls or calls))
+    # Tokens share the spend line's basis (every row ever billed, superseded included).
+    billed = raw_calls or calls
+    lifetime_actual = sum(float(c.get("total_cost_usd_at_runtime", 0.0)) for c in billed)
+    in_tokens = sum(int(c.get("input_tokens") or 0) for c in billed)
+    out_tokens = sum(int(c.get("output_tokens") or 0) for c in billed)
     lines = [
         "## Run Metadata",
         "",
@@ -634,7 +727,11 @@ def _render_run_metadata(
     lines += [
         f"- Successful: {successful}",
         f"- Failed: {failed}",
-        f"- Lifetime actual spend (sum of at-runtime costs, includes superseded rows): ${lifetime_actual:.4f}",
+        f"- Lifetime list-price cost (sum of at-runtime costs, includes superseded rows): ${lifetime_actual:.4f}",
+        f"- Lifetime tokens (same basis): {in_tokens:,} in + {out_tokens:,} out = {in_tokens + out_tokens:,}",
+        "- Note: every input token is priced at list rate. Providers that serve a repeated prompt from"
+        " cache bill less than this, and the harness does not record cache hits, so a real invoice for"
+        " this run will come in under the figure above.",
         f"- Active pricing snapshot: {pricing_snapshot.captured_at}",
         f"- System prompt: {prompt_source}",
     ]
@@ -682,8 +779,10 @@ def _render_boundary_accuracy(stats: dict[str, ModelStats]) -> str:
         "",
         "For ads that match the truth at IoU >= 0.5, how far off were the predicted start and end timestamps? Lower is better. A model can hit F1 cleanly while still being 20s off on every boundary. Bad for any pipeline that cuts the audio.",
         "",
-        "| Model | Start MAE (s) | End MAE (s) |",
-        "|---|---:|---:|",
+        "MAE is size of the miss; bias is its direction (mean of predicted minus truth). A negative start bias or positive end bias means the cut extends past the ad and eats surrounding content; the opposite signs mean ad audio is left in. MinusPod cuts what the model flags, so a model whose bias points outward over-cuts even when its MAE looks acceptable. Bias near zero with a large MAE means the misses are random rather than systematic.",
+        "",
+        "| Model | Start MAE (s) | End MAE (s) | Start bias (s) | End bias (s) |",
+        "|---|---:|---:|---:|---:|",
     ]
     rows = sorted(
         [s for s in stats.values() if s.boundary_start_mae is not None],
@@ -692,7 +791,10 @@ def _render_boundary_accuracy(stats: dict[str, ModelStats]) -> str:
     if not rows:
         return ""
     for s in rows:
-        lines.append(f"| `{s.model}` | {s.boundary_start_mae:.2f} | {s.boundary_end_mae:.2f} |")
+        lines.append(
+            f"| `{s.model}` | {s.boundary_start_mae:.2f} | {s.boundary_end_mae:.2f} "
+            f"| {s.boundary_start_bias:+.2f} | {s.boundary_end_bias:+.2f} |"
+        )
     return "\n".join(lines)
 
 
@@ -751,6 +853,32 @@ def _render_latency_tail(stats: dict[str, ModelStats]) -> str:
     return "\n".join(lines)
 
 
+def _render_cost_breakdown(stats: dict[str, ModelStats]) -> str:
+    """Input vs output share of each model's per-episode cost. Output-heavy
+    rows are paying for verbosity or chain-of-thought, not transcript size."""
+    rows = sorted(
+        [s for s in stats.values() if s.input_episode_cost + s.output_episode_cost > 0],
+        key=lambda s: -(s.input_episode_cost + s.output_episode_cost),
+    )
+    if not rows:
+        return ""
+    lines = [
+        "## Cost breakdown (input vs output)",
+        "",
+        "Where each model's per-episode dollars go, at the same pricing snapshot as every other table. Every model reads the same transcripts, so the input side varies only with the provider's input price. The output side varies with how much the model writes: a high output share on a modest total usually means reasoning tokens, and a model with a low per-token price can still land mid-table by writing thousands of them. Failed calls are excluded, same as the cost column everywhere else.",
+        "",
+        "| Model | Cost / episode | Input | Output | Output share |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for s in rows:
+        total = s.input_episode_cost + s.output_episode_cost
+        lines.append(
+            f"| `{s.model}` | ${total:.4f} | ${s.input_episode_cost:.4f} "
+            f"| ${s.output_episode_cost:.4f} | {s.output_episode_cost / total * 100:.0f}% |"
+        )
+    return "\n".join(lines)
+
+
 def _render_token_efficiency(stats: dict[str, ModelStats]) -> str:
     """Output tokens per detected ad. Reasoning-style models burn through
     output budget on chain-of-thought even when finding only 1-2 ads, and that
@@ -799,6 +927,7 @@ def _render_trial_variance(stats: dict[str, ModelStats]) -> str:
 def _render_cross_model_agreement(
     agreement: dict[tuple[str, int], dict[str, int]],
     stats: dict[str, ModelStats],
+    episodes: list[Episode],
 ) -> str:
     """For each (episode, window) tuple, count how many distinct models flagged
     at least one ad. Windows where all models agree are easy; windows where
@@ -846,7 +975,51 @@ def _render_cross_model_agreement(
             f"| `{row['model']}` | {row['with_yes']} | {row['with_no']} | "
             f"{row['broke_yes']} | {row['broke_no']} | {row['alignment'] * 100:.1f}% |"
         )
+    fp_windows = _render_fp_windows(agreement, n_models, episodes)
+    if fp_windows:
+        lines += [""] + fp_windows
     return "\n".join(lines)
+
+
+def _render_fp_windows(
+    agreement: dict[tuple[str, int], dict[str, int]],
+    n_models: int,
+    episodes: list[Episode],
+) -> list[str]:
+    """Windows with no truth ad that many models flagged anyway. High-consensus
+    rows are either ad-like content worth validator tuning or a truth-file miss."""
+    top_n = 15
+    eps = {e.ep_id: e for e in episodes}
+    rows = []
+    for (ep_id, widx), per_model in agreement.items():
+        ep = eps.get(ep_id)
+        if ep is None or widx >= len(ep.windows):
+            continue
+        w = ep.windows[widx]
+        if any(ad.end > w.start and ad.start < w.end for ad in ep.truth.ads):
+            continue
+        n_voted = sum(1 for v in per_model.values() if v > 0)
+        if n_voted >= 2:
+            rows.append((n_voted, ep_id, widx, w))
+    if not rows:
+        return []
+    rows.sort(key=lambda r: (-r[0], r[1], r[2]))
+    lines = [
+        "### Windows flagged with no truth ad",
+        "",
+        f"The other side of the histogram: windows the ground truth marks ad-free, ranked by how many of the {n_models} models flagged them anyway (in at least one trial). A window near the top is either content that genuinely resembles an ad, which is what precision-focused validator rules should train against, or a spot the truth file missed. Either way these are the first windows worth a manual re-listen; on a corpus this size a single mislabeled window moves scores. No-ad control episodes are included and tagged.",
+        "",
+        "| Episode | Window | Span | Models flagging |",
+        "|---|---:|---|---:|",
+    ]
+    for n_voted, ep_id, widx, w in rows[:top_n]:
+        tag = " (no-ad control)" if eps[ep_id].truth.is_no_ad_episode else ""
+        lines.append(
+            f"| `{ep_id}`{tag} | {widx} | {w.start:.0f}-{w.end:.0f}s | {n_voted} of {n_models} |"
+        )
+    if len(rows) > top_n:
+        lines.append(f"\n... and {len(rows) - top_n} more with 2+ votes.")
+    return lines
 
 
 def _render_detection_buckets(

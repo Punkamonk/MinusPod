@@ -1,6 +1,8 @@
 """Render Markdown report from calls.jsonl + episode_results.jsonl + corpus."""
 from __future__ import annotations
 
+import logging
+
 from pathlib import Path
 
 from .. import pricing
@@ -9,13 +11,16 @@ from ..storage import read_jsonl
 from .aggregate import (
     _aggregate,
     _dedup_last_write_wins,
+    campaign_mixing,
     _json_format_summary,
 )
 from .charts import (
+    _render_accuracy_latency,
     _render_agreement_chart,
     _render_alignment_chart,
     _render_boundary_chart,
     _render_calibration_chart,
+    _render_cost_split_chart,
     _render_compliance,
     _render_detection_bucket_chart,
     _render_episode_heatmap,
@@ -32,6 +37,7 @@ from .sections import (
     _render_boundary_accuracy,
     _render_calibration_table,
     _render_charts_section,
+    _render_cost_breakdown,
     _render_cross_model_agreement,
     _render_deprecated,
     _render_detection_buckets,
@@ -51,6 +57,9 @@ from .sections import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def render(
     *,
     cfg,
@@ -66,6 +75,15 @@ def render(
     if not raw_calls:
         output_path.write_text("# MinusPod LLM Benchmark Report\n\nNo benchmark data yet. Run `benchmark run` first.\n")
         return
+    mixed = campaign_mixing(raw_calls)
+    if mixed:
+        logger.warning(
+            "calls.jsonl holds more than one campaign: %d work units across %d models carry "
+            "two prompt hashes. Dedup keeps the last row per unit regardless of prompt, so "
+            "any unit not re-run this campaign still shows the older result. Run "
+            "`benchmark rotate-raw` between campaigns.",
+            sum(mixed.values()), len(mixed),
+        )
     calls = _dedup_last_write_wins(raw_calls)
 
     by_model, extras = _aggregate(calls, episodes, pricing_snapshot=pricing_snapshot)
@@ -75,19 +93,29 @@ def render(
 
     extras_active = extras.without(deprecated_ids)
     calls_active = calls if not deprecated_ids else [r for r in calls if r["model"] not in deprecated_ids]
+    raw_active = raw_calls if not deprecated_ids else [r for r in raw_calls if r["model"] not in deprecated_ids]
+
+    stale = sum(1 for r in calls_active if r.get("windows_stale"))
+    if stale:
+        logger.warning(
+            "%d scored call(s) are marked windows_stale: they ran against "
+            "windows that changed afterward. Re-run those units before "
+            "trusting the affected models' numbers.", stale,
+        )
 
     sections = [
-        _render_how_to_read(),
+        _render_how_to_read(episodes),
         _render_tldr(active, episodes),
-        _render_charts_section(),
-        _render_failures(calls_active),
+        _render_charts_section(active),
+        _render_failures(calls_active, raw_active),
         _render_accuracy_breakdown(active),
         _render_boundary_accuracy(active),
         _render_calibration_table(extras_active.calibration),
         _render_latency_tail(active),
         _render_token_efficiency(active),
+        _render_cost_breakdown(active),
         _render_trial_variance(active),
-        _render_cross_model_agreement(extras_active.agreement, active),
+        _render_cross_model_agreement(extras_active.agreement, active, episodes),
         _render_detection_buckets(extras_active.detection_buckets),
         _render_quick_comparison(active, episodes),
         "---",
@@ -110,6 +138,8 @@ def render(
 
     assets_dir.mkdir(parents=True, exist_ok=True)
     _render_pareto(active, assets_dir / "pareto.svg")
+    _render_accuracy_latency(active, assets_dir / "accuracy_latency.svg")
+    _render_cost_split_chart(active, assets_dir / "cost_split.svg")
     _render_compliance(active, assets_dir / "compliance.svg")
     _render_episode_heatmap(active, episodes, assets_dir / "episodes.svg")
     _render_calibration_chart(extras_active.calibration, assets_dir / "calibration.svg")
