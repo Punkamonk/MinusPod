@@ -11,7 +11,7 @@ from pathlib import Path
 
 import requests
 import requests.exceptions
-from flask import Response, send_file, abort, send_from_directory, request
+from flask import Response, send_file, abort, redirect, send_from_directory, request
 from werkzeug.exceptions import NotFound
 from werkzeug.utils import safe_join
 
@@ -21,7 +21,9 @@ from config import (
     HTTP_TIMEOUT_API,
     JIT_RETRY_COOLDOWN_SECONDS,
     MAX_EPISODE_RETRIES,
+    title_matches_skip_patterns,
 )
+from database.queue import compute_queue_priority
 from rss_parser import extract_cached_base_url, extract_cached_feed_auth_key
 from utils.constants import EpisodeStatus
 from utils.safe_http import URLTrust, safe_head
@@ -473,6 +475,12 @@ def register_routes(app):
         episode_description = ep_data.get('description')
         episode_artwork_url = ep_data.get('artwork_url')
 
+        # Title blacklist: serve the upstream audio untouched, never process.
+        title_skip_patterns = db.get_podcast_title_skip_patterns(slug)
+        if title_matches_skip_patterns(episode_title, title_skip_patterns):
+            feed_logger.info(f"[{slug}:{episode_id}] Title-blacklisted, serving original: {episode_title}")
+            return redirect(original_url, code=302)
+
         # Start background processing (non-blocking)
         started, reason = start_background_processing(
             slug, episode_id, original_url, episode_title,
@@ -501,9 +509,12 @@ def register_routes(app):
             # feed with auto-process off.
             db.upsert_episode(slug, episode_id,
                               reprocess_requested_at=utc_now_iso())
+            feed_priority = db.get_podcast_queue_priority(slug)
+            priority = compute_queue_priority(
+                feed_priority, ep_data.get('published'), manual=True)
             db.upsert_episode_for_processing(
                 slug, episode_id, original_url, episode_title,
-                ep_data.get('published'), episode_description)
+                ep_data.get('published'), episode_description, priority=priority)
             status_service.queue_episode(slug, episode_id, episode_title, podcast_name)
             queue_position = status_service.get_queue_position(slug, episode_id)
             feed_logger.info(f"[{slug}:{episode_id}] Queue busy ({reason}), queued at position {queue_position}")

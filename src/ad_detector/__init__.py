@@ -65,6 +65,7 @@ from ad_detector.cue_pair_ads import synthesize_ads_from_cue_pairs
 from ad_detector.keep_content import CONTENT_SYSTEM_PROMPT, invert_content_to_ads
 from llm_capabilities import PASS_AD_DETECTION_1, PASS_AD_DETECTION_2, supports_json_schema
 from sponsor_service import SponsorService
+from text_pattern_matcher import is_defined_pattern
 from utils.constants import (
     INVALID_SPONSOR_VALUES,
     KNOWN_SHORT_BRANDS, canonical_sponsor,
@@ -439,17 +440,34 @@ def _cue_fusion_inputs(audio_analysis, segments):
 
 
 # Merge bookkeeping: how much audio the member that supplied the current
-# category covered. Stripped before markers are returned.
+# category (resp. sponsor+reason label) covered. Stripped before markers
+# are returned.
 _CATEGORY_SPAN = '_category_span'
+_LABEL_SPAN = '_label_span'
+_MEMBER_STAGES = '_member_stages'
+
+
+def _label_reach(entry: Dict) -> float:
+    """Audio a member's reason/sponsor label may claim: the full span, or
+    just the matched-text extent when the span is duration-estimated."""
+    if entry.get('span_estimated'):
+        text_start = entry.get('text_start')
+        text_end = entry.get('text_end')
+        if text_start is not None and text_end is not None:
+            return max(0.0, text_end - text_start)
+        # No text bounds recorded: conservative half-span cap.
+        return (entry['end'] - entry['start']) / 2
+    return entry['end'] - entry['start']
 
 
 def _with_category_span(entry: Dict) -> Dict:
-    """Stamp a merge accumulator with the audio its own category covers, before
-    a later member extends the end past what that category classified."""
+    """Stamp a merge accumulator with the audio its own category and label
+    cover, before a later member extends the end past what it classified."""
     if entry.get('category') in SEGMENT_CATEGORIES:
         entry[_CATEGORY_SPAN] = entry['end'] - entry['start']
     else:
         entry.pop(_CATEGORY_SPAN, None)
+    entry[_LABEL_SPAN] = _label_reach(entry)
     return entry
 
 
@@ -696,17 +714,17 @@ class AdDetector:
     def _podcast_wants_show_segments(self, slug: str) -> bool:
         """Return whether this podcast opted into intro/outro/recap detection.
 
-        One DB lookup per detect_ads() call, not per window (same pattern
-        as _get_podcast_sponsor_history).
+        Per-feed value if explicitly set, else the detect_show_segments
+        global default. One DB lookup per detect_ads() call, not per window
+        (same pattern as _build_known_pattern_hint).
         """
         if not slug or not self.db:
             return False
         try:
-            podcast = self.db.get_podcast_by_slug(slug)
+            return self.db.resolve_detect_show_segments(slug)
         except Exception as e:
             logger.warning(f"Could not check detect_show_segments for {slug}: {e}")
             return False
-        return bool(podcast and podcast.get('detect_show_segments'))
 
     def _resolve_segment_action_map(self, slug: str) -> Optional[Dict[str, str]]:
         """Resolve the feed's category->action map once per detection run,
@@ -736,27 +754,44 @@ class AdDetector:
             prompt = f"{prompt}\n\n{SHOW_SEGMENTS_PROMPT_SECTION}"
         return prompt
 
-    def _get_podcast_sponsor_history(self, podcast_slug: str) -> str:
-        """Get previously detected sponsor names for a podcast from ad_patterns.
+    _HINT_TIER1_CAP = 12
+    _HINT_SNIPPET_CHARS = 90
 
-        Returns a formatted string for inclusion in the description section,
-        or empty string if no sponsors found.
-        """
+    def _build_known_pattern_hint(self, podcast_slug: str) -> str:
+        """Known-sponsor block for the pass-1 prompt. Defined patterns get
+        category + opening snippet; auto-learned contribute names only.
+        Never includes spans or timestamps (pass 1 stays blind to stage 2)."""
         if not podcast_slug:
             return ""
         try:
             patterns = self.db.get_ad_patterns(podcast_id=podcast_slug)
-            sponsors = set()
-            for p in patterns:
-                sponsor = p.get('sponsor')
-                if sponsor and sponsor.lower() not in ('unknown', 'advertisement detected', ''):
-                    sponsors.add(sponsor)
-            if sponsors:
-                sponsor_list = ', '.join(sorted(sponsors))
-                return f"Previously detected sponsors for this podcast: {sponsor_list}\n"
         except Exception as e:
-            logger.warning(f"Could not fetch sponsor history for {podcast_slug}: {e}")
-        return ""
+            logger.warning(f"Could not fetch patterns for hint ({podcast_slug}): {e}")
+            return ""
+        junk = ('unknown', 'advertisement detected', '')
+        tier1, names = [], set()
+        for p in patterns:
+            sponsor = p.get('sponsor')
+            if not sponsor or sponsor.lower() in junk:
+                continue
+            if is_defined_pattern(p) and len(tier1) < self._HINT_TIER1_CAP:
+                snippet = truncate(p.get('intro_text') or p.get('outro_text') or '', self._HINT_SNIPPET_CHARS)
+                category = p.get('category') or 'sponsor'
+                line = f"- {sponsor} ({category} read)."
+                if snippet:
+                    line += f' Opens like: "{snippet}"'
+                tier1.append(line)
+            names.add(sponsor)
+        if not names:
+            return ""
+        parts = []
+        if tier1:
+            parts.append("Known recurring ads on this feed:\n" + "\n".join(tier1))
+        leftovers = sorted(names)
+        parts.append(f"Previously detected sponsors for this podcast: {', '.join(leftovers)}")
+        parts.append("Reads for the sponsors above are ads on this feed; "
+                     "report them with the stated category.")
+        return "\n".join(parts) + "\n"
 
     def _call_llm_for_window(self, *, model, system_prompt, prompt, llm_timeout,
                               max_retries, slug, episode_id, window_label, pass_name):
@@ -1247,11 +1282,11 @@ class AdDetector:
                 description_section += f"Episode Description (this describes the actual content topics discussed; it may also list episode sponsors):\n{episode_description}\n"
                 logger.info(f"[{slug}:{episode_id}] Including episode description ({len(episode_description)} chars)")
 
-            # Add podcast-specific sponsor history from ad_patterns
-            sponsor_history = self._get_podcast_sponsor_history(slug)
+            # Add podcast-specific known-pattern hint from ad_patterns
+            sponsor_history = self._build_known_pattern_hint(slug)
             if sponsor_history:
                 description_section += sponsor_history
-                logger.info(f"[{slug}:{episode_id}] Including sponsor history: {sponsor_history.strip()}")
+                logger.info(f"[{slug}:{episode_id}] Including known-pattern hint: {sponsor_history.strip()}")
 
             # Add learned ad-break position hint (issue #360 experiment)
             if positional_prior_hint:
@@ -1913,6 +1948,14 @@ class AdDetector:
             # Inherited from the matched pattern; None (pattern predates the
             # category column) stays unset through the merge seam.
             'category': match.category,
+            # getattr: FingerprintMatch has no 'defined' field (audio stage
+            # predates the trust-tier split); treat it as not tier-1.
+            'pattern_defined': getattr(match, 'defined', False),
+            # getattr: FingerprintMatch has no span-estimation fields (audio
+            # stage matches real audio, never estimates a boundary).
+            'span_estimated': getattr(match, 'span_estimated', False),
+            'text_start': getattr(match, 'text_start', None),
+            'text_end': getattr(match, 'text_end', None),
         })
         pattern_matched_regions.append({
             'start': match.start,
@@ -1921,6 +1964,9 @@ class AdDetector:
         })
         if self.pattern_service and match.pattern_id:
             self.pattern_service.record_pattern_match(match.pattern_id, episode_id)
+            # getattr: FingerprintMatch has no 'absorbed_ids' field.
+            for absorbed in getattr(match, 'absorbed_ids', []) or []:
+                self.pattern_service.record_pattern_match(absorbed, episode_id)
 
     def _is_region_covered(self, start: float, end: float,
                            covered_regions: list) -> bool:
@@ -2285,15 +2331,18 @@ class AdDetector:
                     )
                     continue
                 # The stage-priority merge below overwrites last's stage
-                # (e.g. claude -> dai_differential) BEFORE the #541 upgrade
-                # check runs. Snapshot it: the check must see the
-                # corroborator's real stage, or a claude ad that happens to
-                # sort before the differential region is misread as
-                # differential and the hold survives its own corroboration
-                # (DTNS 5313: 0.24s of sort order decided cut vs held).
+                # (e.g. claude -> dai_differential); snapshot the sponsor and
+                # confidence it carries in now, for the junk-sponsor recovery
+                # and #541 fallback below.
                 last_stage_before_merge = last.get('detection_stage')
                 last_sponsor_before_merge = last.get('sponsor')
                 last_confidence_before_merge = last.get('confidence', 0)
+                # An estimated text_pattern span is advisory: it recognized a
+                # phrase but a paired boundary is a guess, so it contributes
+                # no stage toward corroboration.
+                last_corroborating_stage = (
+                    None if last_stage_before_merge == 'text_pattern'
+                    and last.get('span_estimated') else last_stage_before_merge)
                 # Adjacency is not corroboration (#541): a held differential
                 # only merges with a non-differential marker on true overlap.
                 if (bool(last.get('differential_uncorroborated'))
@@ -2331,6 +2380,23 @@ class AdDetector:
                 if current.get('confidence', 0) > last.get('confidence', 0):
                     last['confidence'] = current['confidence']
 
+                # A defined pattern's cut authority survives the fold (#541):
+                # OR the flag so it is never lost to whichever member wins the stage.
+                if current.get('pattern_defined'):
+                    last['pattern_defined'] = True
+
+                # Accumulate every stage folded in: the priority overwrite
+                # below keeps only the winner, which would otherwise lose an
+                # earlier corroborator's stage (#541).
+                member_stages = last.setdefault(
+                    _MEMBER_STAGES,
+                    [last_corroborating_stage] if last_corroborating_stage else [])
+                cur_stage = current.get('detection_stage')
+                if cur_stage == 'text_pattern' and current.get('span_estimated'):
+                    cur_stage = None  # advisory span: recognition, not corroboration
+                if cur_stage and cur_stage not in member_stages:
+                    member_stages.append(cur_stage)
+
                 # Prefer pattern detection stage over claude. This governs
                 # cutting trust (stage + pattern_id) only; the sponsor LABEL is
                 # decided below, tied to the reason, so the two never disagree.
@@ -2339,22 +2405,33 @@ class AdDetector:
                 if stage_priority.get(current.get('detection_stage'), 2) < stage_priority.get(last.get('detection_stage'), 2):
                     last['detection_stage'] = current['detection_stage']
                     last['pattern_id'] = current.get('pattern_id')
+                    # span_estimated travels with the stage: without it a later
+                    # fold reads the promoted stage as grounded, not advisory.
+                    last['span_estimated'] = current.get('span_estimated', False)
+                    for key in ('text_start', 'text_end'):
+                        if key in current:
+                            last[key] = current[key]
 
                 # Keep sponsor and reason as a consistent pair from the SAME
                 # member, so a merged marker never shows one ad's sponsor with
                 # another ad's description (a Nordstrom pattern that matched a
                 # host tour-promo, or a David Protein read folded into a
-                # ZipRecruiter marker). The more descriptive (longer) reason
-                # comes from the content-aware detection, so its sponsor is the
-                # accurate label for that text -- take both from it together.
+                # ZipRecruiter marker). The pair goes to whichever member
+                # covers the largest span, mirroring the category rule above;
+                # an exact tie goes to the more descriptive (longer) reason.
                 cur_reason = current.get('reason') or ''
                 last_reason = last.get('reason') or ''
-                if len(cur_reason) > len(last_reason):
+                cur_label_span = _label_reach(current)
+                last_label_span = last.get(_LABEL_SPAN, 0.0)
+                if (cur_label_span > last_label_span
+                        or (cur_label_span == last_label_span
+                            and len(cur_reason) > len(last_reason))):
                     last['reason'] = cur_reason
                     last['sponsor'] = current.get('sponsor')
+                    last[_LABEL_SPAN] = cur_label_span
 
                 # Recover from a junk primary sponsor (segment name /
-                # reasoning prose) picked by the reason-length rule above:
+                # reasoning prose) picked by the label rule above:
                 # try the OTHER member's sponsor, preferring whichever had
                 # higher confidence, before giving up to None (Windows
                 # Weekly: 'Xbox segment' 0.8 discarded for 'CiraSync' 0.9's
@@ -2382,13 +2459,14 @@ class AdDetector:
                 if diff_is_last != diff_is_cur:
                     diff_side = last if diff_is_last else current
                     other = current if diff_is_last else last
-                    other_stage = (current.get('detection_stage')
-                                   if diff_is_last else last_stage_before_merge)
+                    other_stage = (cur_stage
+                                   if diff_is_last else last_corroborating_stage)
+                    stages_seen = set(last.get(_MEMBER_STAGES) or []) | {other_stage}
                     independent = (
-                        other_stage in ('fingerprint', 'text_pattern')
+                        bool(stages_seen & {'fingerprint', 'text_pattern'})
                         or is_cue_backed(other))
                     claude_verified = (
-                        other_stage == 'claude'
+                        'claude' in stages_seen
                         and _span_transcript_coverage(
                             segments, diff_side['start'], diff_side['end'])
                         >= DIFFERENTIAL_CLAUDE_UPGRADE_MIN_COVERAGE)
@@ -2415,6 +2493,8 @@ class AdDetector:
             if marker.get('category') not in SEGMENT_CATEGORIES:
                 marker.pop('category', None)
             marker.pop(_CATEGORY_SPAN, None)
+            marker.pop(_LABEL_SPAN, None)
+            marker.pop(_MEMBER_STAGES, None)
 
         return merged
 
@@ -2478,6 +2558,7 @@ class AdDetector:
                     combined['end'] = max(a['end'], b['end'])
                     combined['confidence'] = max(a_conf, b_conf)
                     combined['sponsor'] = sponsor
+                    combined['pattern_defined'] = bool(a.get('pattern_defined')) or bool(b.get('pattern_defined'))
 
                     category_source = primary
                     if action_map is not None:
@@ -2556,7 +2637,7 @@ class AdDetector:
                     f"it may also list episode sponsors):\n{episode_description}\n"
                 )
 
-            sponsor_history = self._get_podcast_sponsor_history(slug)
+            sponsor_history = self._build_known_pattern_hint(slug)
             if sponsor_history:
                 description_section += sponsor_history
 

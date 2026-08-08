@@ -11,19 +11,31 @@ States:
 import logging
 import threading
 import time
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+# Cap on the triggering-failure text embedded in CircuitBreakerOpen messages.
+_CAUSE_MAX_LEN = 200
 
 
 class CircuitBreakerOpen(Exception):
     """Raised when the circuit breaker is open and the call is rejected."""
 
-    def __init__(self, name: str, seconds_until_retry: float):
+    def __init__(self, name: str, seconds_until_retry: float, cause: Optional[str] = None,
+                 auth_cause: bool = False):
         self.name = name
         self.seconds_until_retry = seconds_until_retry
-        super().__init__(
-            f"Circuit breaker '{name}' is open, retry in {seconds_until_retry:.0f}s"
-        )
+        self.cause = cause
+        # Classified from the full untruncated trigger error at open time
+        # (see CircuitBreaker.record_failure), not from `cause` above, which
+        # is truncated for log readability and may have dropped the marker
+        # that a classifier like is_auth_error looks for.
+        self.auth_cause = auth_cause
+        message = f"Circuit breaker '{name}' is open, retry in {seconds_until_retry:.0f}s"
+        if cause:
+            message += f" (opened by: {cause})"
+        super().__init__(message)
 
 
 class CircuitBreaker:
@@ -48,20 +60,29 @@ class CircuitBreaker:
     HALF_OPEN = "half_open"
 
     def __init__(self, name: str, failure_threshold: int = 5,
-                 recovery_timeout: int = 60):
+                 recovery_timeout: int = 60,
+                 cause_classifier: Optional[Callable[[Exception], bool]] = None):
         """
         Args:
             name: Identifier for this circuit (used in logging)
             failure_threshold: Consecutive failures before opening the circuit
             recovery_timeout: Seconds to wait before allowing a probe request
+            cause_classifier: optional predicate run on the full trigger
+                exception when the breaker opens; its result is exposed as
+                CircuitBreakerOpen.auth_cause so callers can classify a
+                breaker-masked failure without depending on the truncated
+                message text.
         """
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
+        self._cause_classifier = cause_classifier
 
         self._state = self.CLOSED
         self._failure_count = 0
         self._last_failure_time = 0.0
+        self._cause: Optional[str] = None
+        self._auth_cause = False
         self._lock = threading.Lock()
 
     @property
@@ -86,7 +107,8 @@ class CircuitBreaker:
             current_state = self._evaluate_state()
             if current_state == self.OPEN:
                 seconds_left = self.recovery_timeout - (time.time() - self._last_failure_time)
-                raise CircuitBreakerOpen(self.name, max(0, seconds_left))
+                raise CircuitBreakerOpen(self.name, max(0, seconds_left),
+                                          cause=self._cause, auth_cause=self._auth_cause)
 
     def record_success(self):
         """Record a successful call. Resets the circuit to CLOSED."""
@@ -95,14 +117,19 @@ class CircuitBreaker:
                 logger.info(f"Circuit breaker '{self.name}': {self._state} -> CLOSED (success)")
             self._state = self.CLOSED
             self._failure_count = 0
+            self._cause = None
+            self._auth_cause = False
 
-    def record_failure(self):
+    def record_failure(self, error: Optional[Exception] = None):
         """Record a failed call. Opens the circuit after threshold failures.
 
         Callers must NOT invoke this for HTTP 429 / rate-limit errors --
         throttling is the provider asking us to slow down, not a provider
         outage, and counting it would open the breaker during normal free-tier
         use.
+
+        error: triggering exception; its text becomes the open-circuit cause
+        so a later CircuitBreakerOpen still surfaces it (e.g. an auth outage).
         """
         with self._lock:
             self._failure_count += 1
@@ -110,6 +137,8 @@ class CircuitBreaker:
 
             if self._state == self.HALF_OPEN:
                 self._state = self.OPEN
+                self._cause = self._format_cause(error)
+                self._auth_cause = self._classify(error)
                 logger.warning(
                     f"Circuit breaker '{self.name}': HALF_OPEN -> OPEN "
                     f"(probe failed, retry in {self.recovery_timeout}s)"
@@ -122,6 +151,27 @@ class CircuitBreaker:
                         f"retry in {self.recovery_timeout}s)"
                     )
                 self._state = self.OPEN
+                self._cause = self._format_cause(error)
+                self._auth_cause = self._classify(error)
+
+    @staticmethod
+    def _format_cause(error: Optional[Exception]) -> Optional[str]:
+        if error is None:
+            return None
+        text = str(error)
+        if len(text) > _CAUSE_MAX_LEN:
+            text = text[:_CAUSE_MAX_LEN] + '...'
+        return text
+
+    def _classify(self, error: Optional[Exception]) -> bool:
+        """Run cause_classifier on the full, untruncated trigger error."""
+        if self._cause_classifier is None or error is None:
+            return False
+        try:
+            return bool(self._cause_classifier(error))
+        except Exception:
+            # Classification must never break failure recording.
+            return False
 
     def reset(self):
         """Manually reset the circuit breaker to CLOSED."""
@@ -129,3 +179,5 @@ class CircuitBreaker:
             self._state = self.CLOSED
             self._failure_count = 0
             self._last_failure_time = 0.0
+            self._cause = None
+            self._auth_cause = False

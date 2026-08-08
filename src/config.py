@@ -3,6 +3,7 @@
 All magic numbers and thresholds should be defined here
 for easy tuning and consistency across the codebase.
 """
+import fnmatch
 import json
 import logging
 import os
@@ -181,8 +182,9 @@ def is_edge_cue_snapped(ad, edge: str) -> bool:
 def is_pending_review(marker) -> bool:
     """A marker awaiting a human decision: held for review and not cut. Single
     source of truth for the pending-review bucket and count. Missing was_cut
-    defaults to True (cut) to match the API's marker bucketing, so a legacy
-    marker without the field is never counted as a phantom pending review."""
+    defaults to True (cut) here; the API defaults it by episode status instead,
+    so a legacy marker without the field is never counted as a phantom pending
+    review."""
     return bool(marker.get('held_for_review')) and not marker.get('was_cut', True)
 
 
@@ -200,6 +202,18 @@ def count_not_cut(markers) -> int:
     return sum(1 for m in markers
                if not m.get('was_cut', True) and not is_pending_review(m)
                and m.get('action_applied') != 'keep')
+
+
+def title_matches_skip_patterns(title, patterns_json):
+    """Case-insensitive fnmatch against the feed's title skip list."""
+    if not title or not patterns_json:
+        return False
+    try:
+        patterns = json.loads(patterns_json)
+    except (ValueError, TypeError):
+        return False
+    low = title.lower()
+    return any(fnmatch.fnmatch(low, str(p).lower()) for p in patterns if p)
 
 # Ad evidence thresholds
 CONTENT_DURATION_THRESHOLD = 120.0  # Segments >= this without evidence are likely content
@@ -645,8 +659,8 @@ PROCESSING_MODE_COLUMN_UPDATES = {
 def resolve_skip_second_pass(podcast_row):
     """Whether the feed opts out of the pass-2 verification scan (issue #599).
 
-    Per-feed only, like detect_show_segments: there is no global default that
-    could silently disable verification everywhere. NULL/0 runs pass 2.
+    Per-feed only: there is no global default that could silently disable
+    verification everywhere. NULL/0 runs pass 2.
     """
     return bool(podcast_row and podcast_row.get('skip_second_pass'))
 

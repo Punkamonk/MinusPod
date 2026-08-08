@@ -54,6 +54,8 @@ SEED_SNAPSHOT = {
     'chapters_enabled': 'true',
     'chapters_model': 'claude-haiku-4-5-20251001',
     'community_sync_categories': DEFAULT_COMMUNITY_SYNC_CATEGORIES_JSON,
+    'detect_show_segments': '0',
+    'process_new_episodes_first': '1',
     'differential_hold_min_seconds': '10',
     'differential_measured_corr_max': '0.60',
     'enable_ad_review': 'false',
@@ -78,7 +80,7 @@ SEED_SNAPSHOT = {
     'review_prompt': ('sha256', '897102def672fcfffdfd2500e43cfdb6699aebf650606aee18549a4c033758d3'),
     'rss_refresh_interval_minutes': '15',
     'segment_category_actions': '{}',
-    'system_prompt': ('sha256', 'a15ad2a62cb242d11942e6d71f4f4b88e14c73e1418c50bccea8f08facbf0b92'),
+    'system_prompt': ('sha256', '082a8f30ee3b475c44b0f5d1af7a9e4d12035cdfdf3da8d427c8c59037acba58'),  # Updated for cross_promo semantics change
     'transcribe_chunk_overlap_seconds': '30',
     'transcribe_concurrent_chunks': '4',
     'whisper_api_timeout_seconds': '600',
@@ -149,6 +151,7 @@ EXPECTED_AD_RESET_KEYS = {
 # must never wipe a live key) and the *_prompt_override keys (memory obs
 # 26236: cleared by reset_prompts_only, not reset_setting).
 NON_RESETTABLE_KEYS = (
+    'detect_show_segments', 'process_new_episodes_first',
     'enable_ad_review', 'feed_auth_key', 'keep_original_audio',
     'max_feed_episodes', 'offline_queue_enabled', 'offline_queue_ttl_hours',
     'only_expose_processed_default', 'omit_temperature',
@@ -371,11 +374,13 @@ class TestGetDefaults:
         # whisperApiTimeoutSeconds added after that (80 -> 81).
         # chapterPrompt added after that (81 -> 82).
         # artworkBadgePosition added after that (82 -> 83).
+        # detectShowSegments added after that (83 -> 84).
+        # processNewEpisodesFirst added after that (84 -> 85).
         payload_keys = {
             spec.payload_key for spec in SETTINGS_REGISTRY.values()
             if spec.payload_key
         }
-        assert len(payload_keys) == 83
+        assert len(payload_keys) == 85
         assert 'audioCuePairOrientWindowSeconds' not in payload_keys
         assert 'audioCuePairMaxBreakFraction' in payload_keys
 

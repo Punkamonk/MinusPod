@@ -60,6 +60,9 @@ export interface Feed {
   titleOverride?: string | null;
   detectionMode?: string | null;
   chaptersMode?: 'auto' | 'generate' | 'off' | null;
+  // Per-feed auto-process queue priority (#625). Server always resolves to
+  // one of the three values; null/absent reads as 'normal'.
+  queuePriority?: 'high' | 'normal' | 'low' | null;
   cueTemplateScoreOverride?: number | null;
   cueCreateFromPairsOverride?: boolean | null;
   cuePairMinBreakOverride?: number | null;
@@ -99,11 +102,18 @@ export interface Feed {
   skipTranscription?: boolean | null;
   maxEpisodes?: number | null;
   onlyExposeProcessedEpisodes?: boolean | null;
+  // Per-feed episode title blacklist: fnmatch glob patterns matched against
+  // episode titles. A match is never queued or JIT-processed.
+  titleSkipPatterns?: string[];
+  // Served-RSS visibility for a title-blacklisted episode. Absent/null
+  // resolves to 'serve_original'.
+  titleSkipAction?: 'serve_original' | 'hide' | null;
   // Per-feed segment-action overrides (issue #565): only overridden
   // categories are present (others inherit the global map); null/absent
   // means there are no per-feed overrides at all.
   segmentCategoryActions?: Partial<Record<SegmentCategory, SegmentAction>> | null;
-  // Also detect intro/outro/recap/housekeeping segments. Off by default.
+  // Also detect intro/outro/recap/housekeeping segments. Null inherits the
+  // global detectShowSegments default.
   detectShowSegments?: boolean | null;
   // Serve MinusPod episode ids as RSS item GUIDs (#598). Null/false pass
   // upstream GUIDs through; new feeds are created with true.
@@ -213,6 +223,10 @@ export interface EpisodeDetail extends Episode {
     feedAverageSeconds: number;
     sampleSize: number;
   } | null;
+  // Set when pass-1 LLM detection failed and the episode was published on
+  // pattern/cross-fetch markers alone (degraded continue). Window counts
+  // are null when not cheaply available from the run's stats blob.
+  partialDetection?: { reason: string; windowsFailed: number | null; windowsTotal: number | null } | null;
   // Adjacent episodes in the same feed (newest-first order): `previous` is the
   // newer episode, `next` the older one. Either is null at a feed boundary.
   navigation?: { previous: EpisodeNeighbor | null; next: EpisodeNeighbor | null };
@@ -409,6 +423,8 @@ export interface Settings {
   rssRefreshIntervalMinutes: SettingValueNumber;
   segmentCategoryActions: { value: Record<SegmentCategory, SegmentAction>; isDefault: boolean };
   onlyExposeProcessedDefault: SettingValueBoolean;
+  detectShowSegments: SettingValueBoolean;
+  processNewEpisodesFirst: SettingValueBoolean;
   artworkWatermarkEnabled: SettingValueBoolean;
   artworkBadgePosition: SettingValue;
   feedAuthEnabled: SettingValueBoolean;
@@ -498,6 +514,8 @@ export interface Settings {
     rssRefreshIntervalMinutes: number;
     segmentCategoryActions: Record<SegmentCategory, SegmentAction>;
     onlyExposeProcessedDefault: boolean;
+    detectShowSegments: boolean;
+    processNewEpisodesFirst: boolean;
     artworkWatermarkEnabled: boolean;
     artworkBadgePosition: string;
     feedAuthEnabled: boolean;
@@ -589,6 +607,8 @@ export interface UpdateSettingsPayload {
   // PATCH, which replaces the stored map outright).
   segmentCategoryActions?: Partial<Record<SegmentCategory, SegmentAction>>;
   onlyExposeProcessedDefault?: boolean;
+  detectShowSegments?: boolean;
+  processNewEpisodesFirst?: boolean;
   artworkWatermarkEnabled?: boolean;
   artworkBadgePosition?: string;
   feedAuthEnabled?: boolean;

@@ -19,6 +19,7 @@ from api import (
     _normalize_nullable_finite_float,
 )
 from cancel import cancel_processing
+from database.queue import compute_queue_priority
 from processing_queue import ProcessingQueue
 from config import (
     FEED_REFRESH_FAILURE_ALERT_THRESHOLD,
@@ -214,6 +215,67 @@ def _normalize_chapters_mode(value):
     return None, f"chaptersMode must be one of: {', '.join(sorted(VALID_CHAPTERS_MODES))}"
 
 
+# API queuePriority -> DB queue_priority column (#625). 'normal' stores NULL
+# (not 0) to keep unset rows clean; both read back as 'normal' downstream.
+QUEUE_PRIORITY_DB_VALUES = {'high': 10, 'low': -10}
+_QUEUE_PRIORITY_API_VALUES = {v: k for k, v in QUEUE_PRIORITY_DB_VALUES.items()}
+
+
+def _normalize_queue_priority(value):
+    """Validate the per-feed queuePriority override (#625).
+
+    Returns (db_value, error). None or 'normal' clears the override (stored
+    NULL). 'high'/'low' map to +-10. Any other value is rejected.
+    """
+    if value is None or value == 'normal':
+        return None, None
+    if value in QUEUE_PRIORITY_DB_VALUES:
+        return QUEUE_PRIORITY_DB_VALUES[value], None
+    return None, 'queuePriority must be one of: high, normal, low'
+
+
+def _serialize_queue_priority(raw) -> str:
+    """DB queue_priority column back to the API's three-value enum."""
+    return _QUEUE_PRIORITY_API_VALUES.get(raw, 'normal')
+
+
+_TITLE_SKIP_PATTERN_MAX_LEN = 200
+_TITLE_SKIP_PATTERNS_MAX_COUNT = 50
+
+
+def _normalize_title_skip_patterns(value):
+    """Validate the per-feed titleSkipPatterns glob list.
+
+    Returns (db_value, error). None or an empty list clears the blacklist
+    (stored NULL). Each pattern must be a 1-200 char string; max 50 patterns.
+    """
+    if value is None:
+        return None, None
+    if not isinstance(value, list):
+        return None, 'titleSkipPatterns must be an array of strings or null'
+    if len(value) > _TITLE_SKIP_PATTERNS_MAX_COUNT:
+        return None, f'titleSkipPatterns must have at most {_TITLE_SKIP_PATTERNS_MAX_COUNT} patterns'
+    for p in value:
+        if not isinstance(p, str) or not (1 <= len(p) <= _TITLE_SKIP_PATTERN_MAX_LEN):
+            return None, f'titleSkipPatterns entries must be strings of 1-{_TITLE_SKIP_PATTERN_MAX_LEN} characters'
+    if not value:
+        return None, None
+    return json.dumps(value), None
+
+
+def _normalize_title_skip_action(value):
+    """Validate the per-feed titleSkipAction (served-RSS visibility).
+
+    Returns (db_value, error). None or 'serve_original' clears the override
+    (stored NULL, the default). 'hide' is stored as-is.
+    """
+    if value in (None, 'serve_original'):
+        return None, None
+    if value == 'hide':
+        return value, None
+    return None, "titleSkipAction must be one of: serve_original, hide"
+
+
 def _normalize_segment_category_actions(value):
     """Validate a per-feed segmentCategoryActions override (issue #565).
 
@@ -246,6 +308,20 @@ def _deserialize_segment_category_actions(raw):
     except (TypeError, ValueError):
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _deserialize_title_skip_patterns(raw):
+    """Parse the stored title_skip_patterns JSON back for API responses.
+
+    Always returns a list, empty when unset or unparsable.
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 from config import AUDIO_CUE_SCORE_MAX, AUDIO_CUE_SCORE_MIN
@@ -385,6 +461,9 @@ def _podcast_base_json(podcast, feed_url) -> dict:
         'titleOverride': podcast.get('title_override'),
         'detectionMode': podcast.get('detection_mode'),
         'chaptersMode': podcast.get('chapters_mode'),
+        'queuePriority': _serialize_queue_priority(podcast.get('queue_priority')),
+        'titleSkipPatterns': _deserialize_title_skip_patterns(podcast.get('title_skip_patterns')),
+        'titleSkipAction': podcast.get('title_skip_action') or 'serve_original',
         'segmentCategoryActions': _deserialize_segment_category_actions(
             podcast.get('segment_category_actions')),
         'processingMode': resolve_feed_processing_mode(podcast),
@@ -924,6 +1003,24 @@ def update_feed(slug):
             return error_response(chapters_err, 400)
         updates['chapters_mode'] = chapters_val
 
+    if 'queuePriority' in data:
+        qp_val, qp_err = _normalize_queue_priority(data['queuePriority'])
+        if qp_err:
+            return error_response(qp_err, 400)
+        updates['queue_priority'] = qp_val
+
+    if 'titleSkipPatterns' in data:
+        patterns_val, patterns_err = _normalize_title_skip_patterns(data['titleSkipPatterns'])
+        if patterns_err:
+            return error_response(patterns_err, 400)
+        updates['title_skip_patterns'] = patterns_val
+
+    if 'titleSkipAction' in data:
+        action_val, action_err = _normalize_title_skip_action(data['titleSkipAction'])
+        if action_err:
+            return error_response(action_err, 400)
+        updates['title_skip_action'] = action_val
+
     if 'segmentCategoryActions' in data:
         actions_val, actions_err = _normalize_segment_category_actions(
             data['segmentCategoryActions'])
@@ -1001,6 +1098,12 @@ def update_feed(slug):
         db.update_podcast(slug, **updates)
         logger.info(f"Updated feed {slug}: {updates}")
 
+        # A priority change re-stamps still-pending queue rows so it takes
+        # effect immediately instead of waiting for their next re-enqueue.
+        # Skipped when the PATCH resent the current value (no-op retry).
+        if 'queue_priority' in updates and updates['queue_priority'] != podcast.get('queue_priority'):
+            db.restamp_pending_priorities(podcast['id'], updates['queue_priority'] or 0)
+
         # Invalidate feed cache since we modified a feed
         from main_app.feeds import invalidate_feed_cache
         invalidate_feed_cache()
@@ -1020,7 +1123,8 @@ def update_feed(slug):
         # own_episode_guids rewrites every item <guid> (#598).
         if ('max_episodes' in updates or 'only_expose_processed_episodes' in updates
                 or 'title_override' in updates or 'source_url' in updates
-                or 'own_episode_guids' in updates):
+                or 'own_episode_guids' in updates or 'title_skip_patterns' in updates
+                or 'title_skip_action' in updates):
             db.update_podcast_etag(slug, None, None)
             try:
                 from main_app.feeds import refresh_rss_feed
@@ -1407,10 +1511,13 @@ def rerender_segments(slug):
                 episode.get('published_at'),
             )
             if not started:
+                priority = compute_queue_priority(
+                    podcast.get('queue_priority'), episode.get('published_at'), manual=True)
                 db.upsert_episode_for_processing(
                     slug, episode_id, episode.get('original_url'),
                     episode.get('title', 'Unknown'),
                     episode.get('published_at'), episode.get('description'),
+                    priority=priority,
                 )
                 get_status_service().queue_episode(
                     slug, episode_id, episode.get('title', 'Unknown'),

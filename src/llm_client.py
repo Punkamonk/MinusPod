@@ -84,6 +84,15 @@ _JSON_FORMAT_SYSTEM_INSTRUCTION = (
     "Malformed JSON causes parsing failures.</output_format>"
 )
 
+# Substrings seen in 400s from endpoints that reject response_format / structured outputs.
+_JSON_MODE_REJECTIONS = ("response_format", "structured-outputs", "structured outputs")
+
+
+def _rejects_json_mode(err: str) -> bool:
+    """True if the error text indicates the endpoint rejects JSON-mode output."""
+    low = err.lower()
+    return any(k in low for k in _JSON_MODE_REJECTIONS)
+
 
 def _log_content(label: str, content: str, max_length: int = 2000):
     """Log LLM content at DEBUG level with intelligent truncation.
@@ -371,13 +380,13 @@ class LLMClient(ABC):
         if self._circuit_breaker:
             self._circuit_breaker.check()
 
-    def _record_circuit_breaker(self, success: bool):
+    def _record_circuit_breaker(self, success: bool, error: Optional[Exception] = None):
         """Record success/failure on the circuit breaker after API call."""
         if self._circuit_breaker:
             if success:
                 self._circuit_breaker.record_success()
             else:
-                self._circuit_breaker.record_failure()
+                self._circuit_breaker.record_failure(error)
 
     def _warn_if_truncated(self, stop_indicator: str, max_tokens: int, model: str):
         """Log a warning if the LLM response was truncated due to max_tokens."""
@@ -447,13 +456,13 @@ class LLMClient(ABC):
                     response = send_fn(eff_max, eff_temp, eff_reasoning)
                 except Exception as e2:
                     if not is_rate_limit_error(e2):
-                        self._record_circuit_breaker(success=False)
+                        self._record_circuit_breaker(success=False, error=e2)
                     raise
                 return response, eff_max, eff_temp, eff_reasoning
 
             will_fallback = _should_fallback_retry(e, episode_id, pass_name)
             if not is_rate_limit_error(e) and not will_fallback:
-                self._record_circuit_breaker(success=False)
+                self._record_circuit_breaker(success=False, error=e)
             if not will_fallback:
                 raise
             _log_fallback(provider_label, episode_id, pass_name, model,
@@ -464,7 +473,7 @@ class LLMClient(ABC):
                 response = send_fn(defaults.max_tokens, defaults.temperature, defaults.reasoning_effort)
             except Exception as e2:
                 if not is_rate_limit_error(e2):
-                    self._record_circuit_breaker(success=False)
+                    self._record_circuit_breaker(success=False, error=e2)
                 raise
             return response, defaults.max_tokens, defaults.temperature, defaults.reasoning_effort
 
@@ -822,10 +831,44 @@ class OpenAICompatibleClient(LLMClient):
             return kw
 
         def _send(tok, tmp, reasoning):
+            from openai import BadRequestError
             kw = _build_kwargs(tok, tmp, reasoning)
-            if cached_param is not None:
-                return self._client.chat.completions.create(**kw)
-            return self._call_with_token_param_fallback(model, kw, token_param)
+            try:
+                if cached_param is not None:
+                    return self._client.chat.completions.create(**kw)
+                return self._call_with_token_param_fallback(model, kw, token_param)
+            except BadRequestError as e:
+                # kw may have been mutated in place by the token-param fallback above;
+                # only treat this as a JSON-mode rejection, not an unrelated 400.
+                sent_rf = 'response_format' in kw
+                flag = self._get_json_format_supported()
+                if sent_rf and flag is not True and _rejects_json_mode(str(e)):
+                    self._json_format_supported = False
+                    self._persist_json_format_flag()
+                    logger.warning(
+                        "Endpoint rejected response_format at runtime; "
+                        "retrying once with prompt-injection fallback")
+                    kw2 = _build_kwargs(tok, tmp, reasoning)
+                    return self._client.chat.completions.create(**kw2)
+                if sent_rf and flag is None:
+                    # Unrecognized 400 wording on an unprobed endpoint: try the
+                    # fallback speculatively, only persist if it actually fixes it.
+                    logger.warning(
+                        "Unrecognized 400 with response_format set on unprobed "
+                        "endpoint; speculatively retrying with prompt-injection fallback")
+                    self._json_format_supported = False
+                    kw2 = _build_kwargs(tok, tmp, reasoning)
+                    try:
+                        response = self._client.chat.completions.create(**kw2)
+                    except Exception:
+                        # Any retry failure (not just another 400) means the
+                        # speculative fallback is unconfirmed; revert and
+                        # surface the original error, not the retry's.
+                        self._json_format_supported = None
+                        raise e
+                    self._persist_json_format_flag()
+                    return response
+                raise
 
         response, eff_max, eff_temp, eff_reasoning = self._send_with_fallback(
             "OpenAI", model,
@@ -997,7 +1040,7 @@ class OpenAICompatibleClient(LLMClient):
             self._json_format_supported = True
             logger.info(f"Endpoint supports response_format json_object ({safe_url_for_log(self.base_url, keep_path=True)})")
         except BadRequestError as e:
-            if 'response_format' in str(e).lower():
+            if _rejects_json_mode(str(e)):
                 self._json_format_supported = False
                 logger.info(
                     f"Endpoint does not support response_format json_object ({safe_url_for_log(self.base_url, keep_path=True)}); "
@@ -1010,7 +1053,11 @@ class OpenAICompatibleClient(LLMClient):
             logger.warning(f"json_format probe failed (non-fatal): {e}")
             return None
 
-        # Persist to DB so we don't re-probe after restart
+        self._persist_json_format_flag()
+        return self._json_format_supported
+
+    def _persist_json_format_flag(self):
+        """Persist self._json_format_supported to DB so we don't re-probe after restart."""
         try:
             from database import Database
             db = Database()
@@ -1021,8 +1068,6 @@ class OpenAICompatibleClient(LLMClient):
             )
         except Exception as e:
             logger.warning(f"Could not persist json_format probe result: {e}")
-
-        return self._json_format_supported
 
     def _try_ollama_native_list(self) -> List[LLMModel]:
         """Try Ollama's native /api/tags endpoint as a fallback for model listing.
@@ -1129,8 +1174,13 @@ def _current_config_key() -> str:
         return f"{provider}:{base}"
     return f"unknown:{provider}"
 
-# Circuit breaker for LLM API calls (one per process, shared across threads)
-_llm_circuit_breaker = CircuitBreaker("llm-api", failure_threshold=5, recovery_timeout=60)
+# Circuit breaker for LLM API calls (one per process, shared across threads).
+# cause_classifier is a lazy lambda (not `is_auth_error` directly) because
+# that function is defined further down this module; the name is only
+# resolved when the breaker actually opens, well after import completes.
+_llm_circuit_breaker = CircuitBreaker(
+    "llm-api", failure_threshold=5, recovery_timeout=60,
+    cause_classifier=lambda error: is_auth_error(error))
 
 # Per-episode token accumulator.
 #
@@ -1573,13 +1623,25 @@ def is_llm_api_error(error: Exception) -> bool:
     return False
 
 
+_AUTH_ERROR_MARKERS = ('claude_cli_not_authenticated', 'authentication_error')
+
+
 def is_auth_error(error: Exception) -> bool:
     """Check if error is an LLM authentication/authorization failure (401/403).
 
     Billing/quota 401/403s are excluded -- they classify as
     ``is_limit_exceeded_error`` instead, so each error fires exactly one of
-    the Auth Failure / Limit Exceeded webhook events.
+    the Auth Failure / Limit Exceeded webhook events. Falls back to string
+    markers for wrapped errors (e.g. multi-window failures) that lose the
+    original SDK exception type; a bare "401"/"403" also requires auth
+    wording so a wrapped billing error is not misclassified as an auth
+    outage. ``auth_cause`` short-circuits this for a CircuitBreakerOpen
+    raised while the breaker is open: it was classified from the full,
+    untruncated triggering error at open time (see CircuitBreaker), so it
+    survives the ~200-char truncation applied to the embedded cause text.
     """
+    if getattr(error, 'auth_cause', False):
+        return True
     if is_limit_exceeded_error(error):
         return False
     a = _anthropic_exc()
@@ -1594,6 +1656,13 @@ def is_auth_error(error: Exception) -> bool:
             return True
         if isinstance(error, o.APIError) and _provider_status_code(error) in (401, 403):
             return True
+    text = str(error).lower()
+    if any(marker in text for marker in _AUTH_ERROR_MARKERS):
+        return True
+    if (text.startswith('401') or text.startswith('403')
+            or 'error code: 401' in text or 'error code: 403' in text):
+        return any(word in text for word in
+                    ('unauthorized', 'api key', 'authentication', 'credential'))
     return False
 
 

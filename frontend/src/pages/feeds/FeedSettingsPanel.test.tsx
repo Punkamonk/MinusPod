@@ -217,6 +217,97 @@ describe('FeedSettingsPanel chapters mode control', () => {
   });
 });
 
+describe('FeedSettingsPanel queue priority control (#625)', () => {
+  const QUEUE_PRIORITY_SELECT_NAME = 'Queue priority';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUpdateFeed.mockResolvedValue(makeFeed());
+  });
+
+  it('renders Normal when queuePriority is unset', () => {
+    renderPanel(makeFeed());
+    const select = screen.getByRole('combobox', { name: QUEUE_PRIORITY_SELECT_NAME }) as HTMLSelectElement;
+    expect(select.value).toBe('normal');
+  });
+
+  it('renders the current value when queuePriority is low', () => {
+    renderPanel(makeFeed({ queuePriority: 'low' }));
+    const select = screen.getByRole('combobox', { name: QUEUE_PRIORITY_SELECT_NAME }) as HTMLSelectElement;
+    expect(select.value).toBe('low');
+  });
+
+  it('selecting High fires updateFeed with queuePriority high', async () => {
+    renderPanel(makeFeed());
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: QUEUE_PRIORITY_SELECT_NAME }), 'high');
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { queuePriority: 'high' });
+  });
+});
+
+describe('FeedSettingsPanel title blacklist controls', () => {
+  const ADD_BUTTON_NAME = '+ Add pattern';
+  const ACTION_SELECT_NAME = 'Skipped episodes';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetSettings.mockResolvedValue({});
+    mockUpdateFeed.mockResolvedValue(makeFeed());
+  });
+
+  it('renders existing patterns as chips', () => {
+    renderPanel(makeFeed({ titleSkipPatterns: ['Bonus Episode *', 'Best of *'] }));
+    expect(screen.getByText('Bonus Episode *')).toBeDefined();
+    expect(screen.getByText('Best of *')).toBeDefined();
+  });
+
+  it('adding a pattern fires updateFeed with the appended list', async () => {
+    renderPanel(makeFeed({ titleSkipPatterns: ['Bonus Episode *'] }));
+    await userEvent.click(screen.getByRole('button', { name: ADD_BUTTON_NAME }));
+    await userEvent.type(screen.getByLabelText('New title pattern'), 'Best of *');
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', {
+      titleSkipPatterns: ['Bonus Episode *', 'Best of *'],
+    });
+  });
+
+  it('a failed add keeps the editor open with its value and shows the error', async () => {
+    mockUpdateFeed.mockRejectedValueOnce(new Error('titleSkipPatterns entries must be strings of 1-200 characters'));
+    renderPanel(makeFeed());
+    await userEvent.click(screen.getByRole('button', { name: ADD_BUTTON_NAME }));
+    const input = screen.getByLabelText('New title pattern');
+    await userEvent.type(input, 'Best of *');
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(await screen.findByText('titleSkipPatterns entries must be strings of 1-200 characters')).toBeDefined();
+    expect((screen.getByLabelText('New title pattern') as HTMLInputElement).value).toBe('Best of *');
+  });
+
+  it('removing a pattern fires updateFeed without it', async () => {
+    renderPanel(makeFeed({ titleSkipPatterns: ['Bonus Episode *', 'Best of *'] }));
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Bonus Episode *' }));
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', {
+      titleSkipPatterns: ['Best of *'],
+    });
+  });
+
+  it('defaults the skip action select to serve_original', () => {
+    renderPanel(makeFeed());
+    const select = screen.getByRole('combobox', { name: ACTION_SELECT_NAME }) as HTMLSelectElement;
+    expect(select.value).toBe('serve_original');
+  });
+
+  it('renders the server value for the skip action select', () => {
+    renderPanel(makeFeed({ titleSkipAction: 'hide' }));
+    const select = screen.getByRole('combobox', { name: ACTION_SELECT_NAME }) as HTMLSelectElement;
+    expect(select.value).toBe('hide');
+  });
+
+  it('selecting Hide fires updateFeed with titleSkipAction hide', async () => {
+    renderPanel(makeFeed());
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: ACTION_SELECT_NAME }), 'hide');
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { titleSkipAction: 'hide' });
+  });
+});
+
 describe('FeedSettingsPanel source URL row (#484)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -409,23 +500,62 @@ describe('FeedSettingsPanel segment action overrides (#565)', () => {
   });
 });
 
-describe('FeedSettingsPanel show-segments toggle (#565)', () => {
+describe('FeedSettingsPanel show-segments tri-state control (#565)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetSettings.mockResolvedValue({});
     mockUpdateFeed.mockResolvedValue(makeFeed());
   });
 
-  it('renders off by default', () => {
+  it('selects Inherit by default and shows the effective global value', async () => {
+    mockGetSettings.mockResolvedValue({ detectShowSegments: { value: false, isDefault: true } });
     renderPanel(makeFeed());
-    const toggle = screen.getByRole('switch', { name: 'Detect show segments' });
-    expect(toggle.getAttribute('aria-checked')).toBe('false');
+
+    const group = screen.getByRole('radiogroup', { name: 'Show segments' });
+    await waitFor(() => {
+      expect(within(group).getByRole('radio', { name: 'Inherit' }).getAttribute('aria-checked')).toBe('true');
+    });
+    expect(screen.getByText('Following the global setting (currently off).')).toBeDefined();
   });
 
-  it('enabling fires updateFeed with detectShowSegments true', async () => {
+  it('reflects a global default of on in the helper text', async () => {
+    mockGetSettings.mockResolvedValue({ detectShowSegments: { value: true, isDefault: false } });
     renderPanel(makeFeed());
-    await userEvent.click(screen.getByRole('switch', { name: 'Detect show segments' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Following the global setting (currently on).')).toBeDefined();
+    });
+  });
+
+  it('selecting On fires updateFeed with detectShowSegments true', async () => {
+    renderPanel(makeFeed());
+    const group = screen.getByRole('radiogroup', { name: 'Show segments' });
+    await userEvent.click(within(group).getByRole('radio', { name: 'On' }));
     expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { detectShowSegments: true });
+  });
+
+  it('selecting Off fires updateFeed with detectShowSegments false', async () => {
+    renderPanel(makeFeed());
+    const group = screen.getByRole('radiogroup', { name: 'Show segments' });
+    await userEvent.click(within(group).getByRole('radio', { name: 'Off' }));
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { detectShowSegments: false });
+  });
+
+  it('explicit true: selects On and hides the helper text', () => {
+    renderPanel(makeFeed({ detectShowSegments: true }));
+
+    const group = screen.getByRole('radiogroup', { name: 'Show segments' });
+    expect(within(group).getByRole('radio', { name: 'On' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.queryByText(/Following the global setting/)).toBeNull();
+  });
+
+  it('selecting Inherit fires updateFeed with detectShowSegments null', async () => {
+    renderPanel(makeFeed({ detectShowSegments: true }));
+
+    const group = screen.getByRole('radiogroup', { name: 'Show segments' });
+    await userEvent.click(within(group).getByRole('radio', { name: 'Inherit' }));
+
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { detectShowSegments: null });
   });
 });
 

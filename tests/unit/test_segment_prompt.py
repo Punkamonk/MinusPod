@@ -38,6 +38,9 @@ class _FakeDb:
             return None
         return {'slug': slug, 'detect_show_segments': self._detect_show_segments}
 
+    def resolve_detect_show_segments(self, slug):
+        return self._detect_show_segments
+
     def resolve_segment_actions(self, slug):
         if self._segment_actions is not None:
             return self._segment_actions
@@ -230,7 +233,7 @@ def _run_detect_ads(*, detect_show_segments, segment_actions, ads,
          patch.object(detector, '_detect_foreign_language_ads', return_value=[]), \
          patch.object(detector, 'get_system_prompt', return_value='system'), \
          patch.object(detector, 'get_model', return_value='model'), \
-         patch.object(detector, '_get_podcast_sponsor_history', return_value=''), \
+         patch.object(detector, '_build_known_pattern_hint', return_value=''), \
          patch.object(detector, '_run_windows', run_windows), \
          patch.object(detector, '_repair_window_categories', repair_mock), \
          patch('ad_detector._resolve_parallel_windows', return_value=1), \
@@ -417,7 +420,7 @@ def _detect_ads_with_fake_client(*, detect_show_segments, segment_actions,
          patch.object(detector, '_detect_foreign_language_ads', return_value=[]), \
          patch.object(detector, 'get_system_prompt', return_value='system'), \
          patch.object(detector, 'get_model', return_value='model'), \
-         patch.object(detector, '_get_podcast_sponsor_history', return_value=''), \
+         patch.object(detector, '_build_known_pattern_hint', return_value=''), \
          patch.object(detector, '_run_windows', run_windows), \
          patch('ad_detector._resolve_parallel_windows', return_value=1), \
          patch('ad_detector.get_llm_timeout', return_value=60), \

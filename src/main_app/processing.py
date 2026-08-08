@@ -87,7 +87,7 @@ from llm_capabilities import (
 )
 from llm_client import (
     is_retryable_error, is_llm_api_error, is_rate_limit_error,
-    is_limit_exceeded_error, LimitExceededError,
+    is_limit_exceeded_error, is_auth_error, LimitExceededError,
     start_episode_token_tracking, get_episode_token_totals,
 )
 from offline_queue import is_offline_queue_enabled
@@ -683,7 +683,8 @@ def _detect_ads_first_pass(ctx, segments, audio_path,
                             positional_prior_hint="", dai_differential=None,
                             keep_content=None, skip_llm=False,
                             force_create_from_pairs=False,
-                            strict_pair_roles=False, episode_duration=0.0):
+                            strict_pair_roles=False, episode_duration=0.0,
+                            run_stats=None):
     """Pipeline stage: Run first-pass Claude ad detection.
 
     ``keep_content``: None lets the detector resolve the per-feed mode from
@@ -693,6 +694,8 @@ def _detect_ads_first_pass(ctx, segments, audio_path,
     ``skip_llm``/``force_create_from_pairs``/``strict_pair_roles``: cue_only
     preset plumbing. ``episode_duration`` backstops the cue-pair fraction
     guard when transcription (and its segment list) is skipped.
+    ``run_stats``: caller's run_stats dict; stamped with detection_degraded
+    when pass 1 fails but publishes on pattern/cross-fetch markers alone.
 
     Returns (first_pass_ads, first_pass_count, ad_result).
     """
@@ -722,15 +725,32 @@ def _detect_ads_first_pass(ctx, segments, audio_path,
     if ad_detection_status == 'failed':
         error_msg = ad_result.get('error', 'Unknown error')
         audio_logger.error(f"[{slug}:{episode_id}] Ad detection failed: {error_msg}")
-        db.upsert_episode(slug, episode_id, ad_detection_status='failed')
         if ad_result.get('connectivity'):
             # Endpoint unreachable rather than a bad response: typed so the
             # offline queue (#482) can defer instead of failing the episode.
+            db.upsert_episode(slug, episode_id, ad_detection_status='failed')
             raise ServiceUnavailableError('llm', f"Ad detection failed: {error_msg}")
         if ad_result.get('limit_exceeded'):
             # Typed so the failure handler sees a terminal limit error instead
             # of re-classifying the stringified 429 text as transient (#491).
+            db.upsert_episode(slug, episode_id, ad_detection_status='failed')
             raise LimitExceededError(f"Ad detection failed: {error_msg}")
+        # Degraded continue: a transient, non-auth failure that still left
+        # pattern/cross-fetch markers publishes those instead of failing the
+        # episode. Auth-class failures and zero markers still raise.
+        classification_error = Exception(error_msg)
+        if (first_pass_ads and is_transient_error(classification_error)
+                and not is_auth_error(classification_error)):
+            sanitized = ' '.join(error_msg.split())[:300]
+            audio_logger.warning(
+                f"[{slug}:{episode_id}] Ad detection degraded: publishing "
+                f"{len(first_pass_ads)} pattern/cross-fetch marker(s) ({sanitized})")
+            db.upsert_episode(slug, episode_id, ad_detection_status='failed',
+                              detection_degraded=sanitized)
+            if run_stats is not None:
+                run_stats['detection_degraded'] = sanitized
+            return first_pass_ads, len(first_pass_ads), ad_result
+        db.upsert_episode(slug, episode_id, ad_detection_status='failed')
         raise Exception(f"Ad detection failed: {error_msg}")
 
     db.upsert_episode(slug, episode_id, ad_detection_status='success')
@@ -1072,6 +1092,14 @@ def _build_validator(episode_duration, segments, episode_description, *,
     )
 
 
+def _keep_overridden_by_pattern(ad) -> bool:
+    """Standing rule: a defined ad pattern always cuts; keep maps cannot silence it."""
+    if ad.get('pattern_defined'):
+        ad['keep_overridden_by_pattern'] = True
+        return True
+    return False
+
+
 def _partition_keep_ads(all_ads, actions_map):
     """Split first-pass markers by resolved segment-category action.
 
@@ -1080,6 +1108,8 @@ def _partition_keep_ads(all_ads, actions_map):
     list. It also overrides any existing hold, since a kept marker can
     never be force-cut via a stale hold: held_for_review is cleared and the
     original reason kept as hold_cleared_reason.
+    Exception: a marker from a defined pattern bypasses keep and lands in
+    the remove list with keep_overridden_by_pattern=True.
 
     Returns (keep_ads, remove_ads); remove_ads is all_ads unchanged when no
     category resolves to 'keep'.
@@ -1091,6 +1121,9 @@ def _partition_keep_ads(all_ads, actions_map):
     for ad in all_ads:
         category = normalize_segment_category(ad.get('category'))
         if actions_map.get(category) == 'keep':
+            if _keep_overridden_by_pattern(ad):
+                remove_ads.append(ad)
+                continue
             ad['was_cut'] = False
             ad['action_applied'] = 'keep'
             if ad.get('held_for_review'):
@@ -1121,7 +1154,9 @@ def _apply_late_keep_safety_net(ads_to_remove, all_ads_with_validation, actions_
 
     Stamps was_cut=False/action_applied='keep' on a caught marker (and its
     all_ads_with_validation master) and removes it from the returned cut
-    list. Returns ads_to_remove unchanged when no category resolves to 'keep'.
+    list. Exception: a marker from a defined pattern stays in the cut list
+    with keep_overridden_by_pattern=True, never kept by keep maps.
+    Returns ads_to_remove unchanged when no category resolves to 'keep'.
     """
     if not any(action == 'keep' for action in actions_map.values()):
         return ads_to_remove
@@ -1133,17 +1168,20 @@ def _apply_late_keep_safety_net(ads_to_remove, all_ads_with_validation, actions_
         else:
             remove.append(ad)
     for ad, category in caught:
-        ad['was_cut'] = False
-        ad['action_applied'] = 'keep'
-        master = _find_master(all_ads_with_validation, ad)
-        if master is not None:
-            master['was_cut'] = False
-            master['action_applied'] = 'keep'
-        audio_logger.debug(
-            f"Late keep safety net: dropping synthesized marker "
-            f"{ad['start']:.1f}s-{ad['end']:.1f}s (category={category!r}) "
-            f"from the cut list; its resolved action is 'keep'"
-        )
+        if _keep_overridden_by_pattern(ad):
+            remove.append(ad)
+        else:
+            ad['was_cut'] = False
+            ad['action_applied'] = 'keep'
+            master = _find_master(all_ads_with_validation, ad)
+            if master is not None:
+                master['was_cut'] = False
+                master['action_applied'] = 'keep'
+            audio_logger.debug(
+                f"Late keep safety net: dropping synthesized marker "
+                f"{ad['start']:.1f}s-{ad['end']:.1f}s (category={category!r}) "
+                f"from the cut list; its resolved action is 'keep'"
+            )
     return remove
 
 
@@ -1209,7 +1247,7 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
                           max_ad_duration_override=None, cue_gate_enabled=False,
                           audio_analysis=None, podcast_id=None, keep_ads=None,
                           cue_only_safety=None, cue_unproven_template_ids=None,
-                          apply_heuristic_rolls=True):
+                          apply_heuristic_rolls=True, segment_actions=None):
     """Pipeline stage: Refine ad boundaries, detect rolls, validate, gate by confidence.
 
     ``keep_ads`` are the keep-partitioned markers, passed so boundary
@@ -1217,7 +1255,9 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
     ``cue_only_safety``/``cue_unproven_template_ids`` pass through to the
     validator; both None outside cue_only runs. ``apply_heuristic_rolls``
     is False under cue_only, where cuts must come only from cue and
-    pattern-DB evidence.
+    pattern-DB evidence. ``segment_actions`` is the resolved category ->
+    action map, passed to the validator's merge step so it never folds
+    ads whose categories resolve to different actions.
 
     Returns (ads_to_remove, all_ads_with_validation).
     """
@@ -1255,7 +1295,8 @@ def _refine_and_validate(slug, episode_id, all_ads, segments, audio_path,
         cue_only_safety=cue_only_safety,
         cue_unproven_template_ids=cue_unproven_template_ids,
     )
-    validation_result = validator.validate(all_ads, audio_analysis=audio_analysis)
+    validation_result = validator.validate(
+        all_ads, audio_analysis=audio_analysis, actions_map=segment_actions)
 
     audio_logger.info(
         f"[{slug}:{episode_id}] Validation: "
@@ -1297,7 +1338,7 @@ def _build_reviewer(db, ad_detector) -> AdReviewer:
         db=db,
         llm_client=ad_detector._llm_client,
         sponsor_service=getattr(ad_detector, 'sponsor_service', None),
-        sponsor_history_provider=ad_detector._get_podcast_sponsor_history,
+        sponsor_history_provider=ad_detector._build_known_pattern_hint,
     )
 
 
@@ -2391,6 +2432,15 @@ def _run_verification_pass(ctx, processed_path, pass1_cuts,
         verification_cue_count = verification_result.get('audio_cue_count', 0)
         storage.save_ads_json(slug, episode_id, verification_result, pass_number=2)
 
+        v_status = verification_result.get('status')
+        if v_status in ('no_segments', 'transcription_failed'):
+            audio_logger.warning(
+                f"[{slug}:{episode_id}] Verification incomplete ({v_status}); "
+                "not reporting a clean scan")
+            return (verification_count, v_ads_for_ui, v_cuts_for_assets,
+                    v_ads_held, processed_path, verification_cue_count,
+                    False, v_corroborated_count)
+
         # Heuristic roll detection on pass 2
         _apply_pass2_heuristic_rolls(
             slug, episode_id, verification_ads_processed,
@@ -2837,8 +2887,12 @@ def _generate_assets(slug, episode_id, segments, all_cuts, episode_description,
 
 def _persist_episode_state(slug, episode_id, pass1_cut_count, verification_count,
                             first_pass_count, original_duration, new_duration,
-                            processed_version):
-    """Upsert the processed episode row and update related DB state."""
+                            processed_version, detection_degraded=None):
+    """Upsert the processed episode row and update related DB state.
+
+    ``detection_degraded``: the sanitized reason string when this run
+    degraded, else None to clear a flag left by an earlier failure.
+    """
     original_final = storage.get_original_path(slug, episode_id)
     original_file_rel = f"episodes/{episode_id}-original.mp3" if original_final.exists() else None
     processed_file_rel = episode_relative_path(episode_id, processed_version)
@@ -2859,7 +2913,11 @@ def _persist_episode_state(slug, episode_id, pass1_cut_count, verification_count
         reprocess_mode=None,
         reprocess_requested_at=None,
         deferred_at=None,
-        deferred_service=None)
+        deferred_service=None,
+        # A clean run clears a degraded flag from an earlier failure; a
+        # degraded run re-stamps its own reason so this unconditional
+        # write does not clobber the flag detection just set.
+        detection_degraded=detection_degraded)
 
     try:
         removed = storage.cleanup_stale_audio_versions(
@@ -2887,6 +2945,29 @@ def _persist_episode_state(slug, episode_id, pass1_cut_count, verification_count
         db.index_episode(episode_id, slug)
     except Exception as idx_err:
         audio_logger.warning(f"[{slug}:{episode_id}] Failed to update search index: {idx_err}")
+
+
+def _maybe_enqueue_degraded_redetect(slug, episode_id, episode_url, episode_title,
+                                      podcast_name, episode_description,
+                                      episode_published_at, episode_data, run_stats):
+    """Queue one low-priority llm-mode re-detect after a degraded publish.
+
+    Fires only on the transition into degraded (episode_data is the row as
+    it stood before this run): a run that was already degraded, or one that
+    degrades again on the automatic re-detect itself, does not re-enqueue.
+    """
+    if not (run_stats or {}).get('detection_degraded'):
+        return
+    if (episode_data or {}).get('detection_degraded'):
+        return
+    db.upsert_episode(slug, episode_id, reprocess_mode='llm',
+                       reprocess_requested_at=utc_now_iso())
+    db.upsert_episode_for_processing(
+        slug, episode_id, episode_url, episode_title,
+        episode_published_at, episode_description, priority=-10)
+    audio_logger.info(
+        f"[{slug}:{episode_id}] Degraded pass-1 detection; queued one "
+        f"low-priority automatic llm re-detect")
 
 
 def _refresh_rss_for_slug(slug, episode_id):
@@ -3018,7 +3099,8 @@ def _finalize_episode(slug, episode_id, episode_title, podcast_name,
     """Pipeline stage: Update DB, record history, refresh RSS."""
     _persist_episode_state(slug, episode_id, pass1_cut_count, verification_count,
                             first_pass_count, original_duration, new_duration,
-                            processed_version)
+                            processed_version,
+                            detection_degraded=(run_stats or {}).get('detection_degraded'))
     _refresh_rss_for_slug(slug, episode_id)
 
     processing_time = time.time() - start_time
@@ -3113,12 +3195,13 @@ def _split_recut_counts(total_cut, verification_count):
 
 def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
                           episode_description, min_cut_confidence,
-                          podcast_id=None):
+                          podcast_id=None, segment_actions=None):
     """Build the cut list for a recut from the stored detections plus the user's
     edits, with no re-detection. Manual adds already live in ad_markers_json;
     boundary adjustments are applied here; rejects/confirms and confidence
-    gating run through the same AdValidator path a full reprocess uses. Returns
-    (ads_to_remove, all_ads_with_validation)."""
+    gating run through the same AdValidator path a full reprocess uses.
+    segment_actions is resolved internally when not passed in by the caller.
+    Returns (ads_to_remove, all_ads_with_validation)."""
     from ad_validator import Decision
 
     episode = db.get_episode(slug, episode_id) or {}
@@ -3186,7 +3269,12 @@ def _build_recut_ad_list(slug, episode_id, segments, episode_duration,
         cue_gate_enabled=cue_gate_enabled,
         podcast_id=podcast_id,
     )
-    validation_result = validator.validate(all_ads, audio_analysis=audio_analysis)
+    # Resolved here so the merge step below sees current category actions;
+    # _recut_episode passes its own resolution back in so both agree.
+    if segment_actions is None:
+        segment_actions = db.resolve_segment_actions(slug)
+    validation_result = validator.validate(
+        all_ads, audio_analysis=audio_analysis, actions_map=segment_actions)
 
     # Force previously-cut markers back to ACCEPT so the gate cuts them again,
     # overriding any hold/review outcome from re-validation. FP/confirm rejects
@@ -3365,17 +3453,14 @@ def _recut_episode(slug, episode_id, episode_title, podcast_name,
         # Resolve podcast_id once from the episode row so _build_recut_ad_list's
         # per-feed override lookup uses it instead of the slug fallback.
         recut_podcast_id = (episode_data or {}).get('podcast_id')
+        # Resolved once and reused below so a category now resolving 'keep'
+        # comes back out of ads_to_remove, beating an older approval.
+        segment_actions = db.resolve_segment_actions(slug)
         ads_to_remove, all_ads_with_validation = _build_recut_ad_list(
             slug, episode_id, segments, original_duration,
             episode_description, min_cut_confidence,
-            podcast_id=recut_podcast_id,
+            podcast_id=recut_podcast_id, segment_actions=segment_actions,
         )
-        # _build_recut_ad_list is action-unaware, so re-resolve against the
-        # current maps: a category that now resolves 'keep' comes back out
-        # of ads_to_remove, and 'keep' beats an older approval (no timestamp
-        # to compare). A previously kept marker whose category now resolves
-        # 'remove'/'beep' is simply re-validated on its own merits.
-        segment_actions = db.resolve_segment_actions(slug)
         keep_ads, all_ads_with_validation = _partition_keep_ads(
             all_ads_with_validation, segment_actions)
         if keep_ads:
@@ -3475,6 +3560,12 @@ def _recut_episode(slug, episode_id, episode_title, podcast_name,
                                             cut=pass1_cut_count,
                                             held=held_count,
                                             not_cut=not_cut_count)
+        # A recut never runs detection, so it must not clear a degraded flag it
+        # had no part in setting: forward the pre-recut row's flag when this
+        # call has no run_stats of its own to carry it.
+        finalize_run_stats = run_stats
+        if finalize_run_stats is None and (episode_data or {}).get('detection_degraded'):
+            finalize_run_stats = {'detection_degraded': episode_data['detection_degraded']}
         _finalize_episode(slug, episode_id, episode_title, podcast_name,
                            first_pass_count, verification_count=verification_count,
                            first_pass_count=first_pass_count,
@@ -3482,7 +3573,7 @@ def _recut_episode(slug, episode_id, episode_title, podcast_name,
                            new_duration=new_duration, start_time=start_time,
                            processed_version=new_version,
                            audio_cue_detections=audio_cue_detections,
-                           run_stats=run_stats,
+                           run_stats=finalize_run_stats,
                            ads_held=held_count, ads_not_cut=not_cut_count)
         status_service.complete_job()
         return True
@@ -3553,7 +3644,19 @@ def _handle_processing_failure(slug, episode_id, episode_title, podcast_name,
     # 429 retries don't burn retry_count (#238).
     rate_limited = is_rate_limit_error(error)
 
-    if transient:
+    # Auth outages are operator-fixable and can outlast any retry ladder, so
+    # they must not burn retry_count or trip permanently_failed, regardless
+    # of how is_transient_error classifies the wrapped error text.
+    auth_outage = is_auth_error(error)
+
+    if auth_outage:
+        new_retry_count = current_retry
+        new_status = EpisodeStatus.FAILED.value
+        audio_logger.warning(
+            f"[{slug}:{episode_id}] Auth-class LLM failure; retry budget "
+            f"unchanged ({current_retry}/{MAX_EPISODE_RETRIES})"
+        )
+    elif transient:
         if rate_limited:
             new_retry_count = current_retry
             new_status = EpisodeStatus.FAILED.value
@@ -3688,6 +3791,14 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
         run_stats['verification_skipped'] = True
     if skip_transcription_active:
         run_stats['transcription_skipped'] = True
+
+    def _fire_degraded_redetect():
+        # Closes over this run's fixed identifiers; episode_data is the
+        # pre-run snapshot captured above, so the transition-into-degraded
+        # guard sees the row as it stood before this run.
+        _maybe_enqueue_degraded_redetect(
+            slug, episode_id, episode_url, episode_title, podcast_name,
+            episode_description, episode_published_at, episode_data, run_stats)
 
     try:
         audio_logger.info(f"[{slug}:{episode_id}] Starting: \"{episode_title}\"")
@@ -3865,6 +3976,7 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                     force_create_from_pairs=cue_only,
                     strict_pair_roles=cue_only,
                     episode_duration=episode_duration,
+                    run_stats=run_stats,
                 )
                 _check_cancel(cancel_event, slug, episode_id)
 
@@ -3933,6 +4045,7 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                     cue_only_safety=cue_only_safety,
                     cue_unproven_template_ids=cue_unproven_ids,
                     apply_heuristic_rolls=not cue_only,
+                    segment_actions=segment_actions,
                 )
 
                 # Late keep partition: _refine_and_validate's heuristic
@@ -4204,6 +4317,7 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                                    audio_cue_detections=audio_cue_count,
                                    owns_failure=False,
                                    progress=recut_progress):
+                    _fire_degraded_redetect()
                     return True
                 if recut_progress.get('mutated'):
                     # The recut already replaced the markers and the audio, so
@@ -4228,6 +4342,8 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                                audio_cue_detections=audio_cue_count,
                                run_stats=run_stats,
                                ads_held=held_count, ads_not_cut=not_cut_count)
+
+            _fire_degraded_redetect()
 
             status_service.complete_job()
             return True

@@ -51,6 +51,105 @@ release notes.
   (GHSA-7p8r-x3mc-p8w7), and transitive nanoid (GHSA-2v37-7h3g-55p8).
   All three were failing the CI audit gates.
 
+## [2.86.2] - 2026-08-08
+
+### Fixed
+
+- Circuit-breaker-masked auth outages now freeze the retry budget like
+  direct auth failures.
+- Title blacklist helper text explains whole-title glob matching and uses
+  a neutral example.
+
+## [2.86.1] - 2026-08-08
+
+### Added
+
+- Global "process new episodes first" setting controlling the automatic
+  fresh-episode queue boost.
+
+### Fixed
+
+- Global show-segments toggle saves immediately instead of waiting for
+  Save Changes.
+- Per-prompt reset buttons stay visible at default, disabled instead of
+  hidden.
+- Feed show-segments control is an explicit Inherit/On/Off choice that
+  shows the effective value when inheriting.
+
+## [2.86.0] - 2026-08-07
+
+### Added
+
+- Two-tier pattern trust: user-created and community patterns are marked
+  "defined"; auto-learned patterns are not. Defined status now drives cut,
+  merge, and pass-1 hint behavior throughout the detection pipeline.
+- Feed queue priority (#625): normal, high, or low, with automatic boosts
+  for episodes published in the last 48 hours and for episodes a user
+  explicitly reprocesses. Boosts stack on top of the feed's base priority.
+- Per-feed episode title blacklist: case-insensitive glob patterns skip
+  queuing and just-in-time processing for matching episodes. A per-feed
+  choice serves a skipped episode unmodified in the RSS feed or hides it
+  entirely.
+- Per-prompt reset buttons in settings (#626): each AI prompt resets to its
+  default individually instead of only all-or-nothing.
+- A dedicated global Segment actions settings card, plus a global default
+  for show-segments (intro/outro/recap) detection that feeds inherit
+  unless they set their own value.
+- Partial detection: when the AI detection pass fails but pattern and
+  cross-fetch evidence already produced cuts, the episode publishes with a
+  warning banner and a re-run button instead of failing outright. Window
+  counts are exposed in the API, and one automatic low-priority re-detect
+  is queued.
+
+### Changed
+
+- A user-created or community ad pattern now always cuts its matched
+  segment, overriding segment-action keep settings. This applies to both
+  the keep partition and the late keep safety net; auto-learned patterns
+  are unaffected and still respect keep settings.
+- Text-pattern merging: when a defined pattern overlaps an auto-learned
+  one, the defined pattern wins ownership of the merged span. The absorbed
+  pattern keeps credit for its own matches.
+- Pattern learning dedupe: learning a near-identical text now updates the
+  existing pattern instead of inserting a duplicate. Only spans that pass
+  the learning validation guards count toward match-credit stats.
+- Pass-1 sponsor hint amplified: defined patterns now contribute category
+  and an opening snippet to the hint; auto-learned patterns contribute
+  names only. The detailed list is capped, and neither tier contributes
+  match spans or timestamps.
+- Default detection prompt: a paid read for another show is now classified
+  as sponsor rather than cross_promo. Instances running a customized
+  detection prompt need to reset it to pick up this change.
+- Differential holds now corroborate against all merged member stages
+  instead of a single stage; merged marker labels follow whichever member
+  covers the marker.
+- Duration-estimated pattern spans are now advisory only: they no longer
+  contribute to hold corroboration or label reach. The estimated flag
+  survives match merges conservatively, so a merge with any estimated
+  member stays advisory.
+- Validator merge is now action- and cut-status-aware. A recut can no
+  longer restore (un-cut) an ad segment that was already cut.
+
+### Fixed
+
+- An aborted verification pass, one where transcription failed or produced
+  no segments, no longer reports a clean scan.
+- #629: widened matching for JSON-mode rejection responses, plus runtime
+  self-correction that retries without JSON mode. A speculative JSON-mode
+  fallback for unprobed endpoints now persists only after it succeeds,
+  reverting on any retry failure.
+- #631: LLM responses wrapped in a `segments` field now parse ads that are
+  missing a `type` field.
+- Merge propagation: a defined pattern folding into a claude-first marker,
+  or an estimated span promoted to a merged marker's stage, now carries its
+  flag through detector and validator merges instead of losing it mid-fold.
+- Auth-class LLM failures (invalid key, forbidden, unauthorized) no longer
+  consume the episode's retry budget.
+- Markers persisted by a failed processing run no longer display as cut
+  ads.
+- TTL caches are now bounded with a size cap and eviction, rather than
+  growing without limit (#621).
+
 ## [2.85.2] - 2026-08-03
 
 ### Added

@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.85.2
+  version: 2.86.2
   contact:
     name: MinusPod
   license:
@@ -560,6 +560,35 @@ paths:
                     - 'off'
                     - null
                   description: Per-feed chapters mode. 'auto' preserves publisher-embedded chapters when enough survive the cut, otherwise generates them; 'generate' always generates new chapters; 'off' skips the chapter step entirely; null resets to the default 'auto' behavior.
+                queuePriority:
+                  type:
+                    - string
+                    - 'null'
+                  enum:
+                    - high
+                    - normal
+                    - low
+                    - null
+                  description: Per-feed auto-process queue priority (issue 625). 'high' processes this feed's episodes before other queued episodes; 'low' runs only when nothing else is waiting; 'normal' or null uses the default ordering. Changing it re-stamps this feed's already-queued pending episodes immediately.
+                titleSkipPatterns:
+                  type:
+                    - array
+                    - 'null'
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 200
+                  maxItems: 50
+                  description: Per-feed episode title blacklist. Each pattern is matched against the whole episode title, case-insensitively (fnmatch glob); use '*' as a wildcard, e.g. 'Bonus Episode *' matches any title starting with 'Bonus Episode'. Without a wildcard the whole title must match, so a plain substring needs surrounding '*' wildcards. A matching episode is never queued from RSS refresh or JIT-processed; requests for a skipped episode's audio redirect to the upstream enclosure instead. Null or an empty array clears the blacklist.
+                titleSkipAction:
+                  type:
+                    - string
+                    - 'null'
+                  enum:
+                    - serve_original
+                    - hide
+                    - null
+                  description: What happens to a title-blacklisted episode in the served RSS. 'serve_original' (default, null) keeps the entry in the feed; 'hide' removes it from the served feed entirely.
                 cueTemplateScoreOverride:
                   type:
                     - number
@@ -705,7 +734,7 @@ paths:
                   type:
                     - boolean
                     - 'null'
-                  description: Per-feed opt-in to detect intro, outro, and recap/housekeeping segments in addition to the always-detected ad-side categories. Null and false both mean off, the default.
+                  description: Per-feed opt-in to detect intro, outro, and recap/housekeeping segments in addition to the always-detected ad-side categories. true/false override the global detectShowSegments setting for this feed; null falls back to it.
                 skipSecondPass:
                   type:
                     - boolean
@@ -3770,6 +3799,12 @@ paths:
                 onlyExposeProcessedDefault:
                   type: boolean
                   description: Global default for hiding upstream episodes whose status is not 'processed' from served RSS feeds. Overridden by per-feed onlyExposeProcessedEpisodes when set.
+                detectShowSegments:
+                  type: boolean
+                  description: Global default for detecting intro, outro, and recap/housekeeping segments in addition to the always-detected ad-side categories. Overridden by per-feed detectShowSegments when set.
+                processNewEpisodesFirst:
+                  type: boolean
+                  description: Whether episodes published within the last 48 hours get an automatic queue-priority boost ahead of the rest of the auto-process backlog. On by default.
                 rssRefreshIntervalMinutes:
                   type: integer
                   minimum: 5
@@ -4102,6 +4137,36 @@ paths:
                 properties:
                   message:
                     type: string
+
+  /settings/prompts/{name}/reset:
+    post:
+      tags:
+        - Settings
+      summary: Reset a single prompt
+      description: Reset one prompt (system, verification, review, resurrect, or chapter) and its override to defaults
+      operationId: resetSinglePrompt
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Prompt to reset
+          schema:
+            type: string
+            enum: [system, verification, review, resurrect, chapter]
+      responses:
+        '200':
+          description: Prompt reset to default
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  value:
+                    type: string
+                  isDefault:
+                    type: boolean
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /settings/models:
     get:
@@ -5318,6 +5383,25 @@ paths:
                   total:
                     type: integer
                     description: Total episodes in queue
+                  items:
+                    type: array
+                    description: Pending/processing rows in dequeue order (priority DESC, createdAt ASC), capped at 100
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        episodeId:
+                          type: string
+                        podcastSlug:
+                          type: string
+                        status:
+                          type: string
+                        priority:
+                          type: integer
+                          description: Higher runs first; feed base (10/0/-10) plus manual (+20) and fresh-episode (+5) boosts
+                        createdAt:
+                          type: string
     delete:
       tags:
         - System
@@ -7773,6 +7857,24 @@ components:
             - 'off'
             - null
           description: Per-feed chapters mode. 'auto' preserves publisher-embedded chapters when enough survive the cut, otherwise generates them; 'generate' always generates new chapters; 'off' skips the chapter step entirely; null means not set, which resolves to 'auto'.
+        queuePriority:
+          type: string
+          enum:
+            - high
+            - normal
+            - low
+          description: Per-feed auto-process queue priority (issue 625), always resolved to one of the three values ('normal' covers both an explicit normal setting and no override). 'high' processes this feed's episodes before other queued episodes; 'low' runs only when nothing else is waiting.
+        titleSkipPatterns:
+          type: array
+          items:
+            type: string
+          description: Per-feed episode title blacklist, always an array (empty when unset). Each pattern is matched against the whole episode title, case-insensitively (fnmatch glob); use '*' as a wildcard, e.g. 'Bonus Episode *' matches any title starting with 'Bonus Episode'. Without a wildcard the whole title must match, so a plain substring needs surrounding '*' wildcards. A matching episode is never queued or JIT-processed.
+        titleSkipAction:
+          type: string
+          enum:
+            - serve_original
+            - hide
+          description: What happens to a title-blacklisted episode in the served RSS, always resolved to one of the two values ('serve_original' covers both an explicit setting and no override). 'hide' removes the entry from the served feed entirely.
         processingMode:
           type: string
           enum:
@@ -7929,7 +8031,7 @@ components:
           type:
             - boolean
             - 'null'
-          description: Whether this feed detects intro, outro, and recap/housekeeping segments in addition to the always-detected ad-side categories. Null and false both mean off, the default.
+          description: Whether this feed detects intro, outro, and recap/housekeeping segments in addition to the always-detected ad-side categories. Null means use the global detectShowSegments setting. true/false override the global for this feed.
         ownEpisodeGuids:
           type:
             - boolean
@@ -9025,6 +9127,22 @@ components:
               description: Global default for hiding non-processed episodes from served feeds (per-feed onlyExposeProcessedEpisodes overrides when set)
             isDefault:
               type: boolean
+        detectShowSegments:
+          type: object
+          properties:
+            value:
+              type: boolean
+              description: Global default for detecting intro, outro, and recap/housekeeping segments (per-feed detectShowSegments overrides when set)
+            isDefault:
+              type: boolean
+        processNewEpisodesFirst:
+          type: object
+          properties:
+            value:
+              type: boolean
+              description: Whether episodes published within the last 48 hours get an automatic queue-priority boost ahead of the rest of the auto-process backlog. On by default.
+            isDefault:
+              type: boolean
         rssRefreshIntervalMinutes:
           type: object
           properties:
@@ -9262,6 +9380,10 @@ components:
             maxFeedEpisodes:
               type: integer
             onlyExposeProcessedDefault:
+              type: boolean
+            detectShowSegments:
+              type: boolean
+            processNewEpisodesFirst:
               type: boolean
             rssRefreshIntervalMinutes:
               type: integer

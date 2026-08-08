@@ -1,3 +1,5 @@
+import ConfirmResetButton from './ConfirmResetButton';
+
 interface PromptFieldProps {
   id: string;
   label: string;
@@ -5,6 +7,11 @@ interface PromptFieldProps {
   onChange: (value: string) => void;
   helpText?: React.ReactNode;
   rows?: number;
+  // Per-prompt reset (issue #626): shown beside the label whenever a handler
+  // is supplied, disabled while the prompt is already at its default so the
+  // affordance stays visible instead of disappearing.
+  onReset?: () => void;
+  isDefault?: boolean;
 }
 
 export default function PromptField({
@@ -14,12 +21,25 @@ export default function PromptField({
   onChange,
   helpText,
   rows = 6,
+  onReset,
+  isDefault,
 }: PromptFieldProps) {
   return (
     <div>
-      <label htmlFor={id} className="block text-sm font-medium text-foreground mb-2">
-        {label}
-      </label>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <label htmlFor={id} className="block text-sm font-medium text-foreground">
+          {label}
+        </label>
+        {onReset && (
+          <ConfirmResetButton
+            label="Reset"
+            onConfirm={onReset}
+            size="compact"
+            disabled={isDefault !== false}
+            title={isDefault !== false ? 'Already the default' : undefined}
+          />
+        )}
+      </div>
       <textarea
         id={id}
         value={value}

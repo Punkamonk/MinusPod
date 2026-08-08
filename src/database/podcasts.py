@@ -3,7 +3,7 @@ import json
 import logging
 from typing import Optional, Dict, List
 
-from config import resolve_segment_category_actions_map
+from config import coerce_bool_setting, resolve_segment_category_actions_map
 from utils.constants import EpisodeStatus
 from utils.time import utc_now_iso
 
@@ -114,6 +114,23 @@ class PodcastMixin:
         row = cursor.fetchone()
         return row['detection_mode'] if row else None
 
+    def get_podcast_queue_priority(self, slug: str) -> Optional[int]:
+        """Per-feed queue_priority column only, without the full get_podcast_by_slug join."""
+        conn = self.get_connection()
+        cursor = conn.execute(
+            "SELECT queue_priority FROM podcasts WHERE slug = ?", (slug,))
+        row = cursor.fetchone()
+        return row['queue_priority'] if row else None
+
+    def get_podcast_title_skip_patterns(self, slug: str) -> Optional[str]:
+        """Per-feed title_skip_patterns column only: a cheap single-row lookup
+        for the RSS gate and the JIT serve gate."""
+        conn = self.get_connection()
+        cursor = conn.execute(
+            "SELECT title_skip_patterns FROM podcasts WHERE slug = ?", (slug,))
+        row = cursor.fetchone()
+        return row['title_skip_patterns'] if row else None
+
     _CUE_OVERRIDE_COLS = (
         'cue_create_from_pairs_override',
         'cue_pair_min_break_override',
@@ -217,6 +234,7 @@ class PodcastMixin:
                 'podping_checked_at', 'channel_metadata_at',
                 'segment_category_actions', 'detect_show_segments',
                 'skip_second_pass', 'skip_transcription', 'cue_only_safety',
+                'queue_priority', 'title_skip_patterns', 'title_skip_action',
             ):
                 fields.append(f"{key} = ?")
                 values.append(value)
@@ -519,6 +537,19 @@ class PodcastMixin:
         if per_feed is not None:
             return bool(per_feed)
         return self.get_setting('only_expose_processed_default') == 'true'
+
+    def resolve_detect_show_segments(self, slug: str,
+                                     podcast: Optional[Dict] = None) -> bool:
+        """Resolve detect_show_segments for a podcast: per-feed value if
+        non-NULL (0=off, 1=on), else the detect_show_segments global
+        setting, else False.
+        """
+        if podcast is None:
+            podcast = self.get_podcast_by_slug(slug)
+        per_feed = podcast.get('detect_show_segments') if podcast else None
+        if per_feed is not None:
+            return bool(per_feed)
+        return coerce_bool_setting(self.get_setting('detect_show_segments'))
 
     def resolve_segment_actions(self, slug: str,
                                 podcast: Optional[Dict] = None) -> Dict[str, str]:

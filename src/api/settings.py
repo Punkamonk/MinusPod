@@ -201,6 +201,11 @@ def get_settings():
         registry_default('only_expose_processed_default'))
     only_expose_processed_default = (
         only_expose_processed_value.lower() in ('true', '1', 'yes'))
+    detect_show_segments_default = coerce_bool_setting(_setting_value(
+        settings, 'detect_show_segments', registry_default('detect_show_segments')))
+    process_new_episodes_first = coerce_bool_setting(_setting_value(
+        settings, 'process_new_episodes_first',
+        registry_default('process_new_episodes_first')))
     artwork_watermark_value = _setting_value(
         settings, 'artwork_watermark_enabled',
         registry_default('artwork_watermark_enabled'))
@@ -503,6 +508,10 @@ def get_settings():
             'community_sync_categories', community_sync_categories),
         'onlyExposeProcessedDefault': _sv(
             'only_expose_processed_default', only_expose_processed_default),
+        'detectShowSegments': _sv(
+            'detect_show_segments', detect_show_segments_default),
+        'processNewEpisodesFirst': _sv(
+            'process_new_episodes_first', process_new_episodes_first),
         'artworkWatermarkEnabled': _sv(
             'artwork_watermark_enabled', artwork_watermark_enabled),
         'artworkBadgePosition': _sv(
@@ -783,6 +792,16 @@ def _apply_processing_flags(db, data):
         value = 'true' if data['onlyExposeProcessedDefault'] else 'false'
         db.set_setting('only_expose_processed_default', value, is_default=False)
         logger.info(f"Updated only-expose-processed default to: {value}")
+
+    if 'detectShowSegments' in data:
+        value = 'true' if data['detectShowSegments'] else 'false'
+        db.set_setting('detect_show_segments', value, is_default=False)
+        logger.info(f"Updated detect-show-segments default to: {value}")
+
+    if 'processNewEpisodesFirst' in data:
+        value = 'true' if data['processNewEpisodesFirst'] else 'false'
+        db.set_setting('process_new_episodes_first', value, is_default=False)
+        logger.info(f"Updated process-new-episodes-first to: {value}")
 
     if 'artworkWatermarkEnabled' in data:
         value = 'true' if data['artworkWatermarkEnabled'] else 'false'
@@ -1660,6 +1679,39 @@ def reset_prompts_only():
 
     logger.info("Reset prompts to defaults")
     return json_response({'message': 'Prompts reset to defaults'})
+
+
+@api.route('/settings/prompts/<name>/reset', methods=['POST'])
+@log_request
+def reset_single_prompt(name):
+    """Reset one prompt (and its override) to default; per-key twin of reset_prompts_only."""
+    from database import (
+        DEFAULT_SYSTEM_PROMPT, DEFAULT_VERIFICATION_PROMPT,
+        DEFAULT_REVIEW_PROMPT, DEFAULT_RESURRECT_PROMPT,
+        DEFAULT_CHAPTER_PROMPT,
+    )
+    defaults = {
+        'system': DEFAULT_SYSTEM_PROMPT,
+        'verification': DEFAULT_VERIFICATION_PROMPT,
+        'review': DEFAULT_REVIEW_PROMPT,
+        'resurrect': DEFAULT_RESURRECT_PROMPT,
+        'chapter': DEFAULT_CHAPTER_PROMPT,
+    }
+    if name not in defaults:
+        return error_response('unknown prompt name', 404)
+
+    db = get_database()
+    prompt_key = f'{name}_prompt'
+    db.reset_setting(prompt_key)
+    db.set_setting(f'{name}_prompt_override', '', is_default=True)
+    logger.info(f"Reset {prompt_key} to default")
+
+    settings = _settings_view(db.get_all_settings())
+    value = _setting_value(settings, prompt_key, defaults[name]) or defaults[name]
+    return json_response({
+        'value': value,
+        'isDefault': _setting_is_default(settings, prompt_key),
+    })
 
 
 def _ensure_openrouter_aliases_present(models: list) -> None:

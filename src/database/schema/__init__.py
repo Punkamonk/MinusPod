@@ -235,6 +235,10 @@ class SchemaMixin:
             ('rss_duration', 'REAL'),
             # Upstream podcast:chapters JSON URL (issue #560 follow-up)
             ('upstream_chapters_url', 'TEXT'),
+            # Degraded pass-1 completion: sanitized error when a transient,
+            # non-auth LLM failure published on pattern/cross-fetch markers
+            # alone. NULL on a clean run.
+            ('detection_degraded', 'TEXT'),
         ]
         for col, definition in episodes_migrations:
             self._add_column_if_missing(conn, 'episodes', col, definition, ep_cols)
@@ -338,11 +342,19 @@ class SchemaMixin:
             # segment_category_actions setting at resolve time.
             ('segment_category_actions', 'TEXT'),
             # Per-feed opt-in for show-segment (intro/outro/recap) detection
-            # (issue #565); NULL/0 = off, 1 = on, no global to inherit.
+            # (issue #565); NULL = inherit the detect_show_segments global
+            # setting, 0 = explicit off, 1 = explicit on.
             ('detect_show_segments', 'INTEGER'),
             # Cue-only mode: transcription opt-out and safety policy
             ('skip_transcription', 'INTEGER'),
             ('cue_only_safety', 'TEXT'),
+            # Queue priority (#625): NULL/0 = normal, 10 = high, -10 = low
+            ('queue_priority', 'INTEGER'),
+            # Episode title blacklist: JSON array of glob patterns matched
+            # case-insensitively; title_skip_action controls served-RSS
+            # visibility (NULL/'serve_original' keep, 'hide' drops it).
+            ('title_skip_patterns', 'TEXT'),
+            ('title_skip_action', 'TEXT'),
         ]
         for col, definition in podcasts_migrations:
             self._add_column_if_missing(conn, 'podcasts', col, definition, pod_cols)
@@ -823,6 +835,26 @@ class SchemaMixin:
                 logger.info("Migration: Added description column to auto_process_queue table")
         except Exception as e:
             logger.debug(f"auto_process_queue description migration: {e}")
+
+        # Migration: Add priority to auto_process_queue if missing, plus the
+        # index that orders the dequeue by it (#625)
+        try:
+            cursor = conn.execute("PRAGMA table_info(auto_process_queue)")
+            queue_columns = [row['name'] for row in cursor.fetchall()]
+            if 'priority' not in queue_columns:
+                conn.execute("""
+                    ALTER TABLE auto_process_queue
+                    ADD COLUMN priority INTEGER DEFAULT 0
+                """)
+                conn.commit()
+                logger.info("Migration: Added priority column to auto_process_queue table")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_queue_status_priority "
+                "ON auto_process_queue(status, priority DESC, created_at)"
+            )
+            conn.commit()
+        except Exception as e:
+            logger.debug(f"auto_process_queue priority migration: {e}")
 
         # Create new indexes for podcasts table (will fail silently if already exist)
         try:

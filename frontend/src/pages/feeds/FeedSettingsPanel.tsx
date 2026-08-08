@@ -11,6 +11,7 @@ import { ExperimentalBadge } from '../../components/ExperimentalBadge';
 import { FeedTagsEditor } from '../../components/FeedTagsEditor';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import TriStateSelect from '../../components/TriStateSelect';
+import TriStateToggle from '../../components/TriStateToggle';
 import SegmentActionToggle from '../../components/SegmentActionToggle';
 import {
   SEGMENT_CATEGORIES, SEGMENT_CATEGORY_LABELS, SEGMENT_CATEGORY_DESCRIPTIONS, DEFAULT_SEGMENT_ACTION,
@@ -18,7 +19,7 @@ import {
 } from '../../utils/segmentCategory';
 import { WHISPER_LANGUAGES, labelForLanguage } from '../../utils/whisperLanguages';
 import { useSyncFromQuery } from '../../hooks/useSyncFromQuery';
-import { btnPrimary, btnSecondary } from '../../components/buttonStyles';
+import { btnPrimary, btnSecondary, btnOutline } from '../../components/buttonStyles';
 
 interface Props {
   feed: Feed;
@@ -130,6 +131,9 @@ function FeedSettingsPanel({ feed, slug }: Props) {
   const [rerenderResult, setRerenderResult] = useState<RerenderSegmentsResult | null>(null);
   const [rerenderError, setRerenderError] = useState<string | null>(null);
   const [segmentActionError, setSegmentActionError] = useState<string | null>(null);
+  const [addingTitleSkipPattern, setAddingTitleSkipPattern] = useState(false);
+  const [titleSkipPatternInput, setTitleSkipPatternInput] = useState('');
+  const [titleSkipPatternError, setTitleSkipPatternError] = useState<string | null>(null);
   // Local source of truth for the per-feed override map, not the `feed`
   // prop: the PATCH replaces the stored map outright with no server merge,
   // so building from a stale prop between edits would drop the earlier one.
@@ -365,6 +369,34 @@ function FeedSettingsPanel({ feed, slug }: Props) {
     });
   };
 
+  const addTitleSkipPattern = () => {
+    const pattern = titleSkipPatternInput.trim();
+    if (!pattern) return;
+    const current = feed.titleSkipPatterns ?? [];
+    if (current.includes(pattern)) {
+      setTitleSkipPatternInput('');
+      setAddingTitleSkipPattern(false);
+      return;
+    }
+    setTitleSkipPatternError(null);
+    updateMutation.mutate({ titleSkipPatterns: [...current, pattern] }, {
+      onSuccess: () => {
+        setTitleSkipPatternInput('');
+        setAddingTitleSkipPattern(false);
+      },
+      onError: (e) => setTitleSkipPatternError(getErrorMessage(e, 'Failed to add pattern')),
+    });
+  };
+
+  const removeTitleSkipPattern = (pattern: string) => {
+    setTitleSkipPatternError(null);
+    updateMutation.mutate({
+      titleSkipPatterns: (feed.titleSkipPatterns ?? []).filter((p) => p !== pattern),
+    }, {
+      onError: (e) => setTitleSkipPatternError(getErrorMessage(e, 'Failed to remove pattern')),
+    });
+  };
+
   const processingMode = feed.processingMode ?? 'standard';
   const cueOnlyActive = processingMode === 'cue_only';
 
@@ -576,6 +608,111 @@ function FeedSettingsPanel({ feed, slug }: Props) {
             </div>
           </div>
 
+          {/* Episode title blacklist: skip episodes whose title matches a glob pattern */}
+          <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
+            <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-0.5">
+              Skip episodes by title:
+            </span>
+            <div className="flex flex-col gap-1 flex-1 min-w-0">
+              {(feed.titleSkipPatterns ?? []).length > 0 && (
+                <div className="flex flex-wrap gap-1 mb-1">
+                  {feed.titleSkipPatterns!.map((p) => (
+                    <span
+                      key={p}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-blue-500/15 text-blue-700 dark:text-blue-400"
+                    >
+                      {p}
+                      <button
+                        type="button"
+                        onClick={() => removeTitleSkipPattern(p)}
+                        disabled={updateMutation.isPending}
+                        className="text-blue-700/60 dark:text-blue-400/60 hover:text-red-600 dark:hover:text-red-400 disabled:opacity-50"
+                        aria-label={`Remove ${p}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                {!addingTitleSkipPattern ? (
+                  <button
+                    type="button"
+                    onClick={() => setAddingTitleSkipPattern(true)}
+                    disabled={updateMutation.isPending}
+                    className={`px-2 py-1 text-xs rounded ${btnOutline} disabled:opacity-50`}
+                  >
+                    + Add pattern
+                  </button>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      autoFocus
+                      value={titleSkipPatternInput}
+                      onChange={(e) => setTitleSkipPatternInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          addTitleSkipPattern();
+                        }
+                      }}
+                      placeholder="Bonus Episode *"
+                      aria-label="New title pattern"
+                      maxLength={200}
+                      className="px-2 py-1 text-xs bg-secondary border border-border rounded flex-1 min-w-0"
+                    />
+                    <button
+                      type="button"
+                      onClick={addTitleSkipPattern}
+                      disabled={updateMutation.isPending || !titleSkipPatternInput.trim()}
+                      className={`px-2 py-1 text-xs rounded ${btnOutline} disabled:opacity-50`}
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddingTitleSkipPattern(false);
+                        setTitleSkipPatternInput('');
+                        setTitleSkipPatternError(null);
+                      }}
+                      className={`px-2 py-1 text-xs rounded ${btnOutline}`}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                )}
+              </div>
+              {titleSkipPatternError && (
+                <p className="text-xs text-destructive">{titleSkipPatternError}</p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Patterns match the whole episode title, case-insensitively. Use * as a wildcard: Bonus Episode * skips titles starting with Bonus Episode. Without a wildcard the whole title must match.
+              </p>
+            </div>
+          </div>
+
+          {/* Served-feed visibility for a title-blacklisted episode */}
+          <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
+            <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-1.5">
+              Skipped episodes:
+            </span>
+            <select
+              value={feed.titleSkipAction ?? 'serve_original'}
+              onChange={(e) => updateMutation.mutate({
+                titleSkipAction: e.target.value as UpdateFeedPayload['titleSkipAction'],
+              })}
+              disabled={updateMutation.isPending}
+              className="px-2 py-1.5 text-sm bg-secondary border border-border rounded self-start min-w-0 max-w-full disabled:opacity-50"
+              aria-label="Skipped episodes"
+            >
+              <option value="serve_original">Keep in feed with original audio</option>
+              <option value="hide">Hide from feed</option>
+            </select>
+          </div>
+
           {/* Single preset canonicalizing detectionMode/skipAdDetection/passthroughEnabled;
               those legacy fields stay available for external API callers. */}
           <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
@@ -673,6 +810,30 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                 Auto keeps the podcast&apos;s own chapters with timestamps shifted to
                 the ad-free audio, and generates chapters when an episode has too
                 few. Always generate replaces them; Off leaves them untouched.
+              </p>
+            </div>
+          </div>
+
+          {/* Per-feed auto-process queue priority (#625) */}
+          <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
+            <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-1.5">Queue priority:</span>
+            <div className="flex flex-col gap-1 flex-1 min-w-0">
+              <select
+                value={feed.queuePriority || 'normal'}
+                onChange={(e) => updateMutation.mutate({
+                  queuePriority: e.target.value as 'high' | 'normal' | 'low',
+                })}
+                disabled={updateMutation.isPending}
+                className="px-2 py-1.5 text-sm bg-secondary border border-border rounded self-start min-w-0 max-w-full disabled:opacity-50"
+                aria-label="Queue priority"
+              >
+                <option value="high">High</option>
+                <option value="normal">Normal</option>
+                <option value="low">Low</option>
+              </select>
+              <p className="text-xs text-muted-foreground">
+                High processes before other queued episodes. Low runs only when nothing else is waiting.
+                New episodes and manual reprocesses get an automatic boost.
               </p>
             </div>
           </div>
@@ -809,23 +970,35 @@ function FeedSettingsPanel({ feed, slug }: Props) {
               </div>
               {segmentActionError && <p className="text-xs text-destructive">{segmentActionError}</p>}
 
-              {/* Show-segment detection (issue #565): off by default. */}
-              <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm pt-2 border-t border-border">
-                <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-1.5">Show segments:</span>
-                <div className="flex flex-col gap-1 flex-1 min-w-0">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <ToggleSwitch
-                      checked={feed.detectShowSegments === true}
-                      onChange={(v) => updateMutation.mutate({ detectShowSegments: v })}
-                      disabled={updateMutation.isPending}
-                      ariaLabel="Detect show segments"
-                    />
-                    <span>Detect show segments</span>
-                  </label>
-                  <p className="text-xs text-muted-foreground">
+              {/* Show-segment detection (issue #565): tri-state, inheriting
+                  the global detectShowSegments default when unset. */}
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-3 text-sm pt-2 border-t border-border">
+                <div className="min-w-0">
+                  <span className="text-muted-foreground block">Show segments</span>
+                  <span className="text-xs text-muted-foreground/70 block">
                     Finds the show&apos;s intro, outro and credits, and preview bumpers so you
                     can keep or cut them by category. Rough edges where music dominates.
-                  </p>
+                  </span>
+                </div>
+                <div className="flex flex-col items-start sm:items-end gap-1">
+                  <TriStateToggle
+                    value={feed.detectShowSegments == null ? 'inherit' : feed.detectShowSegments ? 'on' : 'off'}
+                    options={[
+                      { value: 'inherit', label: 'Inherit' },
+                      { value: 'on', label: 'On' },
+                      { value: 'off', label: 'Off' },
+                    ]}
+                    onChange={(v) => updateMutation.mutate({
+                      detectShowSegments: v === 'inherit' ? null : v === 'on',
+                    })}
+                    disabled={updateMutation.isPending}
+                    ariaLabel="Show segments"
+                  />
+                  {feed.detectShowSegments == null && (
+                    <p className="text-xs text-muted-foreground">
+                      Following the global setting (currently {(settings?.detectShowSegments?.value ?? false) ? 'on' : 'off'}).
+                    </p>
+                  )}
                 </div>
               </div>
 

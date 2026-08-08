@@ -18,6 +18,7 @@ from config import (
 from audio_peaks import compute_peaks, PeaksError
 from audio_processor import get_replacement_duration
 from chapters_generator import ChaptersGenerator
+from database.queue import compute_queue_priority
 from embedded_chapters import embed_chapters
 from llm_client import start_episode_token_tracking, get_episode_token_totals
 from processing_queue import ProcessingQueue
@@ -350,6 +351,23 @@ def _low_ad_yield(db, episode, runs):
     }
 
 
+def _partial_detection(episode, runs):
+    """Degraded pass-1 completion (episodes.detection_degraded). Window
+    counts come from the run that produced the served audio (the latest
+    completed one, same lookup _low_ad_yield uses above), when available."""
+    reason = episode.get('detection_degraded')
+    if not reason:
+        return None
+    latest_completed = _latest_completed_run(runs) if runs else None
+    latest_stats = ((latest_completed or {}).get('stats')) or {}
+    windows = latest_stats.get('windows') or {}
+    return {
+        'reason': reason,
+        'windowsFailed': windows.get('failed'),
+        'windowsTotal': windows.get('total'),
+    }
+
+
 @api.route('/feeds/<slug>/episodes/<episode_id>', methods=['GET'])
 @log_request
 def get_episode(slug, episode_id):
@@ -379,7 +397,8 @@ def get_episode(slug, episode_id):
             all_markers = json.loads(episode['ad_markers_json'])
             for marker in all_markers:
                 decision = marker.get('validation', {}).get('decision', 'ACCEPT')
-                was_cut = marker.get('was_cut', True)
+                # Markers persisted by a failed run were never cut.
+                was_cut = marker.get('was_cut', episode.get('status') == EpisodeStatus.PROCESSED)
                 # Absent stays absent. Defaulting to 'sponsor' here meant the
                 # UI could not tell a real sponsor read from a marker no stage
                 # ever classified.
@@ -450,6 +469,7 @@ def get_episode(slug, episode_id):
         'corrections': corrections,
         'cueDetections': cue_detections,
         'adDetectionStatus': episode.get('ad_detection_status'),
+        'partialDetection': _partial_detection(episode, processing_runs),
         'daiDifferential': dai_differential,
         'transcript': episode.get('transcript_text'),
         'transcriptAvailable': bool(episode.get('transcript_text')),
@@ -785,9 +805,11 @@ def reprocess_episode(slug, episode_id):
                 'status': 'processing'
             }, 202)
         else:
+            priority = compute_queue_priority(
+                podcast.get('queue_priority'), episode_published_at, manual=True)
             db.upsert_episode_for_processing(
                 slug, episode_id, episode_url, episode_title,
-                episode_published_at, episode_description
+                episode_published_at, episode_description, priority=priority
             )
             get_status_service().queue_episode(slug, episode_id, episode_title, podcast_name)
             logger.info(f"[{slug}:{episode_id}] Queue busy ({reason}), added to processing queue")
@@ -1139,12 +1161,15 @@ def bulk_episode_action(slug):
             try:
                 ep = episodes_by_id.get(episode_id)
                 if ep:
+                    priority = compute_queue_priority(
+                        podcast.get('queue_priority'), ep.get('published_at'), manual=True)
                     db.upsert_episode_for_processing(
                         slug, episode_id,
                         ep.get('original_url', ''),
                         ep.get('title'),
                         ep.get('published_at'),
                         ep.get('description'),
+                        priority=priority,
                     )
             except Exception as e:
                 logger.warning(f"[{slug}:{episode_id}] Could not enqueue for processing: {e}")
@@ -1487,9 +1512,11 @@ def reprocess_episode_with_mode(slug, episode_id):
                 'status': 'processing'
             }, 202)  # 202 Accepted
         else:
+            priority = compute_queue_priority(
+                podcast.get('queue_priority'), episode_published_at, manual=True)
             db.upsert_episode_for_processing(
                 slug, episode_id, episode_url, episode_title,
-                episode_published_at, episode_description
+                episode_published_at, episode_description, priority=priority
             )
             get_status_service().queue_episode(slug, episode_id, episode_title, podcast_name)
             logger.info(f"[{slug}:{episode_id}] Queue busy ({reason}), added to processing queue")

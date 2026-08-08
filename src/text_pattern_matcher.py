@@ -7,7 +7,7 @@ for host-read ads that follow similar scripts but aren't identical.
 """
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Dict, Tuple
 import json
 
@@ -23,8 +23,16 @@ from sponsor_normalize import get_or_create_known_sponsor
 from utils.constants import INVALID_SPONSOR_VALUES
 from utils.community_tags import UNIVERSAL_TAG
 from utils.language import get_pattern_language
+from utils.pattern_similarity import similarity, canonicalize_for_dedupe
 
 logger = logging.getLogger('podcast.textmatch')
+
+
+def is_defined_pattern(pattern: dict) -> bool:
+    """Tier-1 trust: user-created or community patterns; auto-learned are not."""
+    return (pattern.get('created_by') == 'user'
+            or pattern.get('source') == 'community')
+
 
 # Minimum text length for pattern matching (characters)
 MIN_TEXT_LENGTH = 50
@@ -50,6 +58,10 @@ AD_TRANSITION_PHRASES = [
 # create_pattern_from_ad. Also used as the per-segment cap for the manual
 # correction paths that call split_template_text.
 MAX_PATTERN_CHARS = 3500
+
+# Near-duplicate threshold for learning dedupe in create_pattern_from_ad.
+# Applies to canonicalized text (see canonicalize_for_dedupe), not raw text.
+LEARNING_DEDUPE_SIMILARITY_THRESHOLD = 0.9
 
 # Words a sponsor-name guess after a transition phrase should never be (the
 # first word is usually an article or filler, not the brand).
@@ -266,6 +278,17 @@ class TextMatch:
     # re-match of a pattern learned from e.g. a cross_promo marker carries
     # that category into the detection instead of falling back to 'sponsor'.
     category: Optional[str] = None
+    # Tier-1 trust (user-created or community pattern); see is_defined_pattern.
+    defined: bool = False
+    # pattern_ids of matches merged into this one, for match-credit recording.
+    absorbed_ids: list = field(default_factory=list)
+    # True when an edge came from duration estimation, not matched text
+    # (see _estimate_start/end_from_duration); makes the span advisory.
+    span_estimated: bool = False
+    # Real matched-text time bounds, for capping label reach when
+    # span_estimated is True. None when not applicable.
+    text_start: Optional[float] = None
+    text_end: Optional[float] = None
 
 
 @dataclass
@@ -284,6 +307,11 @@ class AdPattern:
     source: str = 'local'  # "local", "community", "imported"
     source_language: Optional[str] = None  # ISO 639-1 code of the transcript the pattern was learned from (#252)
     category: Optional[str] = None  # Segment category (#565); None on a legacy/unmigrated row
+    created_by: Optional[str] = None  # 'user', 'auto', 'community'; feeds is_defined_pattern
+
+    @property
+    def is_defined(self) -> bool:
+        return is_defined_pattern({'created_by': self.created_by, 'source': self.source})
 
 
 class TextPatternMatcher:
@@ -380,6 +408,7 @@ class TextPatternMatcher:
                     source=p.get('source') or 'local',
                     source_language=p.get('source_language'),
                     category=p.get('category'),
+                    created_by=p.get('created_by'),
                 ))
 
             # Cache sponsor_id -> tags for matcher eligibility checks.
@@ -703,6 +732,7 @@ class TextPatternMatcher:
                         sponsor=pattern.sponsor,
                         match_type="content",
                         category=pattern.category,
+                        defined=pattern.is_defined,
                     ))
 
         window_bounds = []
@@ -766,14 +796,17 @@ class TextPatternMatcher:
 
                     if best_score >= required_fuzzy_score(len(intro_lower)):
                         # Found intro - scan for paired outro or estimate from duration
-                        start_time, _ = self._char_pos_to_time(
+                        start_time, intro_text_end = self._char_pos_to_time(
                             best_pos, best_pos + len(matched),
                             segment_map, segments
                         )
                         intro_end_pos = best_pos + len(matched)
-                        end_time = self._scan_for_outro(
+                        scanned_end = self._scan_for_outro(
                             full_text_lower, segment_map, segments, pattern, intro_end_pos
-                        ) or self._estimate_end_from_duration(pattern, start_time)
+                        )
+                        span_estimated = scanned_end is None
+                        end_time = (self._estimate_end_from_duration(pattern, start_time)
+                                    if span_estimated else scanned_end)
 
                         matches.append(TextMatch(
                             pattern_id=pattern.id,
@@ -784,6 +817,10 @@ class TextPatternMatcher:
                             match_type="intro",
                             category=pattern.category,
                             matched_text=matched,
+                            defined=pattern.is_defined,
+                            span_estimated=span_estimated,
+                            text_start=start_time,
+                            text_end=intro_text_end if span_estimated else end_time,
                         ))
 
                 # Check outro phrases
@@ -798,14 +835,17 @@ class TextPatternMatcher:
                     )
 
                     if best_score >= required_fuzzy_score(len(outro_lower)):
-                        _, end_time = self._char_pos_to_time(
+                        outro_text_start, end_time = self._char_pos_to_time(
                             best_pos, best_pos + len(matched),
                             segment_map, segments
                         )
                         outro_start_pos = best_pos
-                        start_time = self._scan_for_intro(
+                        scanned_start = self._scan_for_intro(
                             full_text_lower, segment_map, segments, pattern, outro_start_pos
-                        ) or self._estimate_start_from_duration(pattern, end_time)
+                        )
+                        span_estimated = scanned_start is None
+                        start_time = (self._estimate_start_from_duration(pattern, end_time)
+                                      if span_estimated else scanned_start)
 
                         matches.append(TextMatch(
                             pattern_id=pattern.id,
@@ -816,6 +856,10 @@ class TextPatternMatcher:
                             match_type="outro",
                             category=pattern.category,
                             matched_text=matched,
+                            defined=pattern.is_defined,
+                            span_estimated=span_estimated,
+                            text_start=outro_text_start if span_estimated else start_time,
+                            text_end=end_time,
                         ))
 
         except ImportError:
@@ -980,16 +1024,31 @@ class TextPatternMatcher:
                 (current.sponsor or '').lower() == (match.sponsor or '').lower()
             )
             if same_sponsor and match.start <= current.end + 5.0:
-                # Merge - keep higher confidence
-                best = current if current.confidence >= match.confidence else match
+                # Merge - a defined (tier-1) match wins ownership regardless
+                # of confidence; otherwise keep higher confidence.
+                if current.defined != match.defined:
+                    best = current if current.defined else match
+                    loser = match if current.defined else current
+                else:
+                    best = current if current.confidence >= match.confidence else match
+                    loser = match if best is current else current
+                # Any estimated edge on either side keeps the merged span
+                # advisory; label reach is capped to the union of grounded
+                # text only (None-safe: an estimated edge has no text bound).
+                text_starts = [t for t in (current.text_start, match.text_start) if t is not None]
+                text_ends = [t for t in (current.text_end, match.text_end) if t is not None]
                 current = replace(
                     best,
                     start=min(current.start, match.start),
                     end=max(current.end, match.end),
                     confidence=max(current.confidence, match.confidence),
-                    sponsor=current.sponsor or match.sponsor,
+                    sponsor=best.sponsor or loser.sponsor,
                     match_type="both" if current.match_type != match.match_type else current.match_type,
-                    category=current.category or match.category,
+                    category=best.category if best.defined else (current.category or match.category),
+                    absorbed_ids=current.absorbed_ids + match.absorbed_ids + [loser.pattern_id],
+                    span_estimated=current.span_estimated or match.span_estimated,
+                    text_start=min(text_starts) if text_starts else None,
+                    text_end=max(text_ends) if text_ends else None,
                 )
             else:
                 merged.append(current)
@@ -1310,6 +1369,31 @@ class TextPatternMatcher:
                     f"a host name-drop or verification-pass false positive"
                 )
                 return None
+
+        # Only a span that passed every validation gate above may credit an
+        # existing pattern's confirmation_count, and reuses a near-identical
+        # existing pattern instead of inserting a duplicate (#565).
+        try:
+            existing_patterns = (
+                self.db.get_ad_patterns(podcast_id=podcast_id) if podcast_id else []
+            )
+        except Exception:
+            existing_patterns = []
+        for existing_pattern in existing_patterns:
+            existing_text = existing_pattern.get('text_template') or ''
+            if not existing_text:
+                continue
+            sim = similarity(canonicalize_for_dedupe(ad_text), canonicalize_for_dedupe(existing_text))
+            if sim >= LEARNING_DEDUPE_SIMILARITY_THRESHOLD:
+                logger.info(
+                    f"Near-duplicate of pattern #{existing_pattern['id']} "
+                    f"(sim {sim:.2f}); updating stats instead of inserting"
+                )
+                try:
+                    self.db.increment_pattern_match(existing_pattern['id'])
+                except Exception as e:
+                    logger.warning(f"Failed to record dedupe match: {e}")
+                return existing_pattern['id']
 
         try:
             sponsor_id = (
