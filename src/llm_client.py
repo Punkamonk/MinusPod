@@ -56,6 +56,7 @@ from config import (
     PROVIDER_OLLAMA,
     PROVIDERS_NON_ANTHROPIC,
     coerce_bool_setting,
+    ModelNotConfiguredError,
 )
 from llm_capabilities import (
     get_pass_defaults,
@@ -728,7 +729,7 @@ class OpenAICompatibleClient(LLMClient):
         super().__init__()
         self.base_url = base_url or os.environ.get('OPENAI_BASE_URL', DEFAULT_OPENAI_BASE_URL)
         self.api_key = api_key or get_effective_openai_api_key()
-        self.default_model = default_model or os.environ.get('OPENAI_MODEL', 'claude-sonnet-4-5-20250929')
+        self.default_model = default_model or os.environ.get('OPENAI_MODEL')
         self.extra_headers = extra_headers or {}
         self._client = None
         # Cache which token parameter each model accepts: "max_completion_tokens" or "max_tokens"
@@ -1334,7 +1335,10 @@ def get_llm_client(force_new: bool = False) -> LLMClient:
 
         _cached_client = _build_client(provider)
         if _cached_client is None:
-            logger.warning(f"Unknown LLM_PROVIDER '{provider}', defaulting to anthropic")
+            logger.error(
+                f"Unknown LLM_PROVIDER '{provider}' (valid values: anthropic, "
+                "openrouter, openai-compatible, ollama), defaulting to anthropic"
+            )
             _cached_client = AnthropicClient()
 
         _cached_client.set_usage_callback(_record_token_usage)
@@ -1508,6 +1512,9 @@ def is_retryable_error(error: Exception) -> bool:
 
     Works with both Anthropic and OpenAI error types.
     """
+    # Unconfigured model never self-resolves; no LLM call was even attempted.
+    if isinstance(error, ModelNotConfiguredError):
+        return False
     # Structural 429s are never retryable -- the request itself exceeds the
     # provider's per-minute cap, no amount of backoff will help.
     if isinstance(error, StructuralRateLimitError):

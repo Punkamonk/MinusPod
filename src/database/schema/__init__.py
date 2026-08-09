@@ -1364,6 +1364,24 @@ class SchemaMixin:
             conn.rollback()
             logger.error(f"artwork re-download priming failed: {e}")
 
+        # One-shot clear of system-seeded model defaults (2.86.4): a stale
+        # model id written by the old hardcoded-default seeding logic must
+        # not survive into the new require-explicit-model contract.
+        try:
+            self._run_clear_seeded_model_defaults(conn)
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"seeded model defaults clear failed: {e}")
+
+        # Per-boot, not schema_migrations-gated: seeds an absent model row
+        # from OPENAI_MODEL, run after the clear above so a stale default is
+        # removed and reseeded in the same boot.
+        try:
+            self._seed_model_settings_from_env(conn)
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"model settings env seed failed: {e}")
+
         # Refresh default prompts to mention audio cue evidence (#350).
         # Marker phrase per prompt is unique to this revision and idempotent:
         # only overwrite a prompt that is still the stored default and lacks
@@ -1839,6 +1857,72 @@ class SchemaMixin:
             cur.rowcount,
         )
 
+    def _run_clear_seeded_model_defaults(self, conn):
+        """One-time clear of unusable system-seeded model settings (2.86.4).
+
+        Only clears a shipped Anthropic id left on a non-Anthropic provider,
+        which can never resolve. A working default is left alone.
+        """
+        gate = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE name = 'clear_seeded_model_defaults'"
+        ).fetchone()
+        if gate is not None:
+            return
+
+        from config import PROVIDER_ANTHROPIC
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'llm_provider'"
+        ).fetchone()
+        provider = (row['value'] if row else None) or os.environ.get(
+            'LLM_PROVIDER', PROVIDER_ANTHROPIC)
+
+        cleared = []
+        if provider != PROVIDER_ANTHROPIC:
+            for key in ('claude_model', 'verification_model', 'chapters_model'):
+                cur = conn.execute(
+                    "DELETE FROM settings WHERE key = ? AND is_default = 1 "
+                    "AND value LIKE 'claude-%'", (key,)
+                )
+                if cur.rowcount:
+                    cleared.append(key)
+
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (name) VALUES "
+            "('clear_seeded_model_defaults')"
+        )
+        conn.commit()
+        logger.info(
+            "Migration: cleared seeded model defaults for %s",
+            ", ".join(cleared) if cleared else "none (nothing to clear)",
+        )
+
+    def _seed_model_settings_from_env(self, conn):
+        """Seed an absent model row from OPENAI_MODEL (2.86.4).
+
+        Runs every boot, not just once: a row can go absent again via reset
+        or the provider prune. A present row, either is_default value, is
+        never touched.
+        """
+        env_model = os.environ.get('OPENAI_MODEL')
+        if not env_model:
+            return
+
+        seeded = []
+        for key in ('claude_model', 'verification_model', 'chapters_model'):
+            cur = conn.execute(
+                """INSERT INTO settings (key, value, is_default) VALUES (?, ?, 1)
+                   ON CONFLICT(key) DO NOTHING""",
+                (key, env_model),
+            )
+            if cur.rowcount:
+                seeded.append(key)
+
+        if seeded:
+            conn.commit()
+            logger.info(
+                "Seeded %s from OPENAI_MODEL (row was absent)", ", ".join(seeded)
+            )
+
     def _run_reset_legacy_skip_second_pass(self, conn):
         """One-time reset of `podcasts.skip_second_pass` values from the old column.
 
@@ -2278,7 +2362,14 @@ class SchemaMixin:
                 )
 
         # Step 3: per-boot resync (also inserts missing rows for new keys).
-        for db_key, _env_var, _fallback, _validator in ENV_BACKED_SETTINGS:
+        for db_key, env_var, _fallback, validator in ENV_BACKED_SETTINGS:
+            raw_env = os.environ.get(env_var)
+            if raw_env is not None and validator is not None and not validator(raw_env):
+                logger.warning(
+                    "env-backed-settings: %s=%r is not a recognized value for "
+                    "%s; falling back to the registry default",
+                    env_var, raw_env, db_key,
+                )
             env_value = resolve_env_backed_default(db_key)
             row = conn.execute(
                 "SELECT value, is_default FROM settings WHERE key = ?",

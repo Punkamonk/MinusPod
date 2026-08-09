@@ -9,7 +9,7 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
-## [Unreleased]
+## [2.86.4] - 2026-08-09
 
 ### Added
 
@@ -34,11 +34,38 @@ release notes.
 
 ### Changed
 
+- **Breaking:** `claude_model`, `verification_model`, and `chapters_model`
+  no longer seed or reset to a hardcoded literal. They seed from
+  `OPENAI_MODEL` when the operator has set it and stay unset otherwise;
+  resetting one (individually, via a provider change, or via the bulk
+  ad-detection reset) clears it back to unset instead of writing a shipped
+  default. An install that relied on the old shipped default must
+  configure a model explicitly in Settings (or via `OPENAI_MODEL`) after
+  any of those resets.
 - `docs/llm-providers.md` model recommendations refreshed from the 2026-08
   sweep, including a note on provider-side content moderation.
+- An unconfigured model (`claude_model`, `verification_model`, or
+  `chapters_model` unset) is no longer a silent failure. Boot logs one
+  error line naming the missing settings, `/health` adds an
+  `llm_model_configured` check without affecting overall status, ad
+  detection fails the episode immediately with the exact error message
+  instead of exhausting the retry ladder, and chapter generation degrades
+  to fallback titles and boundaries instead of failing the episode.
 
 ### Fixed
 
+- A non-Anthropic install carrying a shipped Anthropic model id from the
+  old hardcoded-default seeding has it cleared on upgrade, so it fails
+  with an actionable message instead of looping on a provider 404. The
+  clear is limited to that case: a model you chose yourself, and a shipped
+  default that still resolves on an Anthropic install, are both left
+  alone.
+- Model settings now seed from `OPENAI_MODEL` whenever a row is absent.
+  The previous seed path only fired on an empty settings table, which
+  never happened in practice because schema migrations always populate
+  other rows first.
+- An unrecognized `LLM_PROVIDER` value is rejected with a warning instead
+  of being written into the stored setting verbatim.
 - Cross-model agreement chart was unreadable at 75 models: every integer
   got an x tick so the labels ran together, and the two-line bar labels
   overlapped each other. Ticks now thin out to about 25 across any

@@ -43,7 +43,7 @@ from config import (
     MIN_OVERLAP_TOLERANCE,
     MAX_AD_DURATION_WINDOW,
     PATTERN_CORRECTION_OVERLAP_THRESHOLD,
-    DEFAULT_AD_DETECTION_MODEL,
+    ModelNotConfiguredError,
     AD_DETECTION_PARALLEL_WINDOWS_DEFAULT,
     AD_DETECTION_PARALLEL_WINDOWS_MIN,
     AD_DETECTION_PARALLEL_WINDOWS_MAX,
@@ -635,7 +635,7 @@ class AdDetector:
         return models_list
 
     def get_model(self) -> str:
-        """Get configured model from database or default."""
+        """Get configured model from database, or raise if unset."""
         self._ensure_deps()
         try:
             model = self.db.get_setting('claude_model')
@@ -643,10 +643,10 @@ class AdDetector:
                 return model
         except Exception as e:
             logger.warning(f"Could not load model from DB: {e}")
-        return DEFAULT_AD_DETECTION_MODEL
+        raise ModelNotConfiguredError('claude_model')
 
     def get_verification_model(self) -> str:
-        """Get verification pass model from database or fall back to first pass model."""
+        """Get verification pass model from database, else fall back to first pass model."""
         self._ensure_deps()
         try:
             model = self.db.get_setting('verification_model')
@@ -1382,7 +1382,8 @@ class AdDetector:
 
         except Exception as e:
             logger.error(f"[{slug}:{episode_id}] Ad detection failed: {e}")
-            return {"ads": [], "status": "failed", "error": str(e), "retryable": is_retryable_error(e)}
+            return {"ads": [], "status": "failed", "error": str(e), "retryable": is_retryable_error(e),
+                    "model_not_configured": isinstance(e, ModelNotConfiguredError)}
 
     def _process_keep_content_window(self, *, window_idx, window, total_windows,
                                      model, podcast_name, episode_title,
@@ -2691,5 +2692,6 @@ class AdDetector:
 
         except Exception as e:
             logger.error(f"[{slug}:{episode_id}] Verification detection failed: {e}")
-            return {"ads": [], "status": "failed", "error": str(e), "retryable": is_retryable_error(e)}
+            return {"ads": [], "status": "failed", "error": str(e), "retryable": is_retryable_error(e),
+                    "model_not_configured": isinstance(e, ModelNotConfiguredError)}
 

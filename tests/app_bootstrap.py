@@ -20,6 +20,9 @@ Notes:
   Storage() call constructs one rooted at the new data dir. Off by default
   because modules that never re-instantiate Storage should keep whatever
   instance an earlier module's main_app import created.
+- model_env sets OPENAI_MODEL so a seeded DB gets a model, mirroring the
+  SECRET_KEY setdefault (first bootstrap() call wins). Pass model_env=None
+  to opt out; the env var may persist from an earlier module regardless.
 """
 import atexit
 import os
@@ -33,18 +36,20 @@ _SRC_DIR = os.path.abspath(
 
 
 def bootstrap(prefix, secret_key='test-secret', passphrase=None,
-              reset_storage=False):
+              reset_storage=False, model_env='test-model'):
     """Create a temp data dir and point the app singletons at it.
 
     Returns the created data dir path. Environment (SECRET_KEY, DATA_DIR,
-    optionally MINUSPOD_MASTER_PASSPHRASE) is set before any src import so
-    modules that read env at import time see the test values.
+    OPENAI_MODEL, optionally MINUSPOD_MASTER_PASSPHRASE) is set before any
+    src import so modules that read env at import time see the test values.
     """
     data_dir = tempfile.mkdtemp(prefix=prefix)
     os.environ.setdefault('SECRET_KEY', secret_key)
     os.environ['DATA_DIR'] = data_dir
     if passphrase is not None:
         os.environ['MINUSPOD_MASTER_PASSPHRASE'] = passphrase
+    if model_env is not None:
+        os.environ.setdefault('OPENAI_MODEL', model_env)
     if _SRC_DIR not in sys.path:
         sys.path.insert(0, _SRC_DIR)
 
@@ -63,3 +68,14 @@ def bootstrap(prefix, secret_key='test-secret', passphrase=None,
 
     atexit.register(shutil.rmtree, data_dir, ignore_errors=True)
     return data_dir
+
+
+def ensure_model_configured(db, model='test-model'):
+    """Ensure claude_model is set so model resolvers do not raise.
+
+    No-op if already seeded from OPENAI_MODEL; call after DB construction
+    for a path (e.g. temp_db) that may not have OPENAI_MODEL in its env.
+    """
+    if not db.get_setting('claude_model'):
+        db.set_setting('claude_model', model, is_default=True)
+    return model

@@ -76,6 +76,7 @@ from config import (
     resolve_differential_fetch_setting,
     TERMINAL_SNAP_WINDOW_SECONDS,
     VETO_MIN_CUT_SECONDS,
+    ModelNotConfiguredError,
 )
 from database.settings import registry_get_default
 from embedded_chapters import embed_chapters, probe_chapters, MIN_CHAPTER_SECONDS
@@ -147,6 +148,10 @@ def is_transient_error(error: Exception) -> bool:
     then applies episode-processing-specific checks for network, OOM, CDN, and
     audio format errors.
     """
+    # Unconfigured model is operator-fixable but never self-resolves on retry.
+    if isinstance(error, ModelNotConfiguredError):
+        return False
+
     # Endpoint-unreachable errors are transient by definition; with the
     # offline queue (#482) disabled this keeps today's retry behavior.
     if isinstance(error, ServiceUnavailableError):
@@ -735,6 +740,12 @@ def _detect_ads_first_pass(ctx, segments, audio_path,
             # of re-classifying the stringified 429 text as transient (#491).
             db.upsert_episode(slug, episode_id, ad_detection_status='failed')
             raise LimitExceededError(f"Ad detection failed: {error_msg}")
+        if ad_result.get('model_not_configured'):
+            # Typed so is_transient_error sees ModelNotConfiguredError instead of
+            # a bare Exception, which defaults to transient and burns the retry
+            # ladder. error_msg is already the exact resolver message.
+            db.upsert_episode(slug, episode_id, ad_detection_status='failed')
+            raise ModelNotConfiguredError('claude_model', error_msg)
         # Degraded continue: a transient, non-auth failure that still left
         # pattern/cross-fetch markers publishes those instead of failing the
         # episode. Auth-class failures and zero markers still raise.

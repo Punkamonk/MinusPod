@@ -17,7 +17,7 @@ Grouped by how often you'll touch them. **Standard** is what a typical deploymen
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API base URL. Override for private proxies or regional endpoints. |
 | `ANTHROPIC_BASE_URL` | _(anthropic default)_ | Anthropic API base URL. Override for private proxies. |
 | `OPENAI_API_KEY` | `not-needed` | API key for OpenAI-compatible endpoint (not required for Ollama or local wrappers) |
-| `OPENAI_MODEL` | _(none)_ | Seed model for OpenAI-compatible/Ollama/OpenRouter providers. **Required for Ollama** (e.g. `qwen3:14b`). Defaults to `claude-sonnet-4-5-20250929` for openai-compatible if unset. Seed-only: read once on first startup; after that the stored value wins, so change the model in the Settings UI. There is no `LLM_MODEL` variable. |
+| `OPENAI_MODEL` | _(none)_ | Model id that seeds `claude_model`, `verification_model`, and `chapters_model` whenever one of those settings is unset. No shipped default exists: **required for Ollama** (e.g. `qwen3:14b`) and needed for OpenAI-compatible/OpenRouter unless you pick a model in Settings > AI models instead. Once a setting has a stored value the env var no longer touches it. Processing fails with a message pointing at Settings > AI models until every model setting is configured. There is no `LLM_MODEL` variable. |
 | `BASE_URL` | `http://localhost:8000` | Public URL for generated feed links |
 | `UI_BASE_URL` | _(falls back to BASE_URL)_ | Public URL for UI links in webhooks (set if UI is on a different domain than feeds) |
 | `WHISPER_MODEL` | `small` | Whisper model size. `tiny`, `base`, `small`, `medium`, `large-v3`, `turbo`, plus `.en` variants |
@@ -62,7 +62,7 @@ Grouped by how often you'll touch them. **Standard** is what a typical deploymen
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Flask-limiter storage backend. Default is per-worker; set to `redis://host:6379` + run a Redis sidecar for exact declared limits across workers. |
 | `APP_UID` | `1000` | UID gunicorn runs as inside the container. Override to match host volume ownership. |
 | `APP_GID` | `1000` | GID counterpart to `APP_UID`. |
-| `GUNICORN_BIND` | `0.0.0.0:8000` | Listen address. Accepts a comma-separated list for multiple sockets. For dual-stack on rootless Podman, use `[::]:8000` -- one IPv6 wildcard also accepts IPv4 when the kernel keeps `bindv6only=0` (the default). Do not list both `0.0.0.0:8000` and `[::]:8000` on such a kernel; the second bind fails with `EADDRINUSE` and gunicorn exits. |
+| `GUNICORN_BIND` | `0.0.0.0:8000` | Listen address. Accepts a comma-separated list for multiple sockets. For dual-stack on rootless Podman, use `[::]:8000`: one IPv6 wildcard also accepts IPv4 when the kernel keeps `bindv6only=0` (the default). Do not list both `0.0.0.0:8000` and `[::]:8000` on such a kernel; the second bind fails with `EADDRINUSE` and gunicorn exits. |
 | `MINUSPOD_PORT` | `8000` | Port for the default listen address (`0.0.0.0:$MINUSPOD_PORT`). Handy for `network_mode: host` or running several instances on one host without a port-mapping conflict. Ignored when `GUNICORN_BIND` is set, which takes precedence. The container `EXPOSE` stays at `8000` (build-time metadata only); the actual listen port follows this var. |
 | `GUNICORN_WORKERS` | `2` | Worker count. Lower means single-threaded UI blocking during RSS refresh; higher multiplies per-worker rate-limit counters (when using `memory://`). |
 | `GUNICORN_TIMEOUT` | `600` | Per-request hard timeout. |

@@ -4,8 +4,8 @@ import math
 import re
 from typing import List, Dict, Optional, Tuple
 
-from config import DEFAULT_CHAPTERS_MODEL as _DEFAULT_CHAPTERS_MODEL
 from config import (
+    ModelNotConfiguredError,
     normalize_segment_category, resolve_chapter_geometry,
     resolve_stage_tunables,
 )
@@ -16,8 +16,7 @@ from utils.text import extract_text_from_segments
 from llm_capabilities import PASS_CHAPTER_GENERATION
 from llm_client import (
     get_llm_client, get_api_key, LLMClient,
-    get_llm_timeout, get_llm_max_retries, get_effective_provider,
-    PROVIDER_ANTHROPIC,
+    get_llm_timeout, get_llm_max_retries,
 )
 from utils.llm_call import call_llm
 
@@ -166,13 +165,8 @@ def _format_hints_block(hints: List[Dict]) -> str:
     )
 
 
-# Default model for chapter generation tasks (titles, topic detection, splitting).
-# Uses Haiku for cost efficiency -- these are simple classification/generation tasks.
-CHAPTERS_MODEL = _DEFAULT_CHAPTERS_MODEL
-
-
 def get_chapters_model() -> str:
-    """Get configured chapters model from database or fall back to default."""
+    """Get configured chapters model from database, else the detection model, else raise."""
     try:
         db = Database()
 
@@ -180,17 +174,14 @@ def get_chapters_model() -> str:
         if model:
             return model
 
-        # Provider-aware fallback: use the primary detection model for non-Anthropic providers
-        # (Ollama doesn't have Anthropic model names like claude-haiku-4-5-20251001)
-        provider = get_effective_provider()
-        if provider != PROVIDER_ANTHROPIC:
-            primary_model = db.get_setting('claude_model')
-            if primary_model:
-                return primary_model
+        # Reuse the configured detection model: correct for every provider.
+        primary_model = db.get_setting('claude_model')
+        if primary_model:
+            return primary_model
     except Exception as e:
         logger.warning(f"Could not load chapters model from DB: {e}")
 
-    return CHAPTERS_MODEL
+    raise ModelNotConfiguredError('chapters_model')
 
 
 class ChaptersGenerator:
@@ -212,6 +203,9 @@ class ChaptersGenerator:
         # degraded run doesn't look like a normal short episode.
         self._topic_detection_failed: bool = False
         self._title_generation_failed: bool = False
+        # Set when get_chapters_model() raises; appended to the degradation
+        # reason below instead of just the generic "... failed" text.
+        self._model_not_configured_message: Optional[str] = None
         self.chapters_degraded: bool = False
         self.chapters_degradation_reason: Optional[str] = None
 
@@ -406,6 +400,10 @@ class ChaptersGenerator:
             logger.info(f"AI detected {len(chapters)} topic boundaries")
             return chapters
 
+        except ModelNotConfiguredError as e:
+            logger.warning(f"Chapter topic detection skipped: {e}")
+            self._model_not_configured_message = str(e)
+            return None
         except Exception as e:
             logger.error(f"Failed to detect topic boundaries: {e}")
             return None
@@ -470,6 +468,11 @@ class ChaptersGenerator:
                 chapters[req['index']]['title'] = title
                 chapters[req['index']]['needs_title'] = False
 
+        except ModelNotConfiguredError as e:
+            logger.warning(f"Chapter title generation skipped: {e}")
+            self._model_not_configured_message = str(e)
+            self._title_generation_failed = True
+            return self._apply_generic_titles(chapters)
         except Exception as e:
             logger.error(f"Failed to generate chapter titles: {e}")
             self._title_generation_failed = True
@@ -761,6 +764,7 @@ class ChaptersGenerator:
         self._episode_id = episode_id
         self._topic_detection_failed = False
         self._title_generation_failed = False
+        self._model_not_configured_message = None
         self.chapters_degraded = False
         self.chapters_degradation_reason = None
 
@@ -832,6 +836,8 @@ class ChaptersGenerator:
                 reasons.append('chapter topic detection failed')
             if self._title_generation_failed:
                 reasons.append('chapter title generation failed')
+            if self._model_not_configured_message:
+                reasons.append(self._model_not_configured_message)
             reason = '; '.join(reasons)
             self.chapters_degraded = True
             self.chapters_degradation_reason = reason
