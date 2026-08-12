@@ -7,6 +7,8 @@ import {
 } from '../api/patterns';
 import { btnPrimary } from './buttonStyles';
 import { getErrorMessage } from '../api/client';
+import Checkbox from './Checkbox';
+import { focusRing } from './fieldStyles';
 
 // Same-sponsor near-duplicate clusters the backend precomputes (#399). The
 // frontend only renders them and triggers the fold; it never computes
@@ -70,7 +72,7 @@ function SuggestionCard({
         <button
           onClick={doMerge}
           disabled={busy || mergeIds.length === 0}
-          className={`px-3 py-1.5 text-sm rounded-lg font-medium ${btnPrimary} disabled:opacity-50`}
+          className={`px-3 py-1.5 text-sm rounded-lg font-medium ${btnPrimary} disabled:opacity-50 ${focusRing}`}
         >
           {busy
             ? 'Merging...'
@@ -86,13 +88,12 @@ function SuggestionCard({
       <ul className="space-y-1">
         {suggestion.members.map((m) => (
           <li key={m.id} className="flex items-start gap-2 text-xs">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={m.id === keepId || included.has(m.id)}
               disabled={m.id === keepId}
               onChange={() => toggle(m.id)}
               className="mt-0.5"
-              aria-label={`Include pattern ${m.id} in the fold`}
+              ariaLabel={`Include pattern ${m.id} in the fold`}
             />
             <span className="text-muted-foreground">
               <span className="font-mono text-foreground">#{m.id}</span>
@@ -103,7 +104,7 @@ function SuggestionCard({
         ))}
       </ul>
       {warning && (
-        <p className="mt-2 text-xs text-yellow-600 dark:text-yellow-400">{warning}</p>
+        <p className="mt-2 text-xs text-warning">{warning}</p>
       )}
       {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
     </div>

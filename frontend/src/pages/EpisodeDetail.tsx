@@ -11,7 +11,7 @@ import Artwork from '../components/Artwork';
 import { episodeArtworkSrc } from '../utils/artworkUrl';
 import { EPISODE_STATUS_COLORS, isFailedStatus } from '../utils/episodeStatus';
 import { DETECTION_STAGE_META } from '../utils/detectionStage';
-import { CORROBORATION_META } from '../utils/corroboration';
+import { CORROBORATION_CLASS, CORROBORATION_META } from '../utils/corroboration';
 import { formatConfidence } from '../utils/confidence';
 import AdEditor, { AdCorrection } from '../components/AdEditor';
 import AdReviewModal from '../components/AdReviewModal';
@@ -30,6 +30,7 @@ import { AuditionPlayButton } from '../components/AuditionPlayButton';
 import { StageBadge } from '../components/StageBadge';
 import ProcessingRunsTable from '../components/ProcessingRunsTable';
 import { btnDestructive, btnPrimary, btnSecondary } from '../components/buttonStyles';
+import { focusRing } from '../components/fieldStyles';
 
 function btnLabel(status: string, idle: string): string {
   if (status === 'saving') return 'Saving...';
@@ -49,8 +50,8 @@ const REDETECT_DISABLED_MODE_LABELS: Partial<Record<NonNullable<Feed['processing
 };
 
 function btnClass(status: string, idleClass: string): string {
-  if (status === 'success') return 'bg-green-700 text-white';
-  if (status === 'error') return 'bg-red-600 text-white';
+  if (status === 'success') return 'bg-success/20 text-success';
+  if (status === 'error') return 'bg-destructive/20 text-destructive';
   return idleClass;
 }
 
@@ -85,7 +86,7 @@ function OpenEditorButton({ onClick, testId }: { onClick: () => void; testId: st
       aria-label="Open in editor"
       title="Open in editor"
       data-testid={testId}
-      className={`p-1.5 rounded-full ${btnSecondary} transition-colors shrink-0 touch-manipulation`}
+      className={`p-1.5 rounded ${btnSecondary} transition-colors shrink-0 touch-manipulation ${focusRing}`}
     >
       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -343,7 +344,7 @@ function EpisodeDetail() {
     return (
       <div className="text-center py-12">
         <p className="text-destructive">Failed to load episode</p>
-        <Link to={`/feeds/${slug}`} className="text-primary hover:underline mt-2 inline-block">
+        <Link to={`/feeds/${slug}`} className={`text-primary hover:underline mt-2 inline-block ${focusRing}`}>
           Back to Feed
         </Link>
       </div>
@@ -379,7 +380,7 @@ function EpisodeDetail() {
   return (
     <div>
       <div className="flex items-center justify-between gap-3 mb-4">
-        <Link to={`/feeds/${slug}`} className="text-primary hover:underline inline-block">
+        <Link to={`/feeds/${slug}`} className={`text-primary hover:underline inline-block ${focusRing}`}>
           Back to Feed
         </Link>
         {episode.navigation && (
@@ -407,7 +408,7 @@ function EpisodeDetail() {
             type="button"
             onClick={() => setCorrectionError(null)}
             aria-label="Dismiss"
-            className="shrink-0 text-destructive hover:opacity-70"
+            className={`shrink-0 text-destructive hover:opacity-70 ${focusRing}`}
           >
             &times;
           </button>
@@ -436,14 +437,14 @@ function EpisodeDetail() {
                 <span>{formatFileSize(episode.fileSize)}</span>
               )}
               <span
-                className={`px-2 py-0.5 rounded-full text-xs font-medium ${EPISODE_STATUS_COLORS[episode.status]}${failureReason ? ' cursor-help' : ''}`}
+                className={`px-2 py-0.5 rounded text-xs font-medium ${EPISODE_STATUS_COLORS[episode.status]}${failureReason ? ' cursor-help' : ''}`}
                 title={failureReason}
               >
                 {episode.status}
               </span>
               {episode.lowAdYield && (
                 <span
-                  className="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/20 text-warning cursor-help"
+                  className="px-2 py-0.5 rounded text-xs font-medium bg-warning/20 text-warning cursor-help"
                   title={`This run removed ${formatDuration(episode.lowAdYield.removedSeconds)} of ads; this feed's recent episodes average ${formatDuration(episode.lowAdYield.feedAverageSeconds)}. The downloaded copy may have arrived with unfilled ad slots, or ads were missed.`}
                 >
                   Low ad yield
@@ -451,27 +452,27 @@ function EpisodeDetail() {
               )}
               {episode.partialDetection && (
                 <span
-                  className="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/20 text-warning cursor-help"
+                  className="px-2 py-0.5 rounded text-xs font-medium bg-warning/20 text-warning cursor-help"
                   title={episode.partialDetection.reason}
                 >
                   Partial detection
                 </span>
               )}
               {episode.transcriptVttAvailable && (
-                <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-500/20 text-blue-600 dark:text-blue-400">
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-c-blue/20 text-c-blue">
                   VTT
                 </span>
               )}
               {episode.chaptersAvailable && (
-                <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-500/20 text-purple-600 dark:text-purple-400">
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-c-purple/20 text-c-purple">
                   Chapters
                 </span>
               )}
               {episode.daiDifferential && (
                 <span
-                  className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                  className={`px-2 py-0.5 rounded text-xs font-medium ${
                     episode.daiDifferential.status === 'ok'
-                      ? 'bg-rose-500/20 text-rose-600 dark:text-rose-400'
+                      ? 'bg-destructive/20 text-destructive'
                       : 'bg-muted text-muted-foreground'
                   }`}
                   title={
@@ -502,7 +503,7 @@ function EpisodeDetail() {
                 <button
                   onClick={() => setShowReprocessMenu(!showReprocessMenu)}
                   disabled={reprocessMutation.isPending || episode.status === 'processing'}
-                  className={`px-2 py-0.5 text-xs sm:text-sm ${btnPrimary} rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1`}
+                  className={`px-2 py-0.5 text-xs sm:text-sm ${btnPrimary} rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 ${focusRing}`}
                 >
                   {reprocessMutation.isPending ? 'Reprocessing...' : 'Reprocess'}
                   <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -513,7 +514,7 @@ function EpisodeDetail() {
                   <div className="absolute top-full right-0 mt-1 w-52 bg-card border border-border rounded-lg shadow-lg z-10 overflow-hidden">
                     <button
                       onClick={() => reprocessMutation.mutate('reprocess')}
-                      className="w-full px-3 py-2 text-left text-sm hover:bg-accent"
+                      className={`w-full px-3 py-2 text-left text-sm hover:bg-accent ${focusRing}`}
                       title="Use learned patterns + AI analysis"
                     >
                       <div className="font-medium">Reprocess</div>
@@ -521,7 +522,7 @@ function EpisodeDetail() {
                     </button>
                     <button
                       onClick={() => reprocessMutation.mutate('full')}
-                      className="w-full px-3 py-2 text-left text-sm hover:bg-accent border-t border-border"
+                      className={`w-full px-3 py-2 text-left text-sm hover:bg-accent border-t border-border ${focusRing}`}
                       title="Skip pattern DB, AI analyzes everything fresh"
                     >
                       <div className="font-medium">Full Analysis</div>
@@ -530,7 +531,7 @@ function EpisodeDetail() {
                     {episode.hasOriginalAudio && (
                       <button
                         onClick={() => reprocessMutation.mutate('recut')}
-                        className="w-full px-3 py-2 text-left text-sm hover:bg-accent border-t border-border"
+                        className={`w-full px-3 py-2 text-left text-sm hover:bg-accent border-t border-border ${focusRing}`}
                         title="Re-cut the original audio from your current ad edits (no transcription or AI)"
                       >
                         <div className="font-medium">Recut Audio</div>
@@ -541,7 +542,7 @@ function EpisodeDetail() {
                       <button
                         onClick={() => reprocessMutation.mutate('llm')}
                         disabled={REDETECT_DISABLED_MODES.has(feed?.processingMode)}
-                        className="w-full px-3 py-2 text-left text-sm hover:bg-accent border-t border-border disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                        className={`w-full px-3 py-2 text-left text-sm hover:bg-accent border-t border-border disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent ${focusRing}`}
                         title={feed?.processingMode && REDETECT_DISABLED_MODES.has(feed.processingMode)
                           ? `Ad detection is off because this feed runs in ${REDETECT_DISABLED_MODE_LABELS[feed.processingMode]} mode`
                           : 'Re-run ad detection and re-cut using the existing transcript (skips re-transcription)'}
@@ -557,7 +558,7 @@ function EpisodeDetail() {
                           setShowReprocessMenu(false);
                         }}
                         disabled={regenerateChaptersMutation.isPending}
-                        className="w-full px-3 py-2 text-left text-sm hover:bg-accent border-t border-border disabled:opacity-50"
+                        className={`w-full px-3 py-2 text-left text-sm hover:bg-accent border-t border-border disabled:opacity-50 ${focusRing}`}
                         title="Regenerate chapters from existing transcript"
                       >
                         <div className="font-medium">Regenerate Chapters</div>
@@ -604,7 +605,7 @@ function EpisodeDetail() {
 
         {episode.partialDetection && (
           <div className="mt-4 pt-4 border-t border-border">
-            <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+            <div className="flex items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
               <span>
                 The AI detection pass failed during processing. Ads were removed using pattern and cross-fetch evidence only, so some ads may remain.
               </span>
@@ -612,7 +613,7 @@ function EpisodeDetail() {
                 type="button"
                 onClick={() => reprocessMutation.mutate('llm')}
                 disabled={reprocessMutation.isPending || episode.status === 'processing'}
-                className={`shrink-0 px-3 py-1.5 text-xs sm:text-sm rounded ${btnSecondary} disabled:opacity-50 disabled:cursor-not-allowed`}
+                className={`shrink-0 px-3 py-1.5 text-xs sm:text-sm rounded ${btnSecondary} disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`}
               >
                 Re-run detection
               </button>
@@ -633,7 +634,7 @@ function EpisodeDetail() {
                   <a
                     href={episode.transcriptVttUrl}
                     download
-                    className="px-3 py-1 text-sm bg-blue-500/20 text-blue-600 dark:text-blue-400 rounded hover:bg-blue-500/30 transition-colors"
+                    className={`px-3 py-1 text-sm bg-c-blue/20 text-c-blue rounded hover:bg-c-blue/30 transition-colors ${focusRing}`}
                   >
                     Download VTT
                   </a>
@@ -642,7 +643,7 @@ function EpisodeDetail() {
                   <a
                     href={episode.chaptersUrl}
                     download
-                    className="px-3 py-1 text-sm bg-purple-500/20 text-purple-600 dark:text-purple-400 rounded hover:bg-purple-500/30 transition-colors"
+                    className={`px-3 py-1 text-sm bg-c-purple/20 text-c-purple rounded hover:bg-c-purple/30 transition-colors ${focusRing}`}
                   >
                     Download Chapters
                   </a>
@@ -689,7 +690,7 @@ function EpisodeDetail() {
                 onClick={() => openEditorFresh(true)}
                 aria-label="Add new ad"
                 title="Add new ad"
-                className={`shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md ${btnPrimary} transition-colors whitespace-nowrap`}
+                className={`shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md ${btnPrimary} transition-colors whitespace-nowrap ${focusRing}`}
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -715,7 +716,7 @@ function EpisodeDetail() {
                     onClick={() => openEditorFresh(false)}
                     aria-label={showEditor ? 'Hide editor' : 'Edit ads'}
                     title={showEditor ? 'Hide editor' : 'Edit ads'}
-                    className={`inline-flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-xs sm:text-sm ${btnSecondary} rounded-md transition-colors whitespace-nowrap`}
+                    className={`inline-flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-xs sm:text-sm ${btnSecondary} rounded-md transition-colors whitespace-nowrap ${focusRing}`}
                   >
                     <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -727,7 +728,7 @@ function EpisodeDetail() {
                     onClick={() => openEditorFresh(true)}
                     aria-label="Add new ad"
                     title="Add new ad"
-                    className={`inline-flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-xs sm:text-sm ${btnPrimary} rounded-md transition-colors whitespace-nowrap`}
+                    className={`inline-flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-xs sm:text-sm ${btnPrimary} rounded-md transition-colors whitespace-nowrap ${focusRing}`}
                   >
                     <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -820,7 +821,7 @@ function EpisodeDetail() {
                   )}
                   {segment.corroborated_by && CORROBORATION_META[segment.corroborated_by] && (
                     <span
-                      className="px-1.5 py-0.5 text-xs rounded font-medium bg-lime-500/20 text-lime-600 dark:text-lime-400"
+                      className={`px-1.5 py-0.5 text-xs rounded font-medium ${CORROBORATION_CLASS}`}
                       title={CORROBORATION_META[segment.corroborated_by].title}
                     >
                       {CORROBORATION_META[segment.corroborated_by].label}
@@ -828,7 +829,7 @@ function EpisodeDetail() {
                   )}
                   {segment.cue_snap && (
                     <span
-                      className="px-1.5 py-0.5 text-xs rounded font-medium bg-violet-500/20 text-violet-600 dark:text-violet-400"
+                      className="px-1.5 py-0.5 text-xs rounded font-medium bg-c-purple/20 text-c-purple"
                       title={
                         (segment.cue_snap.start as Record<string, unknown> | undefined)?.cue_type === 'content_transition' ||
                         (segment.cue_snap.end as Record<string, unknown> | undefined)?.cue_type === 'content_transition'
@@ -841,7 +842,7 @@ function EpisodeDetail() {
                   )}
                   {segment.silence_snap && (
                     <span
-                      className="px-1.5 py-0.5 text-xs rounded font-medium bg-teal-500/20 text-teal-600 dark:text-teal-400"
+                      className="px-1.5 py-0.5 text-xs rounded font-medium bg-c-teal/20 text-c-teal"
                       title="Ad edge snapped to nearby silence"
                     >
                       Silence snapped
@@ -856,17 +857,17 @@ function EpisodeDetail() {
                     </span>
                   )}
                   {segment.reviewer_verdict === 'confirmed' && (
-                    <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-green-500/20 text-success" title={segment.reviewer_reasoning || 'Confirmed by reviewer'}>
+                    <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-success/20 text-success" title={segment.reviewer_reasoning || 'Confirmed by reviewer'}>
                       Reviewer: confirmed
                     </span>
                   )}
                   {segment.reviewer_verdict === 'adjust' && (
-                    <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-cyan-500/20 text-cyan-600 dark:text-cyan-400" title={segment.reviewer_reasoning || 'Boundaries adjusted by reviewer'}>
+                    <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-c-teal/20 text-c-teal" title={segment.reviewer_reasoning || 'Boundaries adjusted by reviewer'}>
                       Reviewer: adjusted
                     </span>
                   )}
                   {segment.reviewer_verdict === 'resurrect' && (
-                    <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-amber-500/20 text-warning" title={segment.reviewer_reasoning || 'Resurrected by reviewer'}>
+                    <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-warning/20 text-warning" title={segment.reviewer_reasoning || 'Resurrected by reviewer'}>
                       Reviewer: resurrected
                     </span>
                   )}
@@ -878,7 +879,7 @@ function EpisodeDetail() {
                   {episode.transcript && (
                     <button
                       onClick={() => handleJumpToAd(index)}
-                      className="px-3 py-1.5 sm:px-2 sm:py-0.5 text-xs bg-primary/10 text-primary rounded hover:bg-primary/20 active:bg-primary/30 transition-colors touch-manipulation min-h-[36px] sm:min-h-0"
+                      className={`px-3 py-1.5 sm:px-2 sm:py-0.5 text-xs bg-primary/10 text-primary rounded hover:bg-primary/20 active:bg-primary/30 transition-colors touch-manipulation min-h-[36px] sm:min-h-0 ${focusRing}`}
                       title="Jump to this ad in editor"
                     >
                       Jump
@@ -890,10 +891,10 @@ function EpisodeDetail() {
                       return (
                         <span className={`px-1.5 py-0.5 text-xs rounded font-medium ${
                           correction.correction_type === 'confirm'
-                            ? 'bg-green-500/20 text-success'
+                            ? 'bg-success/20 text-success'
                             : correction.correction_type === 'false_positive'
-                            ? 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400'
-                            : 'bg-blue-500/20 text-blue-600 dark:text-blue-400'
+                            ? 'bg-warning/20 text-warning'
+                            : 'bg-c-blue/20 text-c-blue'
                         }`}>
                           {correction.correction_type === 'confirm' ? 'Confirmed'
                            : correction.correction_type === 'false_positive' ? 'Not an ad'
@@ -922,7 +923,7 @@ function EpisodeDetail() {
                   </ExpandableText>
                 )}
                 {segment.reviewer_verdict === 'adjust' && (
-                  <p className="text-sm text-cyan-600 dark:text-cyan-400 mt-1 font-mono">
+                  <p className="text-sm text-c-teal mt-1 font-mono">
                     Reviewer: {formatTimestamp(segment.start)} - {formatTimestamp(segment.end)}
                   </p>
                 )}
@@ -1017,7 +1018,7 @@ function EpisodeDetail() {
       })()}
 
       {heldMarkers.length > 0 && (
-        <div className="bg-card rounded-lg border border-amber-500/30 p-6 mb-6" data-testid="held-for-review-section">
+        <div className="bg-card rounded-lg border border-warning/30 p-6 mb-6" data-testid="held-for-review-section">
           <h2 className="text-xl font-semibold text-foreground mb-4">
             Held for Review ({heldMarkers.length})
           </h2>
@@ -1059,7 +1060,7 @@ function EpisodeDetail() {
               return (
                 <div
                   key={index}
-                  className="p-3 bg-amber-500/10 rounded-lg border border-amber-500/20"
+                  className="p-3 bg-warning/10 rounded-lg border border-warning/20"
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
@@ -1087,14 +1088,14 @@ function EpisodeDetail() {
                       )}
                       {segment.corroborated_by && CORROBORATION_META[segment.corroborated_by] && (
                         <span
-                          className="px-1.5 py-0.5 text-xs rounded font-medium bg-lime-500/20 text-lime-600 dark:text-lime-400"
+                          className={`px-1.5 py-0.5 text-xs rounded font-medium ${CORROBORATION_CLASS}`}
                           title={CORROBORATION_META[segment.corroborated_by].title}
                         >
                           {CORROBORATION_META[segment.corroborated_by].label}
                         </span>
                       )}
                       <span
-                        className="px-1.5 py-0.5 text-xs rounded font-medium bg-amber-500/20 text-warning"
+                        className="px-1.5 py-0.5 text-xs rounded font-medium bg-warning/20 text-warning"
                         title={holdTitle}
                       >
                         {holdLabel}
@@ -1102,8 +1103,8 @@ function EpisodeDetail() {
                       {(correction || segment.approved) && (
                         <span className={`px-1.5 py-0.5 text-xs rounded font-medium ${
                           segment.approved || correction?.correction_type === 'confirm'
-                            ? 'bg-green-500/20 text-success'
-                            : 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400'
+                            ? 'bg-success/20 text-success'
+                            : 'bg-warning/20 text-warning'
                         }`}>
                           {segment.approved || correction?.correction_type === 'confirm' ? 'Confirmed' : 'Not an ad'}
                         </span>
@@ -1114,7 +1115,7 @@ function EpisodeDetail() {
                     </span>
                   </div>
                   {segment.validation?.flags && segment.validation.flags.length > 0 && (
-                    <p className="text-sm text-amber-500 dark:text-amber-400 mt-2">
+                    <p className="text-sm text-warning mt-2">
                       {segment.validation.flags.join(', ')}
                     </p>
                   )}
@@ -1141,7 +1142,7 @@ function EpisodeDetail() {
                         }}
                         disabled={correctionMutation.isPending || reprocessMutation.isPending}
                         data-testid={`approve-recut-${index}`}
-                        className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, 'bg-green-600 hover:bg-green-700 active:bg-green-800 text-white')}`}
+                        className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, btnPrimary)} ${focusRing}`}
                       >
                         {btnLabel(rowStatus, oneTapRecut ? 'Confirm & Recut' : 'Confirm ad')}
                       </button>
@@ -1161,7 +1162,7 @@ function EpisodeDetail() {
                           disabled={correctionMutation.isPending || reprocessMutation.isPending}
                           data-testid={`approve-trimmed-${index}`}
                           title="Approve only the span the reviewer identified as ad content; the rest of this marker stays in the episode"
-                          className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, 'bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white')}`}
+                          className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, btnSecondary)} ${focusRing}`}
                         >
                           {btnLabel(rowStatus,
                             `Confirm trimmed (${formatTimestamp(segment.reviewer_proposed_start)} - ${formatTimestamp(segment.reviewer_proposed_end)})`)}
@@ -1176,7 +1177,7 @@ function EpisodeDetail() {
                         onClick={() => handleCorrection({ type: 'reject', originalAd })}
                         disabled={correctionMutation.isPending || reprocessMutation.isPending}
                         data-testid={`dismiss-${index}`}
-                        className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, `${btnDestructive} active:bg-destructive/80`)}`}
+                        className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, `${btnDestructive} active:bg-destructive/80`)} ${focusRing}`}
                       >
                         {btnLabel(rowStatus, 'Not an ad')}
                       </button>
@@ -1187,13 +1188,13 @@ function EpisodeDetail() {
             })}
           </div>
           {episode.hasOriginalAudio && approvedHeldCount > 0 && (
-            <div className="mt-4 pt-4 border-t border-amber-500/20 flex justify-end">
+            <div className="mt-4 pt-4 border-t border-warning/20 flex justify-end">
               <button
                 onClick={() => reprocessMutation.mutate('recut')}
                 disabled={correctionMutation.isPending || reprocessMutation.isPending
                   || episode.status === 'processing'}
                 data-testid="apply-approved-recut"
-                className="w-full sm:w-auto px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded bg-green-600 hover:bg-green-700 active:bg-green-800 text-white disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0"
+                className={`w-full sm:w-auto px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded ${btnPrimary} disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${focusRing}`}
               >
                 {`Apply ${approvedHeldCount} confirmed & recut`}
               </button>
@@ -1259,7 +1260,7 @@ function EpisodeDetail() {
             {episode.rejectedAdMarkers.map((segment, index) => (
               <div
                 key={index}
-                className="p-3 bg-red-500/10 rounded-lg border border-red-500/20"
+                className="p-3 bg-destructive/10 rounded-lg border border-destructive/20"
               >
                 {(() => {
                   const correction = getAdCorrection(segment.start, segment.end);
@@ -1288,11 +1289,11 @@ function EpisodeDetail() {
                           </span>
                           <SegmentCategoryBadge category={segment.category} />
                           {segment.actionApplied === 'keep' && <KeptBadge />}
-                          <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-red-500/20 text-red-600 dark:text-red-400">
+                          <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-destructive/20 text-destructive">
                             Not cut
                           </span>
                           {segment.reviewer_verdict === 'reject' && (
-                            <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-red-500/20 text-red-700 dark:text-red-300" title={segment.reviewer_reasoning || 'Rejected by reviewer'}>
+                            <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-destructive/20 text-destructive" title={segment.reviewer_reasoning || 'Rejected by reviewer'}>
                               Reviewer: rejected
                             </span>
                           )}
@@ -1304,8 +1305,8 @@ function EpisodeDetail() {
                           {correction && (
                             <span className={`px-1.5 py-0.5 text-xs rounded font-medium ${
                               correction.correction_type === 'confirm'
-                                ? 'bg-green-500/20 text-success'
-                                : 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400'
+                                ? 'bg-success/20 text-success'
+                                : 'bg-warning/20 text-warning'
                             }`}>
                               {correction.correction_type === 'confirm' ? 'Confirmed' : 'Not an ad'}
                             </span>
@@ -1316,7 +1317,7 @@ function EpisodeDetail() {
                         </span>
                       </div>
                       {segment.validation?.flags && segment.validation.flags.length > 0 && (
-                        <p className="text-sm text-red-500 dark:text-red-400 mt-2">
+                        <p className="text-sm text-destructive mt-2">
                           {segment.validation.flags.join(', ')}
                         </p>
                       )}
@@ -1333,14 +1334,14 @@ function EpisodeDetail() {
                           <button
                             onClick={() => handleCorrection({ type: 'confirm', originalAd })}
                             disabled={correctionMutation.isPending}
-                            className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, 'bg-green-600 hover:bg-green-700 active:bg-green-800 text-white')}`}
+                            className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, btnPrimary)} ${focusRing}`}
                           >
                             {btnLabel(rowStatus, 'Confirm ad')}
                           </button>
                           <button
                             onClick={() => handleCorrection({ type: 'reject', originalAd })}
                             disabled={correctionMutation.isPending}
-                            className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, `${btnDestructive} active:bg-destructive/80`)}`}
+                            className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, `${btnDestructive} active:bg-destructive/80`)} ${focusRing}`}
                           >
                             {btnLabel(rowStatus, 'Not an ad')}
                           </button>

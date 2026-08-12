@@ -7,6 +7,8 @@ import { getSettings } from '../api/settings';
 import LoadingSpinner from '../components/LoadingSpinner';
 import TriStateSelect from '../components/TriStateSelect';
 import { btnPrimary, btnSecondary } from '../components/buttonStyles';
+import DraftNumberInput, { DRAFT_NUMBER_INPUT_CLASS, parseOptionalNumber } from '../components/DraftNumberInput';
+import { focusRing } from '../components/fieldStyles';
 
 // URL validation patterns
 const URL_PATTERN = /^https?:\/\/[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+.*$/;
@@ -102,7 +104,7 @@ function SearchResultItem({ result, isSubscribed, isAdding, onAdd }: {
               href={`https://podcastindex.org/podcast/${result.id}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-sm font-semibold text-foreground hover:text-primary truncate block"
+              className={`text-sm font-semibold text-foreground hover:text-primary truncate block ${focusRing}`}
               title={result.title}
             >
               {result.title}
@@ -121,7 +123,7 @@ function SearchResultItem({ result, isSubscribed, isAdding, onAdd }: {
             <button
               onClick={handleAdd}
               disabled={isAdding}
-              className="shrink-0 p-1.5 rounded-md text-primary hover:bg-primary/10 disabled:opacity-50 transition-colors"
+              className={`shrink-0 p-1.5 rounded-md text-primary hover:bg-primary/10 disabled:opacity-50 transition-colors ${focusRing}`}
               title="Add this podcast"
             >
               {isAdding ? (
@@ -297,7 +299,7 @@ function AddFeed() {
       {!podcastIndexConfigured && (
         <div className="mb-6 p-4 rounded-lg bg-accent/50 border border-border">
           <p className="text-sm text-muted-foreground">
-            <Link to="/settings#podcast-index" className="text-primary hover:underline font-medium">
+            <Link to="/settings#podcast-index" className={`text-primary hover:underline font-medium ${focusRing}`}>
               Configure PodcastIndex API credentials
             </Link>
             {' '}to search for podcasts by name. You can still add feeds by URL below.
@@ -322,7 +324,7 @@ function AddFeed() {
               isUrl && touched && urlValidation.error
                 ? 'border-destructive focus:ring-destructive'
                 : isUrl && touched && urlValidation.warning
-                  ? 'border-yellow-500 focus:ring-yellow-500'
+                  ? 'border-warning focus:ring-warning'
                   : 'border-input'
             }`}
           />
@@ -330,7 +332,7 @@ function AddFeed() {
             <p className="mt-1 text-sm text-destructive">{urlValidation.error}</p>
           )}
           {isUrl && touched && !urlValidation.error && urlValidation.warning && (
-            <p className="mt-1 text-sm text-yellow-600 dark:text-yellow-500">{urlValidation.warning}</p>
+            <p className="mt-1 text-sm text-warning">{urlValidation.warning}</p>
           )}
         </div>
 
@@ -376,15 +378,17 @@ function AddFeed() {
               <label htmlFor="maxEpisodes" className="block text-sm font-medium text-foreground mb-2">
                 Max Episodes in Feed
               </label>
-              <input
-                type="number"
+              <DraftNumberInput
                 id="maxEpisodes"
-                value={maxEpisodes}
-                onChange={(e) => setMaxEpisodes(e.target.value)}
+                value={parseOptionalNumber(maxEpisodes)}
+                fallback={null}
+                parse={parseOptionalNumber}
+                onChange={(v) => setMaxEpisodes(v === null ? '' : String(v))}
                 placeholder="300 (default)"
                 min={10}
                 max={500}
-                className="w-full px-4 py-2 rounded-lg border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                step={1}
+                className={`w-full px-4 py-2 ${DRAFT_NUMBER_INPUT_CLASS}`}
               />
               <p className="mt-1 text-sm text-muted-foreground">
                 Limits how many episodes are served to podcast clients. Max: 500.
@@ -419,14 +423,14 @@ function AddFeed() {
               <button
                 type="submit"
                 disabled={mutation.isPending || !inputValue.trim() || (touched && !urlValidation.isValid)}
-                className={`flex-1 px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors`}
+                className={`flex-1 px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors ${focusRing}`}
               >
                 {mutation.isPending ? 'Adding Feed...' : 'Add Feed'}
               </button>
               <button
                 type="button"
                 onClick={() => navigate('/')}
-                className={`px-4 py-2 rounded-lg ${btnSecondary} transition-colors`}
+                className={`px-4 py-2 rounded-lg ${btnSecondary} transition-colors ${focusRing}`}
               >
                 Cancel
               </button>
@@ -543,7 +547,7 @@ function AddFeed() {
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="text-primary hover:underline font-medium"
+                  className={`text-primary hover:underline font-medium ${focusRing}`}
                 >
                   browse to select
                 </button>
@@ -587,7 +591,7 @@ function AddFeed() {
             )}
             <button
               onClick={() => setOpmlResult(null)}
-              className="mt-3 text-sm text-muted-foreground hover:text-foreground"
+              className={`mt-3 text-sm text-muted-foreground hover:text-foreground ${focusRing}`}
             >
               Dismiss
             </button>

@@ -11,6 +11,8 @@ import {
 import { formatStorage } from './settingsUtils';
 import { btnPrimary, btnSecondary } from '../../components/buttonStyles';
 import SavedBadge from './SavedBadge';
+import NumberInput from '../../components/NumberInput';
+import { focusRing } from '../../components/fieldStyles';
 
 interface Draft {
   enabled?: boolean;
@@ -77,13 +79,13 @@ function DatabaseBackupSection() {
         // A failed GET must not render the editable form from fallback defaults;
         // one Save click would overwrite the real stored settings.
         <div className="space-y-2">
-          <p className="text-sm text-red-600 dark:text-red-400">
+          <p className="text-sm text-destructive">
             Could not load backup settings.
           </p>
           <button
             type="button"
             onClick={() => refetch()}
-            className={`px-4 py-2 rounded-lg ${btnSecondary} text-sm`}
+            className={`px-4 py-2 rounded-lg ${btnSecondary} text-sm ${focusRing}`}
           >
             Retry
           </button>
@@ -166,18 +168,17 @@ function DatabaseBackupSection() {
               >
                 Copies to keep:
               </label>
-              <input
+              <NumberInput
                 id="db-backup-keep"
-                type="number"
                 min={1}
                 max={365}
                 step={1}
+                fallback={1}
                 value={keepCount}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
+                onCommit={(n) => {
                   setDraft((d) => ({
                     ...d,
-                    keepCount: Number.isNaN(n) ? 1 : Math.min(365, Math.max(1, n)),
+                    keepCount: n,
                   }));
                 }}
                 className="w-20 px-3 py-1.5 rounded-lg border border-input bg-background text-foreground text-sm"
@@ -190,7 +191,7 @@ function DatabaseBackupSection() {
           </div>
 
           {saveError && (
-            <p className="text-sm text-red-600 dark:text-red-400">{saveError}</p>
+            <p className="text-sm text-destructive">{saveError}</p>
           )}
 
           <div className="flex items-center gap-2">
@@ -198,7 +199,7 @@ function DatabaseBackupSection() {
               type="button"
               onClick={() => save.mutate()}
               disabled={save.isPending}
-              className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 text-sm`}
+              className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 text-sm ${focusRing}`}
             >
               {save.isPending ? 'Saving...' : 'Save'}
             </button>
@@ -206,7 +207,7 @@ function DatabaseBackupSection() {
               type="button"
               onClick={() => runNow.mutate()}
               disabled={runNow.isPending}
-              className={`px-4 py-2 rounded-lg ${btnSecondary} disabled:opacity-50 text-sm`}
+              className={`px-4 py-2 rounded-lg ${btnSecondary} disabled:opacity-50 text-sm ${focusRing}`}
             >
               {runNow.isPending ? 'Backing up...' : 'Back up now'}
             </button>
@@ -217,7 +218,7 @@ function DatabaseBackupSection() {
               </span>
             )}
             {runNow.isError && (
-              <span className="ml-1 text-sm text-red-600 dark:text-red-400">
+              <span className="ml-1 text-sm text-destructive">
                 {(runNow.error as Error)?.message || 'Backup failed'}
               </span>
             )}
@@ -236,7 +237,7 @@ function DatabaseBackupSection() {
               </div>
             )}
             {data?.lastError && (
-              <div className="text-red-600 dark:text-red-400">
+              <div className="text-destructive">
                 <span className="font-medium">Last error:</span> {data.lastError}
               </div>
             )}

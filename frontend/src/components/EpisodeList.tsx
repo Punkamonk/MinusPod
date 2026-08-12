@@ -6,6 +6,7 @@ import { formatDate } from '../utils/format';
 import Artwork from './Artwork';
 import { episodeArtworkSrc } from '../utils/artworkUrl';
 import Checkbox from './Checkbox';
+import { focusRing } from './fieldStyles';
 
 interface EpisodeListProps {
   episodes: Episode[];
@@ -92,14 +93,14 @@ function EpisodeRow({
           aria-label={selected ? 'Deselect episode' : 'Select episode'}
           onClick={(e) => { e.stopPropagation(); e.preventDefault(); onToggle(episode.id); }}
           onTouchEnd={(e) => { e.stopPropagation(); }}
-          className="absolute top-0 left-0 z-10 h-11 w-11 flex items-center justify-center"
+          className={`absolute top-0 left-0 z-10 h-11 w-11 flex items-center justify-center ${focusRing}`}
         >
-          <Checkbox checked={selected} onChange={() => {}} />
+          <Checkbox id={`select-${episode.id}`} checked={selected} onChange={() => {}} />
         </button>
       )}
       <Link
         to={`/feeds/${feedSlug}/episodes/${episode.id}`}
-        className={`flex gap-3 p-4 ${onToggle ? 'pl-12' : ''}`}
+        className={`flex gap-3 p-4 ${onToggle ? 'pl-12' : ''} ${focusRing}`}
       >
         <Artwork
           src={episodeArtworkSrc(feedSlug, episode.id, episode.artworkUrl, feedArtworkUrl)}
@@ -121,12 +122,12 @@ function EpisodeRow({
               <span className="whitespace-nowrap">{episode.ad_count} ads detected</span>
             )}
             {episode.pendingReviewCount !== undefined && episode.pendingReviewCount > 0 && (
-              <span className="px-2 py-0.5 text-xs rounded-full whitespace-nowrap bg-amber-500/20 text-warning">
+              <span className="px-2 py-0.5 text-xs rounded whitespace-nowrap bg-warning/20 text-warning">
                 {episode.pendingReviewCount} held
               </span>
             )}
             <span
-              className={`px-2 py-0.5 text-xs rounded-full whitespace-nowrap ${EPISODE_STATUS_COLORS[episode.status] || 'bg-muted text-muted-foreground'}${failureReason ? ' cursor-help' : ''}`}
+              className={`px-2 py-0.5 text-xs rounded whitespace-nowrap ${EPISODE_STATUS_COLORS[episode.status] || 'bg-muted text-muted-foreground'}${failureReason ? ' cursor-help' : ''}`}
               title={failureReason}
             >
               {EPISODE_STATUS_LABELS[episode.status] || episode.status}

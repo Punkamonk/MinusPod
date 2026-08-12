@@ -1,6 +1,7 @@
 import { copyText } from '../utils/clipboard';
 import { useTransientState } from '../hooks/useTransientState';
 import { btnGhost } from './buttonStyles';
+import { focusRing } from './fieldStyles';
 
 interface CopyButtonProps {
   text: string;
@@ -17,7 +18,7 @@ function CopyButton({
   label = 'Copy URL',
   copiedLabel = 'Copied',
   className = '',
-  copiedClassName = 'text-green-500',
+  copiedClassName = 'text-success',
   labelClassName = 'text-xs',
   hideLabelOnMobile = false,
 }: CopyButtonProps) {
@@ -42,7 +43,7 @@ function CopyButton({
         copied
           ? copiedClassName
           : btnGhost
-      } ${className}`}
+      } ${className} ${focusRing}`}
       title={copied ? copiedLabel : label}
       aria-label={copied ? copiedLabel : label}
     >

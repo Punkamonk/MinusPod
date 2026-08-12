@@ -4,6 +4,8 @@ import CollapsibleSection from '../../components/CollapsibleSection';
 import { setPassword, removePassword, AuthStatus } from '../../api/auth';
 import { getErrorMessage } from '../../api/client';
 import { btnPrimary, btnSecondary } from '../../components/buttonStyles';
+import { ConfirmModal } from '../../components/Modal';
+import { focusRing } from '../../components/fieldStyles';
 
 const MIN_PASSWORD_LENGTH = 12;
 
@@ -28,6 +30,7 @@ function SecuritySection({
   const [rotateError, setRotateError] = useState<string | null>(null);
   const [rotateSuccess, setRotateSuccess] = useState<string | null>(null);
   const [isRotating, setIsRotating] = useState(false);
+  const [confirmRotate, setConfirmRotate] = useState(false);
 
   async function handleRotatePassphrase(e: FormEvent) {
     e.preventDefault();
@@ -44,11 +47,11 @@ function SecuritySection({
       setRotateError('New passphrase confirmation does not match.');
       return;
     }
-    if (!window.confirm(
-      'After rotation you MUST update MINUSPOD_MASTER_PASSPHRASE in the container environment and restart the container. ' +
-      'If you forget, stored keys will be unreadable on next restart. ' +
-      'If you lose the new passphrase, the stored keys are unrecoverable. Continue?',
-    )) return;
+    setConfirmRotate(true);
+  }
+
+  async function doRotate() {
+    setConfirmRotate(false);
     setIsRotating(true);
     try {
       const r = await rotateMasterPassphrase(oldPassphrase, newPassphrase);
@@ -117,7 +120,7 @@ function SecuritySection({
         {isPasswordSet && (
           <button
             onClick={handleLogout}
-            className={`px-3 py-1.5 text-sm rounded ${btnSecondary} transition-colors`}
+            className={`px-3 py-1.5 text-sm rounded ${btnSecondary} transition-colors ${focusRing}`}
           >
             Logout
           </button>
@@ -125,8 +128,8 @@ function SecuritySection({
       </div>
 
       {!isPasswordSet && (
-        <div className="mb-4 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
-          <p className="text-sm text-yellow-600 dark:text-yellow-400">
+        <div className="mb-4 p-3 rounded-lg bg-warning/10 border border-warning/20">
+          <p className="text-sm text-warning">
             {cryptoReady
               ? 'The master passphrase encrypts stored API keys but does not restrict access to this app; anyone with network access still has full control. Set a password below to protect it.'
               : 'This instance has no password, so anyone with network access has full control: they can read everything, change settings, delete feeds, and download a complete database backup. Set a password below to protect it.'}
@@ -188,7 +191,7 @@ function SecuritySection({
         )}
 
         {passwordSuccess && (
-          <div className="p-3 rounded-lg bg-green-500/10 text-success text-sm">
+          <div className="p-3 rounded-lg bg-success/10 text-success text-sm">
             {passwordSuccess}
           </div>
         )}
@@ -196,7 +199,7 @@ function SecuritySection({
         <button
           type="submit"
           disabled={isChangingPassword || (!isPasswordSet && !newPassword)}
-          className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors`}
+          className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors ${focusRing}`}
         >
           {isChangingPassword
             ? 'Saving...'
@@ -216,7 +219,7 @@ function SecuritySection({
         </p>
 
         {plaintextSecretsCount > 0 && (
-          <div className="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+          <div className="mb-4 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
             {plaintextSecretsCount} provider key
             {plaintextSecretsCount === 1 ? '' : 's'} still stored as plaintext.
             {cryptoReady
@@ -232,7 +235,7 @@ function SecuritySection({
           </p>
         ) : (
           <form onSubmit={handleRotatePassphrase} className="space-y-3">
-            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300 space-y-1">
+            <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning space-y-1">
               <p>After clicking Rotate, update <code className="font-mono">MINUSPOD_MASTER_PASSPHRASE</code> in your container environment to the new value and restart the container.</p>
               <p>Other Gunicorn workers keep the old key cached until restart, so stored keys may fail to decrypt in the meantime.</p>
               <p>Lose the new passphrase and the stored keys are unrecoverable. Back it up first.</p>
@@ -286,13 +289,26 @@ function SecuritySection({
             <button
               type="submit"
               disabled={isRotating}
-              className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+              className={`px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50 ${focusRing}`}
             >
               {isRotating ? 'Rotating...' : 'Rotate Master Passphrase'}
             </button>
           </form>
         )}
       </div>
+      {confirmRotate && (
+        <ConfirmModal
+          title="Rotate the master passphrase?"
+          confirmLabel="Rotate passphrase"
+          busyLabel="Rotating..."
+          pending={isRotating}
+          onCancel={() => setConfirmRotate(false)}
+          onConfirm={doRotate}
+        >
+          <p>After rotating you must update MINUSPOD_MASTER_PASSPHRASE in the container environment and restart the container.</p>
+          <p>If you skip that step, stored keys are unreadable on the next restart. If you lose the new passphrase, the stored keys cannot be recovered.</p>
+        </ConfirmModal>
+      )}
     </CollapsibleSection>
   );
 }

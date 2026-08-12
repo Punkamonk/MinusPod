@@ -10,6 +10,7 @@ import {
 } from '../../api/settings';
 import { btnPrimary, btnSecondary } from '../../components/buttonStyles';
 import SavedBadge from './SavedBadge';
+import { focusRing } from '../../components/fieldStyles';
 
 interface Draft {
   enabled?: boolean;
@@ -49,13 +50,13 @@ function OfflineQueueSection() {
         // A failed GET must not render the editable form from fallback
         // defaults; one Save click would overwrite the real stored settings.
         <div className="space-y-2">
-          <p className="text-sm text-red-600 dark:text-red-400">
+          <p className="text-sm text-destructive">
             Could not load offline queue settings.
           </p>
           <button
             type="button"
             onClick={() => refetch()}
-            className={`px-4 py-2 rounded-lg ${btnSecondary} text-sm`}
+            className={`px-4 py-2 rounded-lg ${btnSecondary} text-sm ${focusRing}`}
           >
             Retry
           </button>
@@ -108,14 +109,14 @@ function OfflineQueueSection() {
           </div>
 
           {data.deferredCount > 0 && (
-            <p className="text-sm text-purple-600 dark:text-purple-400">
+            <p className="text-sm text-c-purple">
               {data.deferredCount} episode{data.deferredCount === 1 ? '' : 's'} currently
               waiting for an endpoint to come back.
             </p>
           )}
 
           {saveError && (
-            <p className="text-sm text-red-600 dark:text-red-400">{saveError}</p>
+            <p className="text-sm text-destructive">{saveError}</p>
           )}
 
           <div className="flex items-center gap-2">
@@ -123,7 +124,7 @@ function OfflineQueueSection() {
               type="button"
               onClick={() => save.mutate()}
               disabled={save.isPending}
-              className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 text-sm`}
+              className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 text-sm ${focusRing}`}
             >
               {save.isPending ? 'Saving...' : 'Save'}
             </button>

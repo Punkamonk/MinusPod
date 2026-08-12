@@ -7,6 +7,7 @@ import {
   uploadReplacementAudio,
 } from '../../api/settings';
 import { btnSecondary } from '../../components/buttonStyles';
+import { focusRing } from '../../components/fieldStyles';
 
 // The splice bar reads as a beep sitting inside content, so its width has to
 // mean something. Scale duration against this, since typical markers are 1-3s.
@@ -100,7 +101,7 @@ function ReplacementAudioField() {
     <div className="pt-4 border-t border-border">
       <div className="flex items-center justify-between gap-3 mb-2">
         <span className="block text-sm font-medium text-foreground">Replacement audio</span>
-        <span className="text-xs px-2 py-0.5 rounded-full border border-border text-muted-foreground shrink-0">
+        <span className="text-xs px-2 py-0.5 rounded border border-border text-muted-foreground shrink-0">
           {isCustom ? 'Your file' : 'Default'}
         </span>
       </div>
@@ -132,7 +133,7 @@ function ReplacementAudioField() {
           onClick={togglePlay}
           disabled={!data?.exists || busy}
           aria-label={playing ? 'Stop the replacement audio' : 'Play the replacement audio'}
-          className="shrink-0 w-9 h-9 rounded-full border border-border bg-background text-foreground flex items-center justify-center hover:bg-accent focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-50"
+          className="shrink-0 w-9 h-9 rounded border border-border bg-background text-foreground flex items-center justify-center hover:bg-accent focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-50"
         >
           {playing ? (
             <svg viewBox="0 0 12 12" className="w-3 h-3" fill="currentColor" aria-hidden="true">
@@ -195,7 +196,7 @@ function ReplacementAudioField() {
           type="button"
           onClick={() => fileInputRef.current?.click()}
           disabled={busy}
-          className={`px-3 py-1.5 rounded text-sm ${btnSecondary} disabled:opacity-50`}
+          className={`px-3 py-1.5 rounded text-sm ${btnSecondary} disabled:opacity-50 ${focusRing}`}
         >
           {upload.isPending ? 'Uploading...' : 'Upload a file'}
         </button>
@@ -204,7 +205,7 @@ function ReplacementAudioField() {
             type="button"
             onClick={() => revert.mutate()}
             disabled={busy}
-            className={`px-3 py-1.5 rounded text-sm ${btnSecondary} disabled:opacity-50`}
+            className={`px-3 py-1.5 rounded text-sm ${btnSecondary} disabled:opacity-50 ${focusRing}`}
           >
             {revert.isPending ? 'Restoring...' : 'Use the default'}
           </button>

@@ -10,6 +10,7 @@ import { useTransientState } from '../../hooks/useTransientState';
 import { copyText } from '../../utils/clipboard';
 import { BYTES_PER_MB, formatStorage } from './settingsUtils';
 import { btnSecondary } from '../../components/buttonStyles';
+import { focusRing } from '../../components/fieldStyles';
 
 
 type ActionStatus = 'idle' | 'loading' | 'success' | 'error';
@@ -84,10 +85,10 @@ function DataManagementSection({
     if (status === 'success') {
       return (
         <div className="flex items-center gap-2 mt-3">
-          <svg className="h-4 w-4 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className="h-4 w-4 text-success" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
           </svg>
-          <span className="text-xs text-green-500">Downloaded successfully</span>
+          <span className="text-xs text-success">Downloaded successfully</span>
         </div>
       );
     }
@@ -177,7 +178,7 @@ function DataManagementSection({
           <button
             onClick={handleDownloadBackup}
             disabled={backupStatus === 'loading'}
-            className={`mt-auto w-full px-4 py-2 rounded-lg ${btnSecondary} disabled:opacity-50 transition-colors text-sm font-medium`}
+            className={`mt-auto w-full px-4 py-2 rounded-lg ${btnSecondary} disabled:opacity-50 transition-colors text-sm font-medium ${focusRing}`}
           >
             {backupStatus === 'loading' ? 'Preparing...' : 'Download Backup'}
           </button>

@@ -1,6 +1,8 @@
 import CollapsibleSection from '../../components/CollapsibleSection';
 import ConnectionTestButton from './ConnectionTestButton';
 import type { ConnectionTestResult } from '../../api/providers';
+import { selectBase } from '../../components/fieldStyles';
+import { focusRing } from '../../components/fieldStyles';
 
 interface PodcastIndexSectionProps {
   searchProvider: string;
@@ -14,14 +16,14 @@ interface PodcastIndexSectionProps {
 }
 
 const STATUS_BADGE_STYLES = {
-  green: { bg: 'bg-green-500/10 text-success', dot: 'bg-green-500' },
+  green: { bg: 'bg-success/10 text-success', dot: 'bg-success' },
   muted: { bg: 'bg-muted text-muted-foreground', dot: 'bg-muted-foreground/50' },
 } as const;
 
 function StatusBadge({ variant, label }: { variant: 'green' | 'muted'; label: string }) {
   const s = STATUS_BADGE_STYLES[variant];
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${s.bg}`}>
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium ${s.bg}`}>
       <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
       {label}
     </span>
@@ -57,7 +59,7 @@ function PodcastIndexSection({
             id="podcastSearchProvider"
             value={searchProvider}
             onChange={(e) => onSearchProviderChange(e.target.value)}
-            className="w-full px-4 py-2 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+            className={`w-full ${selectBase}`}
           >
             <option value="itunes">iTunes (no setup needed)</option>
             <option value="podcastindex">PodcastIndex.org (API key required)</option>
@@ -73,7 +75,7 @@ function PodcastIndexSection({
           <>
             <p className="text-sm text-muted-foreground">
               Get free API credentials at{' '}
-              <a href="https://api.podcastindex.org" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+              <a href="https://api.podcastindex.org" target="_blank" rel="noopener noreferrer" className={`text-primary hover:underline ${focusRing}`}>
                 api.podcastindex.org
               </a>
             </p>

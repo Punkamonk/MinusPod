@@ -10,6 +10,8 @@ import { useTransientState } from '../../hooks/useTransientState';
 import EmailSettingsForm from './EmailSettingsForm';
 import { EVENT_OPTIONS } from './notificationEvents';
 import { btnPrimary, btnSecondary } from '../../components/buttonStyles';
+import Checkbox from '../../components/Checkbox';
+import { focusRing } from '../../components/fieldStyles';
 
 const DEFAULT_TEMPLATE_PLACEHOLDER = [
   'Leave blank to use default payload. Example custom template:',
@@ -187,14 +189,14 @@ function WebhooksBlock() {
                     {wh.url.length > 50 ? wh.url.slice(0, 50) + '...' : wh.url}
                   </span>
                   {wh.payloadTemplate && (
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-c-blue/10 text-c-blue">
                       custom template
                     </span>
                   )}
                   <span
                     className={`text-xs px-1.5 py-0.5 rounded ${
                       wh.enabled
-                        ? 'bg-green-500/10 text-success'
+                        ? 'bg-success/10 text-success'
                         : 'bg-muted text-muted-foreground'
                     }`}
                   >
@@ -217,7 +219,7 @@ function WebhooksBlock() {
                 {testResult?.id === wh.id && (
                   <p
                     className={`text-xs mt-1 ${
-                      testResult.success ? 'text-green-500' : 'text-destructive'
+                      testResult.success ? 'text-success' : 'text-destructive'
                     }`}
                   >
                     {testResult.message}
@@ -229,20 +231,20 @@ function WebhooksBlock() {
                 <button
                   onClick={() => testMutation.mutate(wh.id)}
                   disabled={testMutation.isPending}
-                  className={`px-2.5 py-1 text-xs rounded ${btnSecondary} disabled:opacity-50 transition-colors`}
+                  className={`px-2.5 py-1 text-xs rounded ${btnSecondary} disabled:opacity-50 transition-colors ${focusRing}`}
                 >
                   Test
                 </button>
                 <button
                   onClick={() => startEdit(wh)}
-                  className={`px-2.5 py-1 text-xs rounded ${btnSecondary} transition-colors`}
+                  className={`px-2.5 py-1 text-xs rounded ${btnSecondary} transition-colors ${focusRing}`}
                 >
                   Edit
                 </button>
                 <button
                   onClick={() => handleDeleteClick(wh.id)}
                   disabled={deleteMutation.isPending}
-                  className="px-2.5 py-1 text-xs rounded bg-destructive/10 text-destructive hover:bg-destructive/20 disabled:opacity-50 transition-colors"
+                  className={`px-2.5 py-1 text-xs rounded bg-destructive/10 text-destructive hover:bg-destructive/20 disabled:opacity-50 transition-colors ${focusRing}`}
                 >
                   {deleteConfirmId === wh.id ? 'Confirm?' : 'Delete'}
                 </button>
@@ -261,7 +263,7 @@ function WebhooksBlock() {
             setShowForm(true);
             setTemplatePreview(null);
           }}
-          className={`px-4 py-2 rounded ${btnPrimary} transition-colors text-sm`}
+          className={`px-4 py-2 rounded ${btnPrimary} transition-colors text-sm ${focusRing}`}
         >
           Add Webhook
         </button>
@@ -295,15 +297,13 @@ function WebhooksBlock() {
             <span className="block text-sm font-medium text-foreground mb-1">Events</span>
             <div className="space-y-1.5">
               {EVENT_OPTIONS.map((opt) => (
-                <label key={opt.value} className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={form.events.includes(opt.value)}
-                    onChange={() => handleEventToggle(opt.value)}
-                    className="rounded border-input"
-                  />
-                  <span className="text-sm text-foreground">{opt.label}</span>
-                </label>
+                <Checkbox
+                  key={opt.value}
+                  checked={form.events.includes(opt.value)}
+                  onChange={() => handleEventToggle(opt.value)}
+                  label={opt.label}
+                  className="flex"
+                />
               ))}
             </div>
           </div>
@@ -332,7 +332,7 @@ function WebhooksBlock() {
                 type="button"
                 onClick={handleValidateTemplate}
                 disabled={validating || !form.payloadTemplate.trim()}
-                className={`px-3 py-1 text-xs rounded ${btnSecondary} disabled:opacity-50 transition-colors`}
+                className={`px-3 py-1 text-xs rounded ${btnSecondary} disabled:opacity-50 transition-colors ${focusRing}`}
               >
                 {validating ? 'Validating...' : 'Validate & Preview'}
               </button>
@@ -341,7 +341,7 @@ function WebhooksBlock() {
               <div
                 className={`mt-2 p-3 rounded-lg text-xs font-mono whitespace-pre-wrap ${
                   templatePreview.valid
-                    ? 'bg-green-500/10 text-success'
+                    ? 'bg-success/10 text-success'
                     : 'bg-destructive/10 text-destructive'
                 }`}
               >
@@ -382,7 +382,7 @@ function WebhooksBlock() {
               <button
                 type="button"
                 onClick={() => setShowSecret((prev) => !prev)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                className={`absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors ${focusRing}`}
               >
                 {showSecret ? 'Hide' : 'Show'}
               </button>
@@ -390,15 +390,12 @@ function WebhooksBlock() {
           </div>
 
           {/* Enabled */}
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(e) => setForm((prev) => ({ ...prev, enabled: e.target.checked }))}
-              className="rounded border-input"
-            />
-            <span className="text-sm text-foreground">Enabled</span>
-          </label>
+          <Checkbox
+            checked={form.enabled}
+            onChange={(v) => setForm((prev) => ({ ...prev, enabled: v }))}
+            label="Enabled"
+            className="flex"
+          />
 
           {/* Error messages */}
           {(createMutation.isError || updateMutation.isError) && (
@@ -412,14 +409,14 @@ function WebhooksBlock() {
             <button
               type="submit"
               disabled={isSaving || form.events.length === 0}
-              className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors text-sm`}
+              className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors text-sm ${focusRing}`}
             >
               {isSaving ? 'Saving...' : editingId ? 'Update Webhook' : 'Create Webhook'}
             </button>
             <button
               type="button"
               onClick={resetForm}
-              className={`px-4 py-2 rounded-lg ${btnSecondary} transition-colors text-sm`}
+              className={`px-4 py-2 rounded-lg ${btnSecondary} transition-colors text-sm ${focusRing}`}
             >
               Cancel
             </button>

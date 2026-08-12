@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type {
   LlmProvider,
   ReasoningLevel,
@@ -10,6 +10,9 @@ import CollapsibleSection from '../../components/CollapsibleSection';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import { btnPrimary } from '../../components/buttonStyles';
 import SavedBadge from './SavedBadge';
+import DraftNumberInput, { DRAFT_NUMBER_INPUT_CLASS } from '../../components/DraftNumberInput';
+import { selectBase } from '../../components/fieldStyles';
+import { focusRing } from '../../components/fieldStyles';
 
 interface StageTunablesSectionProps {
   tunables: StageTunables;
@@ -177,73 +180,6 @@ export function readEnvOverride(entry: StageTunables[keyof StageTunables]): stri
   return entry?.envOverride ?? null;
 }
 
-export const TUNABLE_INPUT_CLASS =
-  'w-full px-2 py-1 rounded border border-input bg-background text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-60';
-
-// Controlled number input backed by section draft state. Reports every change up
-// immediately (no commit-on-blur), so a typed value is captured even if the user
-// never blurs, which matters on mobile. Keeps a local text string for typing
-// fluidity and re-syncs from the draft when not focused.
-export function DraftNumberInput({
-  value,
-  fallback,
-  min,
-  max,
-  step,
-  placeholder,
-  parse,
-  onChange,
-  className,
-  disabled,
-}: {
-  value: number | null;
-  fallback: number | null;
-  min: number;
-  max: number;
-  step: number;
-  placeholder?: string;
-  parse: (raw: string) => number | null;
-  onChange: (parsed: number | null) => void;
-  className: string;
-  disabled?: boolean;
-}) {
-  const display = (v: number | null) => {
-    if (v !== null && v !== undefined) return String(v);
-    if (fallback !== null && fallback !== undefined) return String(fallback);
-    return '';
-  };
-  const [text, setText] = useState(() => display(value));
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  // Re-sync from the draft (other tab, save refetch, reset) only when not
-  // actively editing, so a background update never clobbers in-progress text.
-  useEffect(() => {
-    if (inputRef.current && document.activeElement === inputRef.current) {
-      return;
-    }
-    setText(display(value));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, fallback]);
-
-  return (
-    <input
-      ref={inputRef}
-      type="number"
-      min={min}
-      max={max}
-      step={step}
-      placeholder={placeholder}
-      value={text}
-      onChange={(e) => {
-        setText(e.target.value);
-        onChange(parse(e.target.value));
-      }}
-      className={className}
-      disabled={disabled}
-    />
-  );
-}
-
 export function ResetButton({
   disabled,
   onClick,
@@ -257,7 +193,7 @@ export function ResetButton({
       onClick={onClick}
       disabled={disabled}
       title="Reset to default"
-      className="ml-2 text-xs text-muted-foreground hover:text-foreground underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+      className={`ml-2 text-xs text-muted-foreground hover:text-foreground underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed ${focusRing}`}
     >
       Reset
     </button>
@@ -313,7 +249,7 @@ export function NumberFieldRow({
         placeholder={placeholder}
         parse={parse}
         onChange={onChange}
-        className={TUNABLE_INPUT_CLASS}
+        className={DRAFT_NUMBER_INPUT_CLASS}
         disabled={disabled}
       />
       <p className="mt-1 text-xs text-muted-foreground">{help}</p>
@@ -435,7 +371,7 @@ function StageBlockEditor({
               const v = e.target.value;
               setField(block.levelKey, v === '' ? null : (v as ReasoningLevel));
             }}
-            className={TUNABLE_INPUT_CLASS}
+            className={`w-full ${selectBase}`}
           >
             <option value="">Default (provider decides)</option>
             {REASONING_LEVEL_OPTIONS.map((opt) => (
@@ -662,7 +598,7 @@ function StageTunablesSection({
             type="button"
             onClick={() => onSave(buildPayload())}
             disabled={!dirty || saveIsPending || !!crossFieldError}
-            className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors text-sm`}
+            className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors text-sm ${focusRing}`}
           >
             {saveIsPending ? 'Saving...' : 'Save LLM Tunables'}
           </button>

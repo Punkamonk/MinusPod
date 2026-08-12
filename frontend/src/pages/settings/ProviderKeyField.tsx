@@ -1,7 +1,10 @@
 import { useState } from 'react';
 import type { ProviderName, ProviderStatus } from '../../api/providers';
 import { getErrorMessage } from '../../api/client';
+import { ConfirmModal } from '../../components/Modal';
 import { useTransientState } from '../../hooks/useTransientState';
+import { focusRing } from '../../components/fieldStyles';
+import { btnOutline, btnPrimary } from '../../components/buttonStyles';
 
 interface ProviderKeyFieldProps {
   provider: ProviderName;
@@ -16,15 +19,15 @@ interface ProviderKeyFieldProps {
 }
 
 const CHIP = {
-  db:   { bg: 'bg-green-500/10 text-success', dot: 'bg-green-500', text: 'Stored encrypted' },
-  env:  { bg: 'bg-amber-500/10 text-warning', dot: 'bg-amber-500', text: 'Using env fallback' },
+  db:   { bg: 'bg-success/10 text-success', dot: 'bg-success', text: 'Stored encrypted' },
+  env:  { bg: 'bg-warning/10 text-warning', dot: 'bg-warning', text: 'Using env fallback' },
   none: { bg: 'bg-muted text-muted-foreground', dot: 'bg-muted-foreground/60', text: 'Not set' },
 } as const;
 
 function StatusChip({ source }: { source: ProviderStatus['source'] }) {
   const c = CHIP[source];
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${c.bg}`}>
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium ${c.bg}`}>
       <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
       {c.text}
     </span>
@@ -40,6 +43,7 @@ function ProviderKeyField({
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [savedNotice, setSavedNotice] = useTransientState(false, 4000);
   const [error, setError] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   const showActions = status.source === 'db' || draft.length > 0;
   // Test reads the SAVED key from the backend, not the draft. If the user
@@ -63,8 +67,8 @@ function ProviderKeyField({
     finally { setBusy(null); }
   }
 
-  async function handleClear() {
-    if (!window.confirm(`Remove stored ${provider} key? The environment variable (if any) will be used instead.`)) return;
+  async function doClear() {
+    setConfirmClear(false);
     setBusy('clear'); setError(null); setTestResult(null);
     try { await onClear(provider); setDraft(''); }
     catch (e) { setError(getErrorMessage(e, 'Clear failed')); }
@@ -118,7 +122,7 @@ function ProviderKeyField({
             type="button"
             disabled={!draft || busy !== null}
             onClick={handleSave}
-            className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+            className={`px-3 py-1.5 rounded-md ${btnPrimary} text-sm font-medium transition-colors disabled:opacity-50 ${focusRing}`}
           >
             {busy === 'save' ? 'Saving...' : 'Save'}
           </button>
@@ -127,7 +131,7 @@ function ProviderKeyField({
             disabled={busy !== null || testBlocked}
             onClick={handleTest}
             title={testBlocked ? 'Click Save first -- Test reads the saved key, not the unsaved draft.' : undefined}
-            className="px-3 py-1.5 rounded-md border border-border text-sm font-medium hover:bg-secondary disabled:opacity-50"
+            className={`px-3 py-1.5 rounded-md ${btnOutline} text-sm font-medium transition-colors disabled:opacity-50 ${focusRing}`}
           >
             {busy === 'test' ? 'Testing...' : 'Test'}
           </button>
@@ -135,8 +139,8 @@ function ProviderKeyField({
             <button
               type="button"
               disabled={busy !== null}
-              onClick={handleClear}
-              className="px-3 py-1.5 rounded-md border border-border text-sm font-medium text-destructive hover:bg-secondary disabled:opacity-50"
+              onClick={() => setConfirmClear(true)}
+              className={`px-3 py-1.5 rounded-md ${btnOutline} text-destructive text-sm font-medium transition-colors disabled:opacity-50 ${focusRing}`}
             >
               Clear
             </button>
@@ -154,6 +158,18 @@ function ProviderKeyField({
         </div>
       )}
       {error && <p className="mt-1 text-sm text-destructive">{error}</p>}
+      {confirmClear && (
+        <ConfirmModal
+          title={`Remove stored ${provider} key?`}
+          confirmLabel="Remove key"
+          busyLabel="Removing..."
+          pending={busy === 'clear'}
+          onCancel={() => setConfirmClear(false)}
+          onConfirm={doClear}
+        >
+          <p>The environment variable, if one is set, will be used instead.</p>
+        </ConfirmModal>
+      )}
     </div>
   );
 }

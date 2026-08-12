@@ -8,6 +8,9 @@ import {
 import { PatternExportEditRow } from './PatternExportEditRow';
 import { getErrorMessage } from '../api/client';
 import { Modal } from './Modal';
+import Checkbox from './Checkbox';
+import { focusRing } from './fieldStyles';
+import { btnOutline, btnPrimary } from './buttonStyles';
 
 // Deterministic 8-char hex from the integer pattern id (Knuth multiplicative
 // hash). Feeds the live filename preview in the edit row so the contributor
@@ -225,15 +228,12 @@ function PatternExportDialogImpl({ patterns, onClose }: Omit<Props, 'open'>) {
       {(destination === 'download' || stage === 'pick') && (
         <>
           <div className="px-6 py-2 border-b border-border flex items-center justify-between text-sm">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                onChange={toggleAll}
-                className="rounded"
-              />
-              <span>{allSelected ? 'Deselect all' : 'Select all'}</span>
-            </label>
+            <Checkbox
+              checked={allSelected}
+              onChange={toggleAll}
+              label={allSelected ? 'Deselect all' : 'Select all'}
+              labelClassName=""
+            />
             <span className="text-xs text-muted-foreground">
               {effectiveSelection.size} of {totalEligible} selected
             </span>
@@ -250,12 +250,13 @@ function PatternExportDialogImpl({ patterns, onClose }: Omit<Props, 'open'>) {
             <ul className="space-y-1">
               {visiblePatterns.map((p) => (
                 <li key={p.id}>
-                  <label className="flex items-start gap-2 px-2 py-1.5 rounded hover:bg-accent/50 cursor-pointer">
-                    <input
-                      type="checkbox"
+                  <label htmlFor={`pattern-export-${p.id}`} className="flex items-start gap-2 px-2 py-1.5 rounded hover:bg-accent/50 cursor-pointer">
+                    <Checkbox
+                      id={`pattern-export-${p.id}`}
                       checked={effectiveSelection.has(p.id)}
                       onChange={() => toggleOne(p.id)}
-                      className="mt-0.5 rounded"
+                      className="mt-0.5"
+                      ariaLabel={`Select pattern ${p.id}`}
                     />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 text-sm">
@@ -263,10 +264,10 @@ function PatternExportDialogImpl({ patterns, onClose }: Omit<Props, 'open'>) {
                         <span className="font-medium">{p.sponsor || '(unknown sponsor)'}</span>
                         <span className="text-xs text-muted-foreground">[{p.scope}]</span>
                         {p.source === PATTERN_SOURCE_COMMUNITY && (
-                          <span className="text-xs text-teal-700 dark:text-teal-400">community</span>
+                          <span className="text-xs text-c-teal">community</span>
                         )}
                         {patternOverrides[p.id] && destination === 'community' && (
-                          <span className="text-xs text-amber-700 dark:text-amber-400">override</span>
+                          <span className="text-xs text-warning">override</span>
                         )}
                       </div>
                       {p.text_template && (
@@ -278,7 +279,7 @@ function PatternExportDialogImpl({ patterns, onClose }: Omit<Props, 'open'>) {
                     {destination === 'community' && (
                       <button
                         type="button"
-                        className="shrink-0 text-xs px-2 py-0.5 rounded border border-border hover:bg-accent/50 focus:outline-none focus:ring-1 focus:ring-ring"
+                        className={`shrink-0 text-xs px-2 py-0.5 rounded ${btnOutline} transition-colors ${focusRing}`}
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
@@ -320,29 +321,23 @@ function PatternExportDialogImpl({ patterns, onClose }: Omit<Props, 'open'>) {
           <div className="p-6 pt-3 border-t border-border space-y-3">
             {destination === 'download' && (
               <div className="flex items-center gap-4 text-sm">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={includeDisabled}
-                    onChange={(e) => setIncludeDisabled(e.target.checked)}
-                    className="rounded"
-                  />
-                  <span>Include disabled patterns</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={includeCorrections}
-                    onChange={(e) => setIncludeCorrections(e.target.checked)}
-                    className="rounded"
-                  />
-                  <span>Include correction history</span>
-                </label>
+                <Checkbox
+                  checked={includeDisabled}
+                  onChange={setIncludeDisabled}
+                  label="Include disabled patterns"
+                  labelClassName=""
+                />
+                <Checkbox
+                  checked={includeCorrections}
+                  onChange={setIncludeCorrections}
+                  label="Include correction history"
+                  labelClassName=""
+                />
               </div>
             )}
 
             {error && (
-              <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+              <p className="text-sm text-destructive">{error}</p>
             )}
 
             <div className="flex justify-end gap-2">
@@ -350,7 +345,7 @@ function PatternExportDialogImpl({ patterns, onClose }: Omit<Props, 'open'>) {
                 type="button"
                 onClick={handleClose}
                 disabled={busy}
-                className="px-3 py-1.5 text-sm rounded border border-border disabled:opacity-50"
+                className={`px-3 py-1.5 text-sm rounded ${btnOutline} transition-colors disabled:opacity-50 ${focusRing}`}
               >
                 Cancel
               </button>
@@ -359,7 +354,7 @@ function PatternExportDialogImpl({ patterns, onClose }: Omit<Props, 'open'>) {
                   type="button"
                   onClick={downloadSelected}
                   disabled={effectiveSelection.size === 0}
-                  className="px-3 py-1.5 text-sm rounded bg-primary text-primary-foreground disabled:opacity-50"
+                  className={`px-3 py-1.5 text-sm rounded ${btnPrimary} transition-colors disabled:opacity-50 ${focusRing}`}
                 >
                   Export {effectiveSelection.size} pattern{effectiveSelection.size === 1 ? '' : 's'}
                 </button>
@@ -368,7 +363,7 @@ function PatternExportDialogImpl({ patterns, onClose }: Omit<Props, 'open'>) {
                   type="button"
                   onClick={runPreview}
                   disabled={effectiveSelection.size === 0 || busy}
-                  className="px-3 py-1.5 text-sm rounded bg-primary text-primary-foreground disabled:opacity-50"
+                  className={`px-3 py-1.5 text-sm rounded ${btnPrimary} transition-colors disabled:opacity-50 ${focusRing}`}
                 >
                   {busy ? 'Checking...' : 'Continue'}
                 </button>
@@ -410,7 +405,7 @@ function CommunityPreview({
             </summary>
             <ul className="space-y-2 pl-3">
               {rejected.map((r) => (
-                <li key={r.id} className="border-l-2 border-red-300 dark:border-red-700 pl-2">
+                <li key={r.id} className="border-l-2 border-destructive pl-2">
                   <div className="flex items-center gap-2">
                     <span className="font-mono text-xs text-muted-foreground">#{r.id}</span>
                     <span className="font-medium">{r.sponsor || '(unknown sponsor)'}</span>
@@ -429,7 +424,7 @@ function CommunityPreview({
           type="button"
           onClick={onBack}
           disabled={busy}
-          className="px-3 py-1.5 text-sm rounded border border-border disabled:opacity-50"
+          className={`px-3 py-1.5 text-sm rounded ${btnOutline} transition-colors disabled:opacity-50 ${focusRing}`}
         >
           Back
         </button>
@@ -437,7 +432,7 @@ function CommunityPreview({
           type="button"
           onClick={onDownload}
           disabled={ready_count === 0 || busy}
-          className="px-3 py-1.5 text-sm rounded bg-primary text-primary-foreground disabled:opacity-50"
+          className={`px-3 py-1.5 text-sm rounded ${btnPrimary} transition-colors disabled:opacity-50 ${focusRing}`}
         >
           {busy ? 'Building bundle...' : `Download bundle (${ready_count})`}
         </button>
@@ -472,7 +467,7 @@ function CommunityDone({ filename, onClose }: { filename: string; onClose: () =>
         <button
           type="button"
           onClick={onClose}
-          className="px-3 py-1.5 text-sm rounded bg-primary text-primary-foreground"
+          className={`px-3 py-1.5 text-sm rounded ${btnPrimary} transition-colors ${focusRing}`}
         >
           Done
         </button>

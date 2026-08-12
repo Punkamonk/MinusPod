@@ -5,6 +5,8 @@ import CollapsibleSection from '../../components/CollapsibleSection';
 import ConnectionTestButton from './ConnectionTestButton';
 import ProviderKeyField from './ProviderKeyField';
 import type { ConnectionTestResult, ProviderName, ProviderStatus, ProviderTestResult, ProvidersResponse } from '../../api/providers';
+import DraftNumberInput, { parseOptionalNumber } from '../../components/DraftNumberInput';
+import { selectBase } from '../../components/fieldStyles';
 
 interface LLMProviderSectionProps {
   llmProvider: LlmProvider;
@@ -70,7 +72,7 @@ function LLMProviderSection({
             id="llmProvider"
             value={llmProvider}
             onChange={(e) => onProviderChange(e.target.value as LlmProvider)}
-            className="w-full px-4 py-2 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+            className={`w-full ${selectBase}`}
           >
             <option value={LLM_PROVIDERS.ANTHROPIC}>Anthropic</option>
             <option value={LLM_PROVIDERS.OPENROUTER}>OpenRouter</option>
@@ -145,7 +147,7 @@ function LLMProviderSection({
             id="pricingSourceMode"
             value={pricingSourceMode}
             onChange={(e) => onPricingSourceModeChange(e.target.value)}
-            className="w-full px-4 py-2 rounded-lg border border-input bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+            className={`w-full ${selectBase}`}
           >
             <option value="auto">Auto (recommended)</option>
             <option value="litellm">LiteLLM catalog</option>
@@ -193,16 +195,16 @@ function OllamaNumCtxField({
       <label htmlFor="ollamaNumCtx" className="block text-sm font-medium text-foreground mb-2">
         Context window (num_ctx)
       </label>
-      <input
-        ref={inputRef}
-        type="number"
+      <DraftNumberInput
         id="ollamaNumCtx"
         min={512}
         max={131072}
         step={512}
         placeholder="Blank = model default"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        value={parseOptionalNumber(draft)}
+        fallback={null}
+        parse={parseOptionalNumber}
+        onChange={(v) => setDraft(v === null ? '' : String(v))}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === 'Enter') (e.target as HTMLInputElement).blur();

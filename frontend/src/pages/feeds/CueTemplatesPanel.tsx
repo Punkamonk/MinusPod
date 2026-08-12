@@ -9,6 +9,7 @@ import CueCrossEpisodeScanModal from '../../components/CueCrossEpisodeScanModal'
 import {
   ghostBtn, primaryBtn, fieldCls, modalBackdrop, modalPanel, useEscape,
 } from '../../components/cueScanStyles';
+import { ConfirmModal } from '../../components/Modal';
 import {
   CUE_TYPE_OPTIONS,
   cueTemplateAudioUrl,
@@ -34,6 +35,9 @@ import type { Feed } from '../../api/types';
 import type { Episode } from '../../api/types';
 import { formatTime } from '../../utils/adReviewHelpers';
 import { formatDate } from '../../utils/format';
+import Checkbox from '../../components/Checkbox';
+import DraftNumberInput, { parseOptionalNumber } from '../../components/DraftNumberInput';
+import { focusRing } from '../../components/fieldStyles';
 
 const PICKER_PAGE_SIZE = 50;
 
@@ -313,7 +317,7 @@ function CueTemplatesPanel({ slug }: Props) {
         <div className="flex flex-wrap gap-2 mb-3">
           <button
             type="button"
-            className={`flex-1 sm:flex-none basis-0 sm:basis-auto whitespace-nowrap px-3 py-1.5 rounded ${ghostBtn} text-sm`}
+            className={`flex-1 sm:flex-none basis-0 sm:basis-auto whitespace-nowrap px-3 py-1.5 rounded ${ghostBtn} text-sm ${focusRing}`}
             onClick={() => importInputRef.current?.click()}
             disabled={importMutation.isPending}
             title="Import a cue template zip exported from another install"
@@ -322,7 +326,7 @@ function CueTemplatesPanel({ slug }: Props) {
           </button>
           <button
             type="button"
-            className={`flex-1 sm:flex-none basis-0 sm:basis-auto whitespace-nowrap px-3 py-1.5 rounded ${ghostBtn} text-sm disabled:opacity-50`}
+            className={`flex-1 sm:flex-none basis-0 sm:basis-auto whitespace-nowrap px-3 py-1.5 rounded ${ghostBtn} text-sm disabled:opacity-50 ${focusRing}`}
             onClick={() => setScanOpen(true)}
             disabled={templates.length === 0}
             title={templates.length === 0 ? 'Mark at least one cue first' : 'Run all enabled templates against an episode'}
@@ -331,7 +335,7 @@ function CueTemplatesPanel({ slug }: Props) {
           </button>
           <button
             type="button"
-            className={`flex-1 sm:flex-none basis-0 sm:basis-auto whitespace-nowrap px-3 py-1.5 rounded ${ghostBtn} text-sm disabled:opacity-50`}
+            className={`flex-1 sm:flex-none basis-0 sm:basis-auto whitespace-nowrap px-3 py-1.5 rounded ${ghostBtn} text-sm disabled:opacity-50 ${focusRing}`}
             onClick={() => { setActionError(null); setCrossEpisodeScanOpen(true); }}
             disabled={!crossEpisodeEligible}
             title={!crossEpisodeEligible ? 'Need at least 2 episodes with original audio' : 'Find recurring cue sounds across multiple episodes'}
@@ -340,7 +344,7 @@ function CueTemplatesPanel({ slug }: Props) {
           </button>
           <button
             type="button"
-            className={`flex-1 sm:flex-none basis-0 sm:basis-auto whitespace-nowrap px-3 py-1.5 rounded ${primaryBtn} text-sm`}
+            className={`flex-1 sm:flex-none basis-0 sm:basis-auto whitespace-nowrap px-3 py-1.5 rounded ${primaryBtn} text-sm ${focusRing}`}
             onClick={() => { setActionError(null); setPickerOpen(true); }}
           >
             + Mark cue
@@ -377,13 +381,12 @@ function CueTemplatesPanel({ slug }: Props) {
               <li key={t.id} className="px-3 py-2 text-sm">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
                 <div className="flex items-center gap-3 min-w-0 flex-1">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={t.enabled}
                     onChange={() => handleToggle(t)}
                     disabled={t.owned === false}
                     title={t.owned === false ? 'Managed on the feed that created it' : undefined}
-                    aria-label={`Enable cue ${t.label}`}
+                    ariaLabel={`Enable cue ${t.label}`}
                   />
                   <div className="flex-1 min-w-0">
                   {editingId === t.id ? (
@@ -411,13 +414,13 @@ function CueTemplatesPanel({ slug }: Props) {
                       <p className="font-medium truncate">
                         {t.label}
                         {t.scope === 'network' && (
-                          <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-purple-500/20 text-purple-600 dark:text-purple-400 align-middle">
+                          <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-c-purple/20 text-c-purple align-middle">
                             NETWORK
                           </span>
                         )}
                         {t.quiet && (
                           <span
-                            className="ml-2 px-1.5 py-0.5 text-xs rounded font-medium bg-amber-500/20 text-warning align-middle"
+                            className="ml-2 px-1.5 py-0.5 text-xs rounded font-medium bg-warning/20 text-warning align-middle"
                             title="No matches in recent episodes. Recapture this cue to keep it working."
                           >
                             quiet
@@ -438,7 +441,7 @@ function CueTemplatesPanel({ slug }: Props) {
                     {t.hasAudio !== false && (
                       <button
                         type="button"
-                        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                        className={`inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground ${focusRing}`}
                         onClick={() => togglePlay(t)}
                         title={playingId === t.id ? 'Stop' : 'Play this cue'}
                         aria-label={playingId === t.id ? `Stop cue ${t.label}` : `Play cue ${t.label}`}
@@ -448,7 +451,7 @@ function CueTemplatesPanel({ slug }: Props) {
                       </button>
                     )}
                     <a
-                      className="text-xs text-muted-foreground hover:text-foreground"
+                      className={`text-xs text-muted-foreground hover:text-foreground ${focusRing}`}
                       href={cueTemplateExportUrl(t.id)}
                       title="Download this cue as a portable zip"
                     >
@@ -463,7 +466,7 @@ function CueTemplatesPanel({ slug }: Props) {
                         {(t.scope === 'network' || networkId) && (
                           <button
                             type="button"
-                            className="text-xs text-muted-foreground hover:text-foreground"
+                            className={`text-xs text-muted-foreground hover:text-foreground ${focusRing}`}
                             onClick={() => handlePromote(t)}
                             title={
                               t.scope === 'network'
@@ -476,20 +479,22 @@ function CueTemplatesPanel({ slug }: Props) {
                         )}
                         <button
                           type="button"
-                          className="text-xs text-muted-foreground hover:text-foreground"
+                          className={`text-xs text-muted-foreground hover:text-foreground ${focusRing}`}
                           onClick={() => startEditType(t)}
                         >
                           Change type
                         </button>
                         {editingThresholdId === t.id ? (
-                          <input
-                            type="number"
+                          <DraftNumberInput
                             autoFocus
                             min={0.30}
                             max={0.99}
                             step={0.01}
-                            value={editThresholdValue}
-                            onChange={(e) => setEditThresholdValue(e.target.value)}
+                            ariaLabel={`Match threshold for ${t.label}`}
+                            value={parseOptionalNumber(editThresholdValue)}
+                            fallback={null}
+                            parse={parseOptionalNumber}
+                            onChange={(v) => setEditThresholdValue(v === null ? '' : String(v))}
                             onBlur={() => commitThreshold(t)}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') e.currentTarget.blur();
@@ -505,7 +510,7 @@ function CueTemplatesPanel({ slug }: Props) {
                         ) : (
                           <button
                             type="button"
-                            className="text-xs text-muted-foreground hover:text-foreground"
+                            className={`text-xs text-muted-foreground hover:text-foreground ${focusRing}`}
                             onClick={() => startEditThreshold(t)}
                             title="Per-template match score threshold (empty = inherit feed/global)"
                           >
@@ -514,7 +519,7 @@ function CueTemplatesPanel({ slug }: Props) {
                         )}
                         <button
                           type="button"
-                          className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+                          className={`text-xs text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`}
                           onClick={() => {
                             setActionError(null);
                             setOptimizeId(optimizeId === t.id ? null : t.id);
@@ -530,14 +535,14 @@ function CueTemplatesPanel({ slug }: Props) {
                           <>
                             <button
                               type="button"
-                              className="text-xs text-destructive font-medium"
+                              className={`text-xs text-destructive font-medium ${focusRing}`}
                               onClick={() => { deleteMutation.mutate(t.id); setConfirmDeleteId(null); }}
                             >
                               Confirm
                             </button>
                             <button
                               type="button"
-                              className="text-xs text-muted-foreground hover:text-foreground"
+                              className={`text-xs text-muted-foreground hover:text-foreground ${focusRing}`}
                               onClick={() => setConfirmDeleteId(null)}
                             >
                               Cancel
@@ -546,7 +551,7 @@ function CueTemplatesPanel({ slug }: Props) {
                         ) : (
                           <button
                             type="button"
-                            className="text-xs text-destructive hover:text-destructive/80"
+                            className={`text-xs text-destructive hover:text-destructive/80 ${focusRing}`}
                             onClick={() => setConfirmDeleteId(t.id)}
                           >
                             Delete
@@ -596,7 +601,7 @@ function CueTemplatesPanel({ slug }: Props) {
               <div className="mt-3 space-y-1">
                 {advisoryQuery.data.templateHints!.map((h) => (
                   <p key={h.templateId} className="text-sm text-muted-foreground">
-                    <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-amber-500/20 text-warning mr-2">
+                    <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-warning/20 text-warning mr-2">
                       {h.hint === 'raise_threshold' ? 'Raise threshold' : 'Re-capture cue'}
                     </span>
                     {h.label || `Template ${h.templateId}`}: {h.rejected} rejected
@@ -666,10 +671,10 @@ function CueTemplatesPanel({ slug }: Props) {
               ))}
             </ul>
             <div className="flex justify-end gap-2">
-              <button type="button" className={`px-3 py-1.5 rounded ${ghostBtn} text-sm`} onClick={() => setPromoteState(null)}>
+              <button type="button" className={`px-3 py-1.5 rounded ${ghostBtn} text-sm ${focusRing}`} onClick={() => setPromoteState(null)}>
                 Cancel
               </button>
-              <button type="button" className={`px-3 py-1.5 rounded ${primaryBtn} text-sm`} onClick={confirmPromote}>
+              <button type="button" className={`px-3 py-1.5 rounded ${primaryBtn} text-sm ${focusRing}`} onClick={confirmPromote}>
                 Promote
               </button>
             </div>
@@ -726,7 +731,7 @@ function EpisodePicker({ slug, onClose, onPick }: EpisodePickerProps) {
               Any episode with retained original audio. A cue applies to the whole feed.
             </p>
           </div>
-          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onClose} aria-label="Close">
+          <button type="button" className={`text-muted-foreground hover:text-foreground ${focusRing}`} onClick={onClose} aria-label="Close">
             <X size={18} />
           </button>
         </div>
@@ -744,7 +749,7 @@ function EpisodePicker({ slug, onClose, onPick }: EpisodePickerProps) {
                   <button
                     type="button"
                     onClick={() => onPick(ep)}
-                    className="w-full text-left px-3 py-2 hover:bg-muted/50"
+                    className={`w-full text-left px-3 py-2 hover:bg-muted/50 ${focusRing}`}
                   >
                     <p className="text-sm font-medium truncate">{ep.title}</p>
                     <p className="text-xs text-muted-foreground">
@@ -763,7 +768,7 @@ function EpisodePicker({ slug, onClose, onPick }: EpisodePickerProps) {
           <div className="flex items-center justify-between mt-3 text-sm">
             <button
               type="button"
-              className={`px-2 py-1 rounded ${ghostBtn} disabled:opacity-50`}
+              className={`px-2 py-1 rounded ${ghostBtn} disabled:opacity-50 ${focusRing}`}
               onClick={() => setPage((p) => Math.max(0, p - 1))}
               disabled={page === 0}
             >
@@ -774,7 +779,7 @@ function EpisodePicker({ slug, onClose, onPick }: EpisodePickerProps) {
             </span>
             <button
               type="button"
-              className={`px-2 py-1 rounded ${ghostBtn} disabled:opacity-50`}
+              className={`px-2 py-1 rounded ${ghostBtn} disabled:opacity-50 ${focusRing}`}
               onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
               disabled={page + 1 >= totalPages}
             >
@@ -807,6 +812,7 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
   const [suggestion, setSuggestion] = useState<ThresholdSuggestResponse | null>(null);
   const [suggesting, setSuggesting] = useState(false);
   const [applied, setApplied] = useState(false);
+  const [pendingThreshold, setPendingThreshold] = useState<number | null>(null);
   const activeRef = useRef(true);
   useEffect(() => () => { activeRef.current = false; }, []);
 
@@ -852,11 +858,12 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
   };
 
   const applySuggested = async (value: number) => {
+    setPendingThreshold(value);
+  };
+
+  const doApplySuggested = async (value: number) => {
+    setPendingThreshold(null);
     setApplied(false);
-    if (!window.confirm(
-      `Set the per-feed cue match threshold to ${value.toFixed(2)} for this feed? ` +
-      `The global setting will not change.`,
-    )) return;
     try {
       await updateFeed(slug, { cueTemplateScoreOverride: value });
       queryClient.invalidateQueries({ queryKey: ['feed', slug] });
@@ -900,7 +907,7 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
             <h3 className="text-base font-semibold">Cue scan</h3>
             <p className="text-xs text-muted-foreground truncate max-w-xl">{selectedEpisode?.title}</p>
           </div>
-          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onClose} aria-label="Close">
+          <button type="button" className={`text-muted-foreground hover:text-foreground ${focusRing}`} onClick={onClose} aria-label="Close">
             <X size={18} />
           </button>
         </div>
@@ -910,21 +917,22 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
             <label className="block text-xs text-muted-foreground" htmlFor="score-override">
               Score threshold (optional)
             </label>
-            <input
+            <DraftNumberInput
               id="score-override"
-              type="number"
               min={0}
               max={CUE_SCORE_MAX}
               step={0.05}
               placeholder="default"
-              value={scoreOverride}
-              onChange={(e) => setScoreOverride(e.target.value)}
+              value={parseOptionalNumber(scoreOverride)}
+              fallback={null}
+              parse={parseOptionalNumber}
+              onChange={(v) => setScoreOverride(v === null ? '' : String(v))}
               className={`w-28 px-3 py-1.5 ${fieldCls} text-sm font-mono`}
             />
           </div>
           <button
             type="button"
-            className={`px-3 py-1.5 rounded ${ghostBtn} text-sm`}
+            className={`px-3 py-1.5 rounded ${ghostBtn} text-sm ${focusRing}`}
             onClick={() => {
               if (!selectedEpisode) return;
               const n = scoreOverride.trim() === '' ? undefined : Number(scoreOverride);
@@ -940,14 +948,14 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
           </button>
           <button
             type="button"
-            className={`px-3 py-1.5 rounded ${ghostBtn} text-sm`}
+            className={`px-3 py-1.5 rounded ${ghostBtn} text-sm ${focusRing}`}
             onClick={() => { setPicking(true); setResult(null); setSelectedEpisode(null); setSuggestion(null); }}
           >
             Pick different episode
           </button>
           <button
             type="button"
-            className={`px-3 py-1.5 rounded ${ghostBtn} text-sm`}
+            className={`px-3 py-1.5 rounded ${ghostBtn} text-sm ${focusRing}`}
             onClick={runSuggest}
             disabled={suggesting}
           >
@@ -988,7 +996,7 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
               {s.suggested != null && (
                 <button
                   type="button"
-                  className={`mt-2 px-3 py-1.5 rounded ${ghostBtn} text-sm disabled:opacity-50`}
+                  className={`mt-2 px-3 py-1.5 rounded ${ghostBtn} text-sm disabled:opacity-50 ${focusRing}`}
                   onClick={() => applySuggested(s.suggested as number)}
                   disabled={!canApply}
                 >
@@ -1051,6 +1059,18 @@ function CueScanModal({ slug, onClose }: CueScanModalProps) {
           </div>
         )}
       </div>
+      {pendingThreshold !== null && (
+        <ConfirmModal
+          title="Apply the suggested threshold?"
+          confirmLabel="Apply threshold"
+          busyLabel="Applying..."
+          destructive={false}
+          onCancel={() => setPendingThreshold(null)}
+          onConfirm={() => doApplySuggested(pendingThreshold)}
+        >
+          <p>Sets this feed's cue match threshold to {pendingThreshold.toFixed(2)}. The global setting does not change.</p>
+        </ConfirmModal>
+      )}
     </div>
   );
 }

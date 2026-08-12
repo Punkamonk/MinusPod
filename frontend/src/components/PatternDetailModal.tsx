@@ -7,6 +7,8 @@ import { ScopeBadge } from './ScopeBadge';
 import { SegmentCategoryBadge } from './SegmentCategoryBadge';
 import { btnDestructive, btnOutline, btnPrimary } from './buttonStyles';
 import { Modal } from './Modal';
+import Checkbox from './Checkbox';
+import { focusRing } from './fieldStyles';
 
 interface PatternDetailModalProps {
   pattern: AdPattern;
@@ -111,7 +113,7 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
         </div>
         <button
           onClick={onClose}
-          className="p-1 text-muted-foreground hover:text-foreground"
+          className={`p-1 text-muted-foreground hover:text-foreground ${focusRing}`}
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -130,7 +132,7 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
             <div className="text-xs text-muted-foreground">Confirmations</div>
           </div>
           <div className="bg-secondary/50 rounded-lg p-3 text-center">
-            <div className="text-2xl font-bold text-red-600 dark:text-red-400">
+            <div className="text-2xl font-bold text-destructive">
               {pattern.false_positive_count}
             </div>
             <div className="text-xs text-muted-foreground">False Positives</div>
@@ -164,7 +166,7 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
                     type="button"
                     onClick={handleAddSponsor}
                     disabled={addSponsorMutation.isPending}
-                    className={`px-3 py-2 text-xs ${btnPrimary} rounded disabled:opacity-50 whitespace-nowrap`}
+                    className={`px-3 py-2 text-xs ${btnPrimary} rounded disabled:opacity-50 whitespace-nowrap ${focusRing}`}
                   >
                     {addSponsorMutation.isPending ? 'Adding...' : 'Add New'}
                   </button>
@@ -190,20 +192,16 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
                 ref={textTemplateRef}
                 value={editedPattern.text_template}
                 onChange={(e) => setEditedPattern(prev => ({ ...prev, text_template: e.target.value }))}
-                className="w-full px-3 py-3 bg-secondary border border-border rounded text-sm font-mono min-h-[160px] max-h-[400px] resize-y overflow-auto"
+                className={`w-full px-3 py-3 bg-secondary border border-border rounded text-sm font-mono min-h-[160px] max-h-[400px] resize-y overflow-auto ${focusRing}`}
               />
             </div>
 
             <div className="flex items-center gap-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={editedPattern.is_active}
-                  onChange={(e) => setEditedPattern(prev => ({ ...prev, is_active: e.target.checked }))}
-                  className="rounded"
-                />
-                <span className="text-sm text-foreground">Active</span>
-              </label>
+              <Checkbox
+                checked={editedPattern.is_active}
+                onChange={(v) => setEditedPattern(prev => ({ ...prev, is_active: v }))}
+                label="Active"
+              />
             </div>
 
             {!editedPattern.is_active && (
@@ -268,7 +266,7 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
                 <label className="block text-xs font-medium text-muted-foreground mb-1">
                   Disabled Reason
                 </label>
-                <div className="text-sm text-red-600 dark:text-red-400">
+                <div className="text-sm text-destructive">
                   {pattern.disabled_reason}
                 </div>
               </div>
@@ -298,7 +296,7 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
                 <span className="text-muted-foreground">Podcast:</span>
                 <a
                   href={`/feeds/${pattern.podcast_slug}/episodes`}
-                  className="ml-2 text-primary hover:underline"
+                  className={`ml-2 text-primary hover:underline ${focusRing}`}
                 >
                   {pattern.podcast_slug}
                 </a>
@@ -321,7 +319,7 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
             <button
               onClick={() => splitMutation.mutate()}
               disabled={splitMutation.isPending}
-              className={`px-3 py-1.5 text-sm ${btnOutline} rounded disabled:opacity-50`}
+              className={`px-3 py-1.5 text-sm ${btnOutline} rounded disabled:opacity-50 ${focusRing}`}
             >
               {splitMutation.isPending ? 'Splitting...' : 'Split'}
             </button>
@@ -332,13 +330,13 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
               <button
                 onClick={() => deleteMutation.mutate()}
                 disabled={deleteMutation.isPending}
-                className={`px-3 py-1.5 text-sm ${btnDestructive} rounded disabled:opacity-50`}
+                className={`px-3 py-1.5 text-sm ${btnDestructive} rounded disabled:opacity-50 ${focusRing}`}
               >
                 {deleteMutation.isPending ? 'Deleting...' : 'Yes, Delete'}
               </button>
               <button
                 onClick={() => setShowDeleteConfirm(false)}
-                className="px-3 py-1.5 text-sm bg-muted text-muted-foreground rounded hover:bg-accent"
+                className={`px-3 py-1.5 text-sm bg-muted text-muted-foreground rounded hover:bg-accent ${focusRing}`}
               >
                 Cancel
               </button>
@@ -346,7 +344,7 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
           ) : (
             <button
               onClick={() => setShowDeleteConfirm(true)}
-              className="px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10 rounded"
+              className={`px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10 rounded ${focusRing}`}
             >
               Delete
             </button>
@@ -357,14 +355,14 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
             <>
               <button
                 onClick={() => setIsEditing(false)}
-                className="px-4 py-2 text-sm bg-muted text-muted-foreground rounded hover:bg-accent"
+                className={`px-4 py-2 text-sm bg-muted text-muted-foreground rounded hover:bg-accent ${focusRing}`}
               >
                 Cancel
               </button>
               <button
                 onClick={() => updateMutation.mutate()}
                 disabled={updateMutation.isPending}
-                className={`px-4 py-2 text-sm ${btnPrimary} rounded disabled:opacity-50`}
+                className={`px-4 py-2 text-sm ${btnPrimary} rounded disabled:opacity-50 ${focusRing}`}
               >
                 {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
               </button>
@@ -373,13 +371,13 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
             <>
               <button
                 onClick={onClose}
-                className="px-4 py-2 text-sm bg-muted text-muted-foreground rounded hover:bg-accent"
+                className={`px-4 py-2 text-sm bg-muted text-muted-foreground rounded hover:bg-accent ${focusRing}`}
               >
                 Close
               </button>
               <button
                 onClick={() => setIsEditing(true)}
-                className={`px-4 py-2 text-sm ${btnPrimary} rounded`}
+                className={`px-4 py-2 text-sm ${btnPrimary} rounded ${focusRing}`}
               >
                 Edit
               </button>
@@ -391,7 +389,7 @@ function PatternDetailModal({ pattern, onClose, onSave }: PatternDetailModalProp
       {/* Error Display */}
       {(updateMutation.isError || deleteMutation.isError || splitMutation.isError) && (
         <div className="px-4 pb-4">
-          <div className="text-sm text-red-600 dark:text-red-400 bg-red-500/10 rounded p-2">
+          <div className="text-sm text-destructive bg-destructive/10 rounded p-2">
             {splitMutation.isError
               ? getErrorMessage(splitMutation.error, 'Failed to split pattern.')
               : `${deleteMutation.isError ? 'Failed to delete pattern.' : 'Failed to save changes.'} Please try again.`}

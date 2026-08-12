@@ -32,6 +32,9 @@ import {
 } from '../api/cueTemplates';
 import { episodeOriginalUrl } from '../api/feeds';
 import { getErrorMessage } from '../api/client';
+import { btnPrimary } from './buttonStyles';
+import Checkbox from './Checkbox';
+import { focusRing } from './fieldStyles';
 
 // Cue template marking modal. Mirrors the AdReviewModal layout: a wavesurfer
 // waveform with green START / red END pins the user drags to bracket the cue
@@ -572,9 +575,7 @@ function CueMarkModal({
     }
   };
 
-  const fieldCls =
-    'rounded-lg border border-input bg-background text-foreground ' +
-    'focus:outline-hidden focus:ring-2 focus:ring-ring';
+  const fieldCls = `rounded-lg border border-input bg-background text-foreground ${focusRing}`;
   const inCue = playheadTime >= cueStart && playheadTime <= cueEnd;
 
   return (
@@ -601,7 +602,7 @@ function CueMarkModal({
           </div>
           <button
             type="button"
-            className="text-muted-foreground hover:text-foreground"
+            className={`text-muted-foreground hover:text-foreground ${focusRing}`}
             onClick={onClose}
             aria-label="Close"
           >
@@ -637,11 +638,11 @@ function CueMarkModal({
               style={{ left: '0%', display: 'none' }}
               aria-hidden
             >
-              <div className="absolute top-1 left-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full border-2 border-white bg-amber-500 shadow-md" />
-              <div className="absolute -top-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-amber-500 text-white text-[10px] font-bold whitespace-nowrap shadow-md">
+              <div className="absolute top-1 left-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full border-2 border-card bg-warning shadow-md" />
+              <div className="absolute -top-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-warning text-warning-foreground text-[10px] font-bold whitespace-nowrap shadow-md">
                 {formatTime(playheadTime)}
               </div>
-              <div className="absolute top-[20px] bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-amber-500 shadow-[0_0_4px_rgba(245,158,11,0.8)]" />
+              <div className="absolute top-[20px] bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-warning shadow-[0_0_4px_rgba(245,158,11,0.8)]" />
             </div>
             {/* Cue-candidate markers: each candidate's full [start, end] span is
                 shaded (recurring stings sky, cross-episode intro/outro amber) with
@@ -663,17 +664,19 @@ function CueMarkModal({
                 >
                   <span className={`block h-full w-full ${
                     isXep
-                      ? 'bg-amber-500/20 border-x border-amber-500/50'
-                      : 'bg-sky-500/20 border-x border-sky-500/50'
+                      ? 'bg-warning/20 border-x border-warning/50'
+                      : 'bg-c-blue/20 border-x border-c-blue/50'
                   }`} />
                   <button
                     type="button"
                     onClick={() => seekTo(c.start)}
                     title={`${cueCandidateLabel(c)}, ${formatTime(c.start)} - ${formatTime(c.end)} - click to jump`}
                     aria-label={`Cue candidate ${cueCandidateLabel(c)} at ${formatTime(c.start)}`}
-                    className={`pointer-events-auto absolute top-0 left-0 px-1 rounded-br text-white text-[9px] font-bold leading-tight whitespace-nowrap cursor-pointer ${
-                      isXep ? 'bg-amber-500 hover:bg-amber-600' : 'bg-sky-500 hover:bg-sky-600'
-                    }`}
+                    className={`pointer-events-auto absolute top-0 left-0 px-1 rounded-br text-[9px] font-bold leading-tight whitespace-nowrap cursor-pointer ${
+                      isXep
+                        ? 'bg-warning text-warning-foreground hover:bg-warning/90'
+                        : `${btnPrimary} text-primary-foreground`
+                    } ${focusRing}`}
                   >
                     {cueCandidateLabel(c)}
                   </button>
@@ -734,7 +737,7 @@ function CueMarkModal({
                 aria-hidden
               />
               <div
-                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-amber-500 pointer-events-none"
+                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-warning pointer-events-none"
                 style={{ left: `${(playheadTime / totalDuration) * 100}%` }}
                 aria-hidden
               />
@@ -757,7 +760,7 @@ function CueMarkModal({
         <div className="flex flex-wrap items-center gap-2 mt-2">
           <button
             type="button"
-            className={ctrlBtn}
+            className={`${ctrlBtn} ${focusRing}`}
             onClick={() => findCandidates(!!candidatesError)}
             disabled={candidatesLoading}
           >
@@ -816,7 +819,7 @@ function CueMarkModal({
                 </span>
               )}
               {regionDurationValid && !isNonAd && regionDuration > DEFAULT_CAPTURE_WARN_AD_SECONDS && (
-                <span className="ml-1.5 text-[10px] text-amber-500">
+                <span className="ml-1.5 text-[10px] text-warning">
                   long -- aim for 1.5-2.5s
                 </span>
               )}
@@ -826,15 +829,15 @@ function CueMarkModal({
 
         {/* Cue-specific controls: snap to onset + set edge at playhead. */}
         <div className="flex flex-wrap items-center gap-2 mt-2">
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <input type="checkbox" className="accent-primary" checked={snapEnabled} onChange={(e) => setSnapEnabled(e.target.checked)} />
+          <label htmlFor="cue-snap-onset" className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Checkbox id="cue-snap-onset" checked={snapEnabled} onChange={setSnapEnabled} ariaLabel="Snap to detected boundaries" />
             Snap to onset
           </label>
-          <button type="button" className={`flex-1 sm:flex-none ${ctrlBtn} text-emerald-500 whitespace-nowrap`} onClick={setStartAtPlayhead}>
+          <button type="button" className={`flex-1 sm:flex-none ${ctrlBtn} text-success whitespace-nowrap ${focusRing}`} onClick={setStartAtPlayhead}>
             <span className="sm:hidden">Set START</span>
             <span className="hidden sm:inline">Set START at playhead</span>
           </button>
-          <button type="button" className={`flex-1 sm:flex-none ${ctrlBtn} text-rose-500 whitespace-nowrap`} onClick={setEndAtPlayhead}>
+          <button type="button" className={`flex-1 sm:flex-none ${ctrlBtn} text-destructive whitespace-nowrap ${focusRing}`} onClick={setEndAtPlayhead}>
             <span className="sm:hidden">Set END</span>
             <span className="hidden sm:inline">Set END at playhead</span>
           </button>
@@ -853,7 +856,7 @@ function CueMarkModal({
               onChange={(e) => setStartInput(e.target.value)}
               onBlur={commitStart}
               onKeyDown={timeInputKeyDown(cueStart, setStartInput)}
-              className={`w-24 px-3 py-1.5 ${fieldCls} text-sm font-mono text-emerald-500`}
+              className={`w-24 px-3 py-1.5 ${fieldCls} text-sm font-mono text-success`}
             />
           </div>
           <div>
@@ -867,7 +870,7 @@ function CueMarkModal({
               onChange={(e) => setEndInput(e.target.value)}
               onBlur={commitEnd}
               onKeyDown={timeInputKeyDown(cueEnd, setEndInput)}
-              className={`w-24 px-3 py-1.5 ${fieldCls} text-sm font-mono text-rose-500`}
+              className={`w-24 px-3 py-1.5 ${fieldCls} text-sm font-mono text-destructive`}
             />
           </div>
           <div className="flex-1 min-w-[220px]">
@@ -883,12 +886,13 @@ function CueMarkModal({
               ))}
             </select>
             {isNonAd && (
-              <label className="mt-1.5 flex items-start gap-1.5 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
+              <label htmlFor="cue-non-ad-ack" className="mt-1.5 flex items-start gap-1.5 text-xs text-muted-foreground">
+                <Checkbox
+                  id="cue-non-ad-ack"
                   className="mt-0.5"
                   checked={nonAdAck}
-                  onChange={(e) => setNonAdAckKey(e.target.checked ? cueKey : null)}
+                  onChange={(v) => setNonAdAckKey(v ? cueKey : null)}
+                  ariaLabel="Acknowledge non-ad cue"
                 />
                 <span>
                   {cueType === 'content_transition'
@@ -940,7 +944,7 @@ function CueMarkModal({
         <div className="flex flex-col sm:flex-row sm:justify-end gap-2 mt-4">
           <button
             type="button"
-            className={ctrlBtn}
+            className={`${ctrlBtn} ${focusRing}`}
             onClick={onClose}
             disabled={saving || previewing}
           >
@@ -948,7 +952,7 @@ function CueMarkModal({
           </button>
           <button
             type="button"
-            className={ctrlBtn}
+            className={`${ctrlBtn} ${focusRing}`}
             onClick={handlePreview}
             disabled={!canSave || previewing}
           >
@@ -956,7 +960,7 @@ function CueMarkModal({
           </button>
           <button
             type="button"
-            className={`px-4 py-1.5 rounded-lg ${primaryBtn} text-sm`}
+            className={`px-4 py-1.5 rounded-lg ${primaryBtn} text-sm ${focusRing}`}
             onClick={handleSave}
             disabled={!canSave}
           >

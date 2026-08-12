@@ -8,6 +8,9 @@ import type { EmailNotificationSettings, EmailNotificationSettingsPayload } from
 import { useTransientState } from '../../hooks/useTransientState';
 import { EVENT_OPTIONS } from './notificationEvents';
 import { btnPrimary, btnSecondary } from '../../components/buttonStyles';
+import Checkbox from '../../components/Checkbox';
+import DraftNumberInput, { parseOptionalNumber } from '../../components/DraftNumberInput';
+import { focusRing } from '../../components/fieldStyles';
 
 interface EmailDraft {
   enabled: boolean;
@@ -35,9 +38,7 @@ function draftFromSettings(s: EmailNotificationSettings): EmailDraft {
   };
 }
 
-const emailInputClass =
-  'w-full px-4 py-2 rounded-lg border border-input bg-background text-foreground '
-  + 'placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring text-sm';
+const emailInputClass = `w-full px-4 py-2 rounded-lg border border-input bg-background text-foreground placeholder:text-muted-foreground text-sm ${focusRing}`;
 
 function EmailSettingsForm() {
   const queryClient = useQueryClient();
@@ -148,13 +149,15 @@ function EmailSettingsForm() {
           <label htmlFor="email-smtp-port" className="block text-sm font-medium text-foreground mb-1">
             Port
           </label>
-          <input
+          <DraftNumberInput
             id="email-smtp-port"
-            type="number"
             min={1}
             max={65535}
-            value={draft.smtpPort}
-            onChange={(e) => set('smtpPort', e.target.value)}
+            step={1}
+            value={parseOptionalNumber(draft.smtpPort)}
+            fallback={null}
+            parse={parseOptionalNumber}
+            onChange={(v) => set('smtpPort', v === null ? '' : String(v))}
             className={emailInputClass}
           />
         </div>
@@ -208,7 +211,7 @@ function EmailSettingsForm() {
             <button
               type="button"
               onClick={() => setShowPassword((prev) => !prev)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              className={`absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors ${focusRing}`}
             >
               {showPassword ? 'Hide' : 'Show'}
             </button>
@@ -250,28 +253,23 @@ function EmailSettingsForm() {
         <span className="block text-sm font-medium text-foreground mb-1">Events</span>
         <div className="space-y-1.5">
           {EVENT_OPTIONS.map((opt) => (
-            <label key={opt.value} className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={draft.events.includes(opt.value)}
-                onChange={() => toggleEvent(opt.value)}
-                className="rounded border-input"
-              />
-              <span className="text-sm text-foreground">{opt.label}</span>
-            </label>
+            <Checkbox
+              key={opt.value}
+              checked={draft.events.includes(opt.value)}
+              onChange={() => toggleEvent(opt.value)}
+              label={opt.label}
+              className="flex"
+            />
           ))}
         </div>
       </div>
 
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={draft.enabled}
-          onChange={(e) => set('enabled', e.target.checked)}
-          className="rounded border-input"
-        />
-        <span className="text-sm text-foreground">Enabled</span>
-      </label>
+      <Checkbox
+        checked={draft.enabled}
+        onChange={(v) => set('enabled', v)}
+        label="Enabled"
+        className="flex"
+      />
 
       {saveMutation.isError && (
         <div className="p-3 rounded-lg bg-destructive/10 text-destructive text-sm">
@@ -283,7 +281,7 @@ function EmailSettingsForm() {
         <button
           type="submit"
           disabled={saveMutation.isPending || !dirty}
-          className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors text-sm`}
+          className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors text-sm ${focusRing}`}
         >
           {saveMutation.isPending ? 'Saving...' : 'Save'}
         </button>
@@ -291,7 +289,7 @@ function EmailSettingsForm() {
           type="button"
           onClick={() => testMutation.mutate()}
           disabled={testMutation.isPending || !savedSendReady || dirty}
-          className={`px-4 py-2 rounded-lg ${btnSecondary} disabled:opacity-50 transition-colors text-sm`}
+          className={`px-4 py-2 rounded-lg ${btnSecondary} disabled:opacity-50 transition-colors text-sm ${focusRing}`}
         >
           {testMutation.isPending ? 'Sending...' : 'Send test email'}
         </button>
@@ -306,7 +304,7 @@ function EmailSettingsForm() {
           </span>
         )}
         {testResult && (
-          <span className={`text-xs ${testResult.success ? 'text-green-500' : 'text-destructive'}`}>
+          <span className={`text-xs ${testResult.success ? 'text-success' : 'text-destructive'}`}>
             {testResult.message}
           </span>
         )}

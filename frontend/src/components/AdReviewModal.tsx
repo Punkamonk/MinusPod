@@ -25,6 +25,8 @@ import {
   savePlayWhileDragging,
 } from '../utils/adReviewHelpers';
 import { btnGhost, btnPrimary } from './buttonStyles';
+import Checkbox from './Checkbox';
+import { focusRing } from './fieldStyles';
 
 // Shape used by the per-episode AdEditor: enough to render the waveform
 // editor for a single detected ad and submit a correction back. Matches
@@ -718,7 +720,7 @@ function AdReviewModal({
           : boundsWindow && (adStart < boundsWindow.min || adEnd > boundsWindow.max)
             ? `Selection must stay within the detected span (${formatTime(boundsWindow.min)} - ${formatTime(boundsWindow.max)})`
             : null;
-  const inputBorderClass = boundaryError ? 'border-rose-500' : 'border-border';
+  const inputBorderClass = boundaryError ? 'border-destructive' : 'border-border';
 
   // With Confirm hidden (Detected Ads), an unmoved-boundary save would emit
   // a plain confirm the host discards, so the button and C shortcut go inert.
@@ -842,7 +844,7 @@ function AdReviewModal({
                       audioMode === 'processed'
                         ? 'bg-primary text-primary-foreground'
                         : 'bg-background text-muted-foreground hover:bg-secondary'
-                    }`}
+                    } ${focusRing}`}
                     title="Play the post-cut audio"
                   >
                     Processed
@@ -855,7 +857,7 @@ function AdReviewModal({
                       audioMode === 'original' && hasOriginal
                         ? 'bg-primary text-primary-foreground'
                         : 'bg-background text-muted-foreground hover:bg-secondary'
-                    } ${!hasOriginal ? 'opacity-40 cursor-not-allowed' : ''}`}
+                    } ${!hasOriginal ? 'opacity-40 cursor-not-allowed' : ''} ${focusRing}`}
                     title={hasOriginal
                       ? 'Play the pre-cut audio at the ads original timestamps'
                       : 'Original audio not retained for this episode'}
@@ -871,7 +873,7 @@ function AdReviewModal({
                   onClick={onAddNew}
                   aria-label="Add new ad"
                   title="Add new ad"
-                  className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md ${btnPrimary} transition-colors`}
+                  className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md ${btnPrimary} transition-colors ${focusRing}`}
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -881,7 +883,7 @@ function AdReviewModal({
               )}
               <button
                 onClick={onClose}
-                className={`p-1 rounded ${btnGhost} transition-colors`}
+                className={`p-1 rounded ${btnGhost} transition-colors ${focusRing}`}
                 aria-label="Close"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -913,20 +915,15 @@ function AdReviewModal({
             Window: {formatTime(windowStart)} – {formatTime(windowEnd)}
           </span>
           <div className="flex items-center gap-3 flex-wrap">
-            <label className="flex items-center gap-1.5 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={playWhileDrag}
-                onChange={(e) => {
-                  setPlayWhileDrag(e.target.checked);
-                  savePlayWhileDragging(e.target.checked);
-                }}
-                className="accent-primary"
-              />
-              <span>Play audio while dragging pin</span>
-            </label>
+            <Checkbox
+              className="select-none"
+              checked={playWhileDrag}
+              onChange={(v) => { setPlayWhileDrag(v); savePlayWhileDragging(v); }}
+              label="Play audio while dragging pin"
+              labelClassName=""
+            />
             <button type="button" onClick={resetView}
-              className={`px-2 py-1 rounded ${ghostBtn}`}
+              className={`px-2 py-1 rounded ${ghostBtn} ${focusRing}`}
               title="Reset waveform window + ad bounds to defaults">↻ Reset</button>
           </div>
         </div>
@@ -956,7 +953,7 @@ function AdReviewModal({
                 aria-hidden
               />
               <div
-                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-amber-500 pointer-events-none"
+                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-warning pointer-events-none"
                 style={{ left: `${(currentTime / totalDuration) * 100}%` }}
                 aria-hidden
               />
@@ -979,7 +976,7 @@ function AdReviewModal({
                   inputMode === 'audio'
                     ? 'bg-primary text-primary-foreground'
                     : 'bg-background text-muted-foreground hover:bg-secondary'
-                }`}
+                } ${focusRing}`}
                 title="Mark the ad on the waveform"
               >
                 By audio
@@ -991,7 +988,7 @@ function AdReviewModal({
                   inputMode === 'text'
                     ? 'bg-primary text-primary-foreground'
                     : 'bg-background text-muted-foreground hover:bg-secondary'
-                }`}
+                } ${focusRing}`}
                 title="Mark the ad by selecting transcript text"
               >
                 By text
@@ -1109,13 +1106,13 @@ function AdReviewModal({
                     }}
                   >
                     {/* Compact circle pinhead at top. */}
-                    <div className="absolute top-1 left-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full border-2 border-white bg-amber-500 shadow-md cursor-ew-resize" />
+                    <div className="absolute top-1 left-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full border-2 border-card bg-warning shadow-md cursor-ew-resize" />
                     {/* Time label -- hover or while moving. */}
-                    <div className="absolute -top-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-amber-500 text-white text-[10px] font-bold whitespace-nowrap shadow-md transition-opacity duration-100 pointer-events-none opacity-0 group-hover/cursor:opacity-100">
+                    <div className="absolute -top-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-warning text-warning-foreground text-[10px] font-bold whitespace-nowrap shadow-md transition-opacity duration-100 pointer-events-none opacity-0 group-hover/cursor:opacity-100">
                       ▶ {formatTime(currentTime)}
                     </div>
                     {/* Stem */}
-                    <div className="absolute top-[20px] bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-amber-500 shadow-[0_0_4px_rgba(245,158,11,0.8)] pointer-events-none" />
+                    <div className="absolute top-[20px] bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-warning shadow-[0_0_4px_rgba(245,158,11,0.8)] pointer-events-none" />
                     {/* Wider hit area */}
                     <div className="absolute inset-y-0 -inset-x-4 cursor-ew-resize" />
                   </div>
@@ -1213,7 +1210,7 @@ function AdReviewModal({
               onChange={(e) => setStartInput(e.target.value)}
               onBlur={commitStartInput}
               onKeyDown={timeInputKeyDown(adStart, setStartInput)}
-              className={`w-20 px-1.5 py-0.5 rounded border bg-background text-emerald-500 font-medium text-center tabular-nums focus:outline-hidden focus:ring-2 focus:ring-ring ${inputBorderClass}`}
+              className={`w-20 px-1.5 py-0.5 rounded border bg-background text-success font-medium text-center tabular-nums focus:outline-hidden focus:ring-2 focus:ring-ring ${inputBorderClass}`}
             />
             <span>-</span>
             <input
@@ -1226,11 +1223,11 @@ function AdReviewModal({
               onChange={(e) => setEndInput(e.target.value)}
               onBlur={commitEndInput}
               onKeyDown={timeInputKeyDown(adEnd, setEndInput)}
-              className={`w-20 px-1.5 py-0.5 rounded border bg-background text-rose-500 font-medium text-center tabular-nums focus:outline-hidden focus:ring-2 focus:ring-ring ${inputBorderClass}`}
+              className={`w-20 px-1.5 py-0.5 rounded border bg-background text-destructive font-medium text-center tabular-nums focus:outline-hidden focus:ring-2 focus:ring-ring ${inputBorderClass}`}
             />
             <span className="text-xs">({Math.round((adEnd - adStart) * 10) / 10}s)</span>
             {boundariesMoved && !boundaryError && (
-              <span className="text-xs text-amber-500">
+              <span className="text-xs text-warning">
                 (originally {formatTime(item.start)} – {formatTime(item.end)})
               </span>
             )}
@@ -1238,7 +1235,7 @@ function AdReviewModal({
           {boundaryError && (
             <div
               role="alert"
-              className="mt-1.5 inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-rose-500/10 text-rose-500 text-xs font-medium"
+              className="mt-1.5 inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-destructive/10 text-destructive text-xs font-medium"
             >
               <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               <span>{boundaryError}</span>
@@ -1272,8 +1269,8 @@ function AdReviewModal({
           />
 
           <div className="mt-2 text-xs text-muted-foreground">
-            Drag the <span className="text-emerald-500 font-semibold">START</span> /{' '}
-            <span className="text-rose-500 font-semibold">END</span> pins above the waveform.{' '}
+            Drag the <span className="text-success font-semibold">START</span> /{' '}
+            <span className="text-destructive font-semibold">END</span> pins above the waveform.{' '}
             <kbd>Space</kbd> play • <kbd>,</kbd>/<kbd>.</kbd> expand window • mouse-wheel to zoom • <kbd>C</kbd> confirm • <kbd>R</kbd> not an ad • <kbd>S</kbd> skip
           </div>
         </div>
@@ -1315,11 +1312,12 @@ function AdReviewModal({
                 className="w-full px-3 py-1.5 rounded border border-border bg-background text-foreground text-sm"
               />
             </label>
-            <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={scopeInput === 'global'}
-                onChange={(e) => setScopeInput(e.target.checked ? 'global' : 'podcast')} />
-              <span>Apply across all podcasts (global pattern)</span>
-            </label>
+            <Checkbox
+              checked={scopeInput === 'global'}
+              onChange={(v) => setScopeInput(v ? 'global' : 'podcast')}
+              label="Apply across all podcasts (global pattern)"
+              labelClassName="text-sm"
+            />
           </div>
         ) : showSponsorPrompt ? (
           <div className="px-4 sm:px-6 py-3 sm:py-4 border-t border-border bg-secondary/30">
@@ -1340,7 +1338,7 @@ function AdReviewModal({
           <div className="px-6 py-2 border-t border-border text-xs text-muted-foreground">
             Sponsor: <span className="text-foreground">{item.sponsor}</span>{' '}
             <button type="button" onClick={() => setShowSponsorPrompt(true)}
-              className="ml-2 underline transition-colors hover:text-foreground">edit</button>
+              className={`ml-2 underline transition-colors hover:text-foreground ${focusRing}`}>edit</button>
           </div>
         )}
 
@@ -1353,7 +1351,7 @@ function AdReviewModal({
               </div>
               <div className="flex items-center gap-2">
                 <button type="button" onClick={onClose}
-                  className={`px-4 py-1.5 rounded-lg ${ghostBtn} text-sm`}>
+                  className={`px-4 py-1.5 rounded-lg ${ghostBtn} text-sm ${focusRing}`}>
                   Cancel
                 </button>
                 <button
@@ -1375,7 +1373,7 @@ function AdReviewModal({
                       reason: reasonInput,
                     });
                   }}
-                  className={`px-4 py-1.5 rounded-lg ${primaryBtn} text-sm`}>
+                  className={`px-4 py-1.5 rounded-lg ${primaryBtn} text-sm ${focusRing}`}>
                   Save
                 </button>
               </div>
@@ -1386,7 +1384,7 @@ function AdReviewModal({
                 <button
                   type="button"
                   onClick={() => setShowSplit(true)}
-                  className={`h-9 px-2 sm:px-4 rounded-lg ${ghostBtn} text-sm whitespace-nowrap`}
+                  className={`h-9 px-2 sm:px-4 rounded-lg ${ghostBtn} text-sm whitespace-nowrap ${focusRing}`}
                   title="Split this ad block into separate ads"
                 >
                   Split
@@ -1404,20 +1402,20 @@ function AdReviewModal({
                   "& Next" labels on sm: where there's room. */}
               <div className="flex items-stretch gap-1.5 sm:gap-2 w-full sm:w-auto">
                 <button type="button" onClick={onSkip}
-                  className={`flex-1 sm:flex-none sm:min-w-[7rem] basis-0 h-9 px-2 sm:px-4 rounded-lg ${ghostBtn} text-sm text-center whitespace-nowrap`}
+                  className={`flex-1 sm:flex-none sm:min-w-[7rem] basis-0 h-9 px-2 sm:px-4 rounded-lg ${ghostBtn} text-sm text-center whitespace-nowrap ${focusRing}`}
                   title={hasNext ? 'Skip and advance to the next ad (S)' : 'Skip (S)'}>
                   <span className="sm:hidden">Skip</span>
                   <span className="hidden sm:inline">{hasNext ? 'Skip & Next' : 'Skip'}</span>
                 </button>
                 <button type="button" onClick={handleReject}
-                  className={`flex-1 sm:flex-none sm:min-w-[7rem] basis-0 h-9 px-2 sm:px-4 rounded-lg ${destructiveBtn} text-sm text-center whitespace-nowrap`}
+                  className={`flex-1 sm:flex-none sm:min-w-[7rem] basis-0 h-9 px-2 sm:px-4 rounded-lg ${destructiveBtn} text-sm text-center whitespace-nowrap ${focusRing}`}
                   title="Mark as not an ad (R)">
                   <span className="sm:hidden">Not an ad</span>
                   <span className="hidden sm:inline">{hasNext ? 'Not an ad & Next' : 'Not an ad'}</span>
                 </button>
                 <button type="button" onClick={handleConfirm}
                   disabled={boundaryError !== null || confirmInert}
-                  className={`flex-1 sm:flex-none sm:min-w-[7rem] basis-0 h-9 px-2 sm:px-4 rounded-lg ${primaryBtn} text-sm text-center whitespace-nowrap`}
+                  className={`flex-1 sm:flex-none sm:min-w-[7rem] basis-0 h-9 px-2 sm:px-4 rounded-lg ${primaryBtn} text-sm text-center whitespace-nowrap ${focusRing}`}
                   title={boundaryError
                     ?? (confirmInert
                       ? 'Already cut. Move a boundary to save an adjustment.'

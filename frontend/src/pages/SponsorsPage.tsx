@@ -15,6 +15,9 @@ import { Pagination } from '../components/Pagination';
 import { SortHeader, useSortState } from '../components/SortHeader';
 import { formatDate } from '../utils/format';
 import { btnOutline, btnPrimary } from '../components/buttonStyles';
+import Checkbox from '../components/Checkbox';
+import { selectBase } from '../components/fieldStyles';
+import { focusRing } from '../components/fieldStyles';
 
 type Tab = 'sponsors' | 'normalizations';
 type SortField = 'name' | 'category' | 'pattern_count' | 'created_at' | 'last_matched_at';
@@ -24,8 +27,8 @@ function StatusBadge({ active }: { active: boolean }) {
     <span
       className={`px-2 py-0.5 text-xs rounded ${
         active
-          ? 'bg-green-500/20 text-success'
-          : 'bg-red-500/20 text-red-600 dark:text-red-400'
+          ? 'bg-success/20 text-success'
+          : 'bg-destructive/20 text-destructive'
       }`}
     >
       {active ? 'Active' : 'Inactive'}
@@ -52,7 +55,7 @@ function SponsorsPage() {
               tab === 'sponsors'
                 ? 'bg-primary text-primary-foreground'
                 : 'bg-card text-muted-foreground hover:bg-accent'
-            }`}
+            } ${focusRing}`}
           >
             Sponsors
           </button>
@@ -63,7 +66,7 @@ function SponsorsPage() {
               tab === 'normalizations'
                 ? 'bg-primary text-primary-foreground'
                 : 'bg-card text-muted-foreground hover:bg-accent'
-            }`}
+            } ${focusRing}`}
           >
             Normalizations
           </button>
@@ -141,7 +144,7 @@ function SponsorsSection({ queryClient }: { queryClient: ReturnType<typeof useQu
             <select
               value={tagFilter}
               onChange={(e) => { setTagFilter(e.target.value); setPage(1); }}
-              className="px-3 py-1.5 text-sm bg-secondary border border-border rounded"
+              className={`${selectBase}`}
             >
               <option value="all">All</option>
               {(vocab?.all_tags ?? []).map((t) => <option key={t} value={t}>{t}</option>)}
@@ -156,19 +159,16 @@ function SponsorsSection({ queryClient }: { queryClient: ReturnType<typeof useQu
               className="w-full px-3 py-1.5 text-sm bg-secondary border border-border rounded"
             />
           </div>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={showInactive}
-              onChange={(e) => { setShowInactive(e.target.checked); setPage(1); }}
-              className="rounded"
-            />
-            <span className="text-sm text-muted-foreground">Show inactive</span>
-          </label>
+          <Checkbox
+            checked={showInactive}
+            onChange={(v) => { setShowInactive(v); setPage(1); }}
+            label="Show inactive"
+            labelClassName="text-sm text-muted-foreground"
+          />
           <button
             type="button"
             onClick={() => setEditing(null)}
-            className={`px-3 py-1.5 text-sm rounded ${btnPrimary} transition-colors`}
+            className={`px-3 py-1.5 text-sm rounded ${btnPrimary} transition-colors ${focusRing}`}
           >
             + Add Sponsor
           </button>
@@ -194,8 +194,8 @@ function SponsorsSection({ queryClient }: { queryClient: ReturnType<typeof useQu
               <span>matched {formatDate(s.last_matched_at)}</span>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setEditing(s)} className={`px-2 py-1 text-xs rounded ${btnOutline}`}>Edit</button>
-              <button onClick={() => setDeleteTarget(s)} className="px-2 py-1 text-xs rounded border border-destructive/40 text-destructive hover:bg-destructive/10">Delete</button>
+              <button onClick={() => setEditing(s)} className={`px-2 py-1 text-xs rounded ${btnOutline} ${focusRing}`}>Edit</button>
+              <button onClick={() => setDeleteTarget(s)} className={`px-2 py-1 text-xs rounded border border-destructive/40 text-destructive hover:bg-destructive/10 ${focusRing}`}>Delete</button>
             </div>
           </div>
         ))}
@@ -249,8 +249,8 @@ function SponsorsSection({ queryClient }: { queryClient: ReturnType<typeof useQu
                   <td className="px-4 py-3 whitespace-nowrap text-sm text-muted-foreground">{formatDate(s.last_matched_at)}</td>
                   <td className="px-2 py-3 whitespace-nowrap text-xs">
                     <div className="flex gap-1">
-                      <button onClick={() => setEditing(s)} className={`px-2 py-1 rounded ${btnOutline}`}>Edit</button>
-                      <button onClick={() => setDeleteTarget(s)} className="px-2 py-1 rounded border border-destructive/40 text-destructive hover:bg-destructive/10">Delete</button>
+                      <button onClick={() => setEditing(s)} className={`px-2 py-1 rounded ${btnOutline} ${focusRing}`}>Edit</button>
+                      <button onClick={() => setDeleteTarget(s)} className={`px-2 py-1 rounded border border-destructive/40 text-destructive hover:bg-destructive/10 ${focusRing}`}>Delete</button>
                     </div>
                   </td>
                 </tr>
@@ -282,7 +282,7 @@ function SponsorsSection({ queryClient }: { queryClient: ReturnType<typeof useQu
         >
           <p>This permanently removes the sponsor.</p>
           {deleteTarget.pattern_count > 0 && (
-            <p className="text-yellow-600 dark:text-yellow-400">
+            <p className="text-warning">
               {deleteTarget.pattern_count} linked ad pattern
               {deleteTarget.pattern_count === 1 ? '' : 's'} will be unlinked (kept, not deleted).
             </p>
@@ -324,7 +324,7 @@ function NormalizationsSection() {
         <button
           type="button"
           onClick={() => setEditing(null)}
-          className={`px-3 py-1.5 text-sm rounded ${btnPrimary} transition-colors`}
+          className={`px-3 py-1.5 text-sm rounded ${btnPrimary} transition-colors ${focusRing}`}
         >
           + Add Normalization
         </button>
@@ -336,14 +336,14 @@ function NormalizationsSection() {
           <div key={n.id} className="bg-card rounded-lg border border-border p-4">
             <div className="flex items-start justify-between gap-2 mb-2">
               <span className="text-sm font-mono text-foreground break-all">{n.terms}</span>
-              <span className="shrink-0 px-2 py-0.5 text-xs rounded bg-slate-500/15 text-slate-700 dark:text-slate-300">{n.category}</span>
+              <span className="shrink-0 px-2 py-0.5 text-xs rounded bg-muted text-muted-foreground">{n.category}</span>
             </div>
             <div className="text-sm text-foreground mb-3 break-all">
               <span className="text-muted-foreground">→ </span>{n.canonical}
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setEditing(n)} className={`px-2 py-1 text-xs rounded ${btnOutline}`}>Edit</button>
-              <button onClick={() => setDeleteId(n.id)} className="px-2 py-1 text-xs rounded border border-destructive/40 text-destructive hover:bg-destructive/10">Delete</button>
+              <button onClick={() => setEditing(n)} className={`px-2 py-1 text-xs rounded ${btnOutline} ${focusRing}`}>Edit</button>
+              <button onClick={() => setDeleteId(n.id)} className={`px-2 py-1 text-xs rounded border border-destructive/40 text-destructive hover:bg-destructive/10 ${focusRing}`}>Delete</button>
             </div>
           </div>
         ))}
@@ -376,12 +376,12 @@ function NormalizationsSection() {
                   <td className="px-4 py-3 overflow-hidden"><span className="text-sm font-mono text-foreground truncate block">{n.terms}</span></td>
                   <td className="px-4 py-3 overflow-hidden"><span className="text-sm text-foreground truncate block">{n.canonical}</span></td>
                   <td className="px-4 py-3 whitespace-nowrap">
-                    <span className="px-2 py-0.5 text-xs rounded bg-slate-500/15 text-slate-700 dark:text-slate-300">{n.category}</span>
+                    <span className="px-2 py-0.5 text-xs rounded bg-muted text-muted-foreground">{n.category}</span>
                   </td>
                   <td className="px-2 py-3 whitespace-nowrap text-xs">
                     <div className="flex gap-1">
-                      <button onClick={() => setEditing(n)} className={`px-2 py-1 rounded ${btnOutline}`}>Edit</button>
-                      <button onClick={() => setDeleteId(n.id)} className="px-2 py-1 rounded border border-destructive/40 text-destructive hover:bg-destructive/10">Delete</button>
+                      <button onClick={() => setEditing(n)} className={`px-2 py-1 rounded ${btnOutline} ${focusRing}`}>Edit</button>
+                      <button onClick={() => setDeleteId(n.id)} className={`px-2 py-1 rounded border border-destructive/40 text-destructive hover:bg-destructive/10 ${focusRing}`}>Delete</button>
                     </div>
                   </td>
                 </tr>

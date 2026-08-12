@@ -5,6 +5,7 @@ import { useTheme } from '../context/ThemeContext';
 import { takeLoginRedirect } from '../utils/loginRedirect';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { btnPrimary } from '../components/buttonStyles';
+import { focusRing } from '../components/fieldStyles';
 
 function Login() {
   const navigate = useNavigate();
@@ -69,7 +70,7 @@ function Login() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
       <div className="w-full max-w-sm">
-        <div className="bg-card border border-border rounded-lg shadow-lg p-8">
+        <div className="bg-card border border-border rounded-lg p-8">
           <div className="text-center mb-8">
             <img
               src={theme === 'dark' ? '/ui/logo-dark.svg' : '/ui/logo.svg'}
@@ -105,7 +106,7 @@ function Login() {
             <button
               type="submit"
               disabled={isSubmitting || !password}
-              className={`w-full px-4 py-3 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors font-medium`}
+              className={`w-full px-4 py-3 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors font-medium ${focusRing}`}
             >
               {isSubmitting ? 'Signing in...' : 'Sign In'}
             </button>
