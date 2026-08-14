@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.87.1
+  version: 2.88.0
   contact:
     name: MinusPod
   license:
@@ -3830,6 +3830,14 @@ paths:
                     Segment categories accepted from community pattern sync. Default is
                     every category, so an install upgrades with unchanged sync behavior
                     until a category is unchecked. Replaces the stored list outright.
+                jitBlockedUserAgents:
+                  type: array
+                  items:
+                    type: string
+                  description: >-
+                    User-agent patterns barred from triggering just-in-time
+                    episode processing. Case-insensitive substring match; a
+                    leading caret anchors to the start of the agent.
                 artworkWatermarkEnabled:
                   type: boolean
                   description: When true, the served feed's channel cover art gets a MinusPod badge overlaid so the filtered feed is distinct in a podcast app (issue #420). Off by default.
@@ -9191,6 +9199,19 @@ components:
               items:
                 type: string
                 enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap]
+            isDefault:
+              type: boolean
+        jitBlockedUserAgents:
+          type: object
+          description: >-
+            User-agent patterns barred from triggering just-in-time episode
+            processing. Case-insensitive substring match; a leading caret
+            anchors to the start of the agent.
+          properties:
+            value:
+              type: array
+              items:
+                type: string
             isDefault:
               type: boolean
         artworkWatermarkEnabled:

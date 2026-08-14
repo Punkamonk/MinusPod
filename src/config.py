@@ -51,6 +51,7 @@ HOLD_REASON_DIFFERENTIAL_UNCORROBORATED = 'differential_uncorroborated'
 # confidence to auto-cut, too high to silently discard (see
 # _gate_verification_ads_by_confidence's fall-through in processing.py).
 HOLD_REASON_VERIFICATION_MISS = 'verification_miss'
+HOLD_REASON_VERIFICATION_KEPT_CONFLICT = 'verification_kept_conflict'
 HOLD_REASON_CUE_TEMPLATE_UNPROVEN = 'cue_template_unproven'
 HOLD_REASON_CUE_LOW_CONFIDENCE = 'cue_low_confidence'
 
@@ -94,6 +95,36 @@ def resolve_community_sync_categories(raw_json: Optional[str]) -> List[str]:
     if not isinstance(parsed, list):
         return list(SEGMENT_CATEGORIES)
     return [c for c in parsed if c in SEGMENT_CATEGORIES]
+
+
+def resolve_jit_blocked_user_agents(raw_json: Optional[str]) -> List[str]:
+    """Parse jit_blocked_user_agents JSON into patterns, empty on bad input."""
+    if not raw_json:
+        return []
+    try:
+        parsed = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [p.strip() for p in parsed if isinstance(p, str) and p.strip()]
+
+
+def user_agent_is_jit_blocked(user_agent: Optional[str], patterns: List[str]) -> bool:
+    """True when the agent matches a pattern. A leading '^' anchors to the
+    start, which short agents like 'atc/' need so they cannot match mid-string.
+    """
+    if not user_agent or not patterns:
+        return False
+    low = user_agent.lower()
+    for p in patterns:
+        pat = p.lower()
+        if pat.startswith('^'):
+            if low.startswith(pat[1:]):
+                return True
+        elif pat in low:
+            return True
+    return False
 
 
 def resolve_segment_category_actions_map(

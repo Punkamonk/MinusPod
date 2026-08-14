@@ -429,6 +429,8 @@ export interface Settings {
   artworkBadgePosition: SettingValue;
   feedAuthEnabled: SettingValueBoolean;
   feedAuthKey: string | null;
+  // User agents served original audio instead of triggering JIT processing.
+  jitBlockedUserAgents: { value: string[]; isDefault: boolean };
   opmlModifiedUrl: string | null;
   opmlOriginalUrl: string | null;
   audioBitrate: SettingValue;
@@ -612,6 +614,7 @@ export interface UpdateSettingsPayload {
   artworkWatermarkEnabled?: boolean;
   artworkBadgePosition?: string;
   feedAuthEnabled?: boolean;
+  jitBlockedUserAgents?: string[];
   audioBitrate?: string;
   audioNormalizeEnabled?: boolean;
   audioNormalizeIntensity?: string;
