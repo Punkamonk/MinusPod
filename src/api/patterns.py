@@ -8,9 +8,9 @@ from config import (
     MIN_AD_DURATION, count_pending_review, is_pending_review,
     HOLD_REASON_DIFFERENTIAL_UNCORROBORATED,
 )
-from utils.time import utc_now_iso, parse_iso_datetime
+from utils.time import utc_now_iso, utc_now, parse_iso_datetime
 from sponsor_normalize import get_or_create_known_sponsor
-from pattern_service import PatternService
+from pattern_service import PatternService, compute_pattern_trust
 from pattern_variants import derive_intro_outro, merge_variants
 from pattern_clusters import merge_suggestions
 from split_planning import build_split_pieces
@@ -61,6 +61,9 @@ def list_patterns():
         active_only=active_only,
         source=source,
     )
+    now = utc_now()
+    for pattern in patterns:
+        pattern['trust'] = compute_pattern_trust(pattern, now)
 
     return json_response({'patterns': patterns})
 
@@ -475,19 +478,19 @@ def merge_patterns():
             conn.execute(
                 f'''UPDATE pattern_corrections
                     SET pattern_id = ?
-                    WHERE pattern_id IN ({placeholders})''',
+                    WHERE pattern_id IN ({placeholders})''',  # noqa: S608  # identifiers allowlisted, values bound
                 [keep_id] + merge_id_list
             )
             # A folded row's fingerprint is the audio hash of ITS read, not the
             # kept row's, so drop it rather than attach audio the kept row does
             # not describe. Explicit: the FK cascade is per-connection.
             conn.execute(
-                f'DELETE FROM audio_fingerprints WHERE pattern_id IN ({placeholders})',
+                f'DELETE FROM audio_fingerprints WHERE pattern_id IN ({placeholders})',  # noqa: S608  # identifiers allowlisted, values bound
                 merge_id_list
             )
             # Delete merged patterns
             conn.execute(
-                f'''DELETE FROM ad_patterns WHERE id IN ({placeholders})''',
+                f'''DELETE FROM ad_patterns WHERE id IN ({placeholders})''',  # noqa: S608  # identifiers allowlisted, values bound
                 merge_id_list
             )
 

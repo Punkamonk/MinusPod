@@ -19,7 +19,7 @@ os.environ.setdefault('MINUSPOD_DATA_DIR', _test_data_dir)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from main_app import processing
-from ad_reviewer import ReviewResult, ReviewVerdict
+from ad_reviewer import ReviewResult, ReviewVerdict, log_contradiction_event
 from config import HOLD_REASON_REVIEWER_CONTRADICTION, is_pending_review
 
 CONTRADICTING = 'This span is not an ad, it is host conversation'
@@ -58,7 +58,17 @@ def _run_pass2(monkeypatch, verdicts, v_ads_to_cut, v_ads_for_ui, v_ads_held,
                         lambda *a, **k: None)
     monkeypatch.setattr(processing, 'split_resurrection_pool',
                         lambda *a, **k: [])
-    stub = SimpleNamespace(review=lambda **kw: result)
+    def _review(**kw):
+        # Stands in for AdReviewer.review's accepted-pool loop, the single
+        # site that emits contradiction telemetry.
+        for verdict in result.verdicts:
+            log_contradiction_event(
+                verdict, model=verdict.model_used,
+                slug=kw['episode_meta'].get('slug'),
+                episode_id=kw['episode_meta'].get('episode_id'))
+        return result
+
+    stub = SimpleNamespace(review=_review)
     monkeypatch.setattr(processing, '_build_reviewer', lambda db, det: stub)
     monkeypatch.setattr(processing.ad_detector, 'get_verification_model',
                         lambda: 'test-model', raising=False)
@@ -94,6 +104,27 @@ def test_pass2_contradiction_confirmed_is_held_not_cut(monkeypatch):
     assert o1['source'] == 'reviewer'
     assert is_pending_review(o1), "held marker must count as pending review"
     assert p1['was_cut'] is False
+
+
+def test_pass2_contradiction_guard_logs_once_with_context(monkeypatch, caplog):
+    # The pass-2 gate and _apply_reviewer_verdict_to_ad both evaluate the
+    # same verdict object; neither may emit, so the guard-fired line stays at
+    # exactly one, carrying slug/episode_id/model/boundaries for Loki counting.
+    o1, p1 = _pair(100.0, 160.0, 50.0, 110.0)
+    v_ads_to_cut = [p1]
+    v_ads_for_ui = [o1]
+    v_ads_held = []
+    verdicts = [_verdict('confirmed', 100.0, 160.0, CONTRADICTING)]
+    with caplog.at_level('INFO', logger='ad_reviewer'):
+        _run_pass2(monkeypatch, verdicts, v_ads_to_cut, v_ads_for_ui,
+                   v_ads_held, [p1], [o1])
+    fired = [line for line in caplog.text.splitlines()
+             if 'reviewer_contradiction_guard_fired' in line]
+    assert len(fired) == 1, f"expected exactly one guard-fired log, got {fired}"
+    assert 'model=test-model' in fired[0]
+    assert 'slug=s' in fired[0]
+    assert 'episode_id=e' in fired[0]
+    assert 'start=100.0' in fired[0] and 'end=160.0' in fired[0]
 
 
 def test_pass2_contradiction_adjust_is_held_not_coerced_to_cut(monkeypatch):

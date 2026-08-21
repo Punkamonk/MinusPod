@@ -11,6 +11,155 @@ release notes.
 
 ## [Unreleased]
 
+## [2.89.4] - 2026-08-21
+
+### Fixed
+
+- Long log lines wrap in the run log viewer instead of pushing the row
+  sideways. On phones the time and level sit above the message, so a long
+  URL gets the full width.
+- Silenced the HTTP transport chatter that openai 3.x reintroduced. That
+  release moved to httpx2 and httpcore2, which log under new names, so the
+  existing suppression missed them and per-request connection dumps went to
+  the server log at DEBUG. They were a quarter of every episode run log.
+
+## [2.89.3] - 2026-08-20
+
+### Changed
+
+- Chunk extraction now runs ahead of the GPU during chunked transcription.
+  Two ffmpeg workers cut and normalize upcoming chunks while the current one
+  transcribes, instead of the GPU idling through each extraction. On a
+  46-minute episode with the large-v3 model this takes roughly five minutes
+  off a full run, with the same gain again in the verification pass. A
+  mid-run chunk-size change (GPU out-of-memory, extraction timeout) discards
+  the queued extractions and redoes them at the new size.
+- The log viewer's level pills are now plain filters: none selected shows
+  every line, and selecting pills keeps only those levels. They previously
+  acted as a minimum-severity threshold, which read as a broken filter when
+  Debug was selected and INFO lines still showed.
+
+## [2.89.2] - 2026-08-20
+
+### Added
+
+- Per-run episode logs. Every processing run writes its pipeline log to disk as
+  JSONL, and the episode page's new Logs card opens any run's log in a
+  full-screen viewer with a minimum-level filter, text search, and a raw
+  download. A log holds whatever that run logged, including the lines its
+  detection and reviewer worker threads wrote, and a failed run keeps its log.
+  A run's log closes when its history row lands, so anything logged after that,
+  like the webhook and the RSS refresh, is not in it.
+  Retention is 30 days by default, editable in Settings > Global Defaults, where
+  0 keeps nothing and lets the cleanup sweep delete what is already stored. Any
+  feed can opt in or out in its own settings. Files live under
+  `data/logs/episodes/<slug>/<episode-id>/` and stop at 20 MB per run with a
+  truncation marker; the cleanup sweep also removes files no run points at.
+  `EPISODE_LOG_RETENTION_DAYS` and `EPISODE_LOG_LEVEL` seed the two global
+  settings. New endpoint:
+  `GET /feeds/<slug>/episodes/<episode-id>/runs/<n>/log`, with `format=raw` for
+  the file itself. Closes #660.
+
+## [2.89.1] - 2026-08-19
+
+### Added
+
+- Low-ad-yield response policy. When a run MinusPod started itself removes far
+  less ad time than the feed's recent average, it can rerun detection
+  automatically. Choose the action under Settings > Global Defaults: do nothing
+  (the default), redetect ads from the stored transcript, reprocess, or run a
+  full analysis. Each feed can override that choice or turn the policy off. The
+  episode keeps serving its current audio while the rerun waits its turn, behind
+  any fresh episodes in the queue. A rerun happens at most once per episode. The
+  mark goes down when the rerun is queued, so a rerun that fails still spends
+  it. The policy never fires after a manual reprocess or on a pass-through,
+  skip-detection, or cue-only feed. Degraded runs, which publish on partial
+  detection, are skipped too, since they already queue their own re-detect.
+  Playing an unprocessed episode counts as an automatic run and can trigger the
+  policy. `LOW_AD_YIELD_ACTION` seeds the global default on a fresh install; the
+  stored setting is editable at runtime.
+
+### Changed
+
+- The Settings page's Processing Queue lists the whole backlog. It showed only
+  the active job plus whatever an enqueue path had registered by hand, so a bulk
+  reprocess or a feed refresh that queued a dozen episodes looked like one item,
+  or like nothing at all. `GET /episodes/processing` now returns the pending
+  queue rows in the order the worker claims them, and the panel numbers each
+  waiting episode and collapses past ten rows behind a Show all toggle. Cancel
+  works per row, so only the row being canceled reads as canceling. The list is
+  capped at 200 rows while the heading counts the whole backlog.
+
+### Fixed
+
+- The queue drainer dropped an episode re-queued while its own run was still
+  finishing. The queue holds one row per episode, so the drainer's verdict on
+  the finished run overwrote that row and the rerun never happened. A verdict
+  now only lands on a row the drainer still holds, which also repairs the
+  automatic re-detect a degraded run queues for itself.
+
+## [2.89.0] - 2026-08-19
+
+### Security
+
+- Closed a DNS-rebinding TOCTOU in the SSRF guard. Outbound fetches validated
+  a hostname's resolved addresses, then let the HTTP client resolve the same
+  hostname again to connect, so a record that flipped between the two lookups
+  could pass validation on a public address and connect to a private one. A
+  new transport now resolves each request and redirect hop once, validates
+  every returned address, and connects to the validated addresses in order; the
+  URL, `Host` header, SNI, and certificate verification stay on the original
+  hostname. A connect failure falls back to the next validated address, each
+  tried at most once, so a multi-homed host stays reachable.
+  `SSRF_IP_PINNING=false` is the kill switch back to the previous per-request
+  resolution, for isolating a fetch failure the pin might cause.
+
+### Added
+
+- Reviewer verdicts carry a structured `is_ad` boolean alongside the existing
+  prose, with the prose form kept as a fallback when a model omits the field.
+  Contradiction holds, where a verification finding disagrees with a kept
+  pass-1 span, key off the structured field when present, and the telemetry
+  for a hold now emits once per held span instead of two or three times
+  through the different code paths that inspect the same verdict. On a model that emits `is_ad` true for a disputed span, the guard no
+  longer holds it, so spans that used to land in Held for Review are now cut.
+  Installs running the shipped reviewer prompt unedited pick this up on
+  upgrade, since that prompt is re-seeded on startup.
+- `AD_DETECTION_MAX_FAILED_WINDOW_RATIO` (default `0.25`). When this fraction
+  of a detection or verification pass's windows fail on an LLM error or
+  timeout, the whole pass is now treated as failed instead of being accepted
+  with the failed windows unexamined. A failed first pass fails the episode
+  and the retry ladder picks it up. A failed verification pass leaves the
+  first-pass markers and audio as they are, and records the second scan as
+  incomplete rather than clean, which also fixes an all-windows-failed
+  verification run reading as a clean scan. Set to `1.0` to restore the
+  previous behavior. The variable seeds a stored setting that is read on every
+  pass, so the threshold can be retuned without a restart. A pass where only
+  some windows failed is retried rather than published from pattern matches
+  alone, since a provider that answered part of a pass usually answers all of
+  it on the retry.
+- Community patterns carry a staleness-based trust tier: active (matched
+  locally in the last 90 days), unproven (no recent local match), or stale (a
+  community pattern with no local match in the last 90 days and no community
+  confirmation within a year). A new `community_last_confirmed_at` column and optional
+  `last_confirmed_at` corpus field track community confirmation, and the
+  Patterns page shows an Unproven or Stale badge; an active pattern gets no
+  badge.
+- A reviewer calibration self-test (`python -m tools.reviewer_calibration`)
+  runs a labeled corpus of ad and non-ad transcripts through the production
+  reviewer stack and reports verdict agreement plus how often responses carry
+  the structured `is_ad` field. It also runs automatically in a background
+  thread whenever the reviewer model setting changes, including a detection
+  model change while the reviewer is left on `same_as_pass`, storing its result
+  under the `reviewer_calibration_last` setting; a failed or slow run never
+  blocks the settings save. Disable the auto-run with
+  `reviewer_calibration_on_change` (or `REVIEWER_CALIBRATION_ON_CHANGE`).
+- Gunicorn warns at startup when `GUNICORN_WORKERS` is greater than 1 and the
+  rate-limit storage is still the default `memory://`, since limiter counters
+  are per process and the effective limit multiplies by worker count. Login
+  lockout is database-backed and unaffected.
+- Unit tests for the heuristic pre-roll and post-roll detector.
+
 ### Tooling (benchmark; not in runtime image)
 
 - Two models added to the sweep roster: `qwen/qwen3.8-27b` and
@@ -22,6 +171,30 @@ release notes.
 - `qwen/qwen3.8-27b` scores mid-table with brittle JSON and is not a candidate.
 - Fresh pricing snapshot, and the previous report archived to
   `results/archive/2026-08-15/`.
+
+### Changed
+
+- openai 2.53.0 to 3.3.0, which migrates the client onto `httpx2`/`httpcore2`;
+  anthropic 0.120.2 to 0.124.0; wheel to 0.48.0.
+- Frontend: lucide-react to 1.31.0, swagger-ui-dist to 5.32.13, eslint to
+  10.8.1, `@testing-library/user-event` to 14.6.4, `@types/react-dom` to
+  19.2.4.
+- Pass-2 verification reconciliation extracted out of `processing.py` into
+  its own module.
+- Type hints modernized to PEP 585/604 (`list[str]` over `List[str]`, `X |
+  None` over `Optional[X]`), and the ruff lint gate widened from `F` alone to
+  also cover `B904`, `B905`, `S608`, `UP006`, `UP045`, and `UP035`. The
+  database layer's dynamic SQL is audited and exempted from `S608`: the
+  interpolated identifiers are hardcoded or allowlist-validated, and values
+  are always bound parameters.
+- `zip()` calls pairing same-length lists now pass `strict=True`, which raises
+  on a mismatch instead of silently truncating. One of the sites this
+  caught was a latent length mismatch: chapter span end times could carry one
+  more entry than an empty start-time list, which the strict check now
+  prevents from recurring.
+- Exception re-raises now chain explicitly (`raise ... from err` or `from
+  None`), so a traceback shows the real cause instead of only the immediate
+  wrapper.
 
 ## [2.88.3] - 2026-08-14
 

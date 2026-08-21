@@ -239,6 +239,12 @@ class SchemaMixin:
             # non-auth LLM failure published on pattern/cross-fetch markers
             # alone. NULL on a clean run.
             ('detection_degraded', 'TEXT'),
+            # Low-ad-yield policy rerun stamp: set once, ever, when the policy
+            # requeues this episode. NULL means the policy has not fired.
+            ('low_yield_rerun_at', 'TEXT'),
+            # Provenance of the current reprocess_requested_at stamp: 'jit'
+            # for a play request, NULL for a person or an automatic rerun.
+            ('reprocess_source', 'TEXT'),
         ]
         for col, definition in episodes_migrations:
             self._add_column_if_missing(conn, 'episodes', col, definition, ep_cols)
@@ -355,6 +361,12 @@ class SchemaMixin:
             # visibility (NULL/'serve_original' keep, 'hide' drops it).
             ('title_skip_patterns', 'TEXT'),
             ('title_skip_action', 'TEXT'),
+            # Per-feed low-ad-yield action override; NULL = use the global
+            # low_ad_yield_action setting.
+            ('low_ad_yield_action', 'TEXT'),
+            # Per-feed episode run log storage (#660); NULL = follow the
+            # global setting, 'on' = store, 'off' = never store.
+            ('episode_logs', 'TEXT'),
         ]
         for col, definition in podcasts_migrations:
             self._add_column_if_missing(conn, 'podcasts', col, definition, pod_cols)
@@ -472,6 +484,12 @@ class SchemaMixin:
         ap_cols = self._get_table_columns(conn, 'ad_patterns')
         self._add_column_if_missing(conn, 'ad_patterns', 'category', 'TEXT', ap_cols)
 
+        # community_last_confirmed_at (staleness trust tiers): ISO timestamp
+        # the community submitter last re-verified the pattern still airs.
+        # Nullable; feeds compute_pattern_trust alongside created_at.
+        ap_cols = self._get_table_columns(conn, 'ad_patterns')
+        self._add_column_if_missing(conn, 'ad_patterns', 'community_last_confirmed_at', 'TEXT', ap_cols)
+
         # Indexes for source filtering and community_id lookup (idempotent)
         try:
             conn.execute(
@@ -581,7 +599,7 @@ class SchemaMixin:
                 conn.execute(f"""
                     INSERT INTO episodes_new ({columns_str})
                     SELECT {columns_str} FROM episodes
-                """)
+                """)  # noqa: S608
 
                 # 3. Drop old table
                 conn.execute("DROP TABLE episodes")
@@ -667,7 +685,7 @@ class SchemaMixin:
                 conn.execute(f"""
                     INSERT INTO episodes_new ({columns_str})
                     SELECT {columns_str} FROM episodes
-                """)
+                """)  # noqa: S608
 
                 conn.execute("DROP TABLE episodes")
                 conn.execute("ALTER TABLE episodes_new RENAME TO episodes")
@@ -758,7 +776,7 @@ class SchemaMixin:
                 conn.execute(f"""
                     INSERT INTO episodes_new ({columns_str})
                     SELECT {columns_str} FROM episodes
-                """)
+                """)  # noqa: S608
 
                 conn.execute("DROP TABLE episodes")
                 conn.execute("ALTER TABLE episodes_new RENAME TO episodes")
@@ -1167,6 +1185,8 @@ class SchemaMixin:
             ('processing_stats_json', 'TEXT'),
             # MinusPod version that produced this run (2.78.4)
             ('app_version', 'TEXT'),
+            # Run log pointer (#660): data-dir-relative path
+            ('log_file', 'TEXT'),
         ]:
             self._add_column_if_missing(conn, 'processing_history', col, definition, hist_cols)
 
@@ -1509,7 +1529,7 @@ class SchemaMixin:
                     )
                 """)
                 conn.execute(
-                    f"INSERT INTO audio_cue_templates_rebuild ({cue_cols}) "
+                    f"INSERT INTO audio_cue_templates_rebuild ({cue_cols}) "  # noqa: S608
                     f"SELECT {cue_cols} FROM audio_cue_templates"
                 )
                 after = conn.execute(
@@ -1609,7 +1629,7 @@ class SchemaMixin:
                     )
                 """)
                 conn.execute(
-                    f"INSERT INTO cue_detections_rebuild ({cd_cols}) "
+                    f"INSERT INTO cue_detections_rebuild ({cd_cols}) "  # noqa: S608
                     f"SELECT {cd_cols} FROM cue_detections"
                 )
                 after_cd = conn.execute(
@@ -2505,7 +2525,7 @@ class SchemaMixin:
             if updates:
                 fields = ', '.join(f'{k} = ?' for k in updates)
                 conn.execute(
-                    f"UPDATE ad_patterns SET {fields} WHERE id = ?",
+                    f"UPDATE ad_patterns SET {fields} WHERE id = ?",  # noqa: S608
                     list(updates.values()) + [r['id']],
                 )
                 repaired += 1
@@ -2627,7 +2647,7 @@ class SchemaMixin:
             if ids_to_clear:
                 placeholders = ','.join('?' * len(ids_to_clear))
                 conn.execute(
-                    f"UPDATE ad_patterns SET sponsor_id = NULL WHERE id IN ({placeholders})",
+                    f"UPDATE ad_patterns SET sponsor_id = NULL WHERE id IN ({placeholders})",  # noqa: S608
                     ids_to_clear
                 )
                 conn.commit()
@@ -2989,7 +3009,7 @@ class SchemaMixin:
                   r['created_at']) for r in orphans]
             )
             conn.execute(
-                "DELETE FROM audio_fingerprints WHERE id IN "
+                "DELETE FROM audio_fingerprints WHERE id IN "  # noqa: S608
                 f"({','.join('?' * len(orphans))})", [r['id'] for r in orphans]
             )
         # Commit before touching the pragma: it is a no-op inside a transaction.
@@ -3014,7 +3034,7 @@ class SchemaMixin:
                         conn.execute("PRAGMA table_info(audio_fingerprints_new)").fetchall()]
             cols_str = ', '.join(c for c in old_cols if c in new_cols)
             conn.execute(
-                f"INSERT INTO audio_fingerprints_new ({cols_str}) "
+                f"INSERT INTO audio_fingerprints_new ({cols_str}) "  # noqa: S608
                 f"SELECT {cols_str} FROM audio_fingerprints"
             )
             copied = conn.execute(
@@ -3241,7 +3261,7 @@ class SchemaMixin:
             common_ap = [c for c in old_ap_cols if c in new_ap_cols]
             cols_str = ', '.join(common_ap)
             conn.execute(
-                f"INSERT INTO ad_patterns_new ({cols_str}) SELECT {cols_str} FROM ad_patterns"
+                f"INSERT INTO ad_patterns_new ({cols_str}) SELECT {cols_str} FROM ad_patterns"  # noqa: S608
             )
             conn.execute("DROP TABLE ad_patterns")
             conn.execute("ALTER TABLE ad_patterns_new RENAME TO ad_patterns")
@@ -3279,7 +3299,7 @@ class SchemaMixin:
             common_pc = [c for c in old_pc_cols if c in new_pc_cols]
             cols_str = ', '.join(common_pc)
             conn.execute(
-                f"INSERT INTO pattern_corrections_new ({cols_str}) "
+                f"INSERT INTO pattern_corrections_new ({cols_str}) "  # noqa: S608
                 f"SELECT {cols_str} FROM pattern_corrections"
             )
             conn.execute("DROP TABLE pattern_corrections")

@@ -19,7 +19,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 # Defensive sys.path bootstrap so direct `python path/to/script.py` invocation
 # works as well as `python -m src.tools.X` (the workflow-style invocation).
@@ -28,6 +28,7 @@ if str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
 
 from community_export import find_foreign_sponsors  # noqa: E402
+from utils.time import parse_iso_utc  # noqa: E402
 from utils.community_tags import (  # noqa: E402
     BUNDLE_FORMAT,
     BUNDLE_NAME_PREFIX,
@@ -57,17 +58,17 @@ REQUIRED_FIELDS = ('community_id', 'text_template', 'sponsor', 'version', 'submi
 class ValidationResult:
     path: str
     status: str = 'pass'  # 'pass' | 'reject' | 'warn'
-    sponsor: Optional[str] = None
+    sponsor: str | None = None
     sponsor_match: str = 'unknown'  # 'exact' | 'alias' | 'fuzzy' | 'unknown'
     classification: str = 'distinct'  # 'duplicate' | 'variant' | 'distinct'
-    similar_to: Optional[str] = None  # community_id
-    similarity: Optional[float] = None
-    diff_snippet: Optional[str] = None
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
+    similar_to: str | None = None  # community_id
+    similarity: float | None = None
+    diff_snippet: str | None = None
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
-def _classify_sponsor(sponsor_name: str, seed: List[Dict[str, Any]]) -> str:
+def _classify_sponsor(sponsor_name: str, seed: list[dict[str, Any]]) -> str:
     if not sponsor_name:
         return 'unknown'
     lname = sponsor_name.lower()
@@ -84,8 +85,8 @@ def _classify_sponsor(sponsor_name: str, seed: List[Dict[str, Any]]) -> str:
     return 'unknown'
 
 
-def _schema_errors(doc: Dict[str, Any]) -> List[str]:
-    errs: List[str] = []
+def _schema_errors(doc: dict[str, Any]) -> list[str]:
+    errs: list[str] = []
     if not isinstance(doc, dict):
         return ['payload must be a JSON object']
     for k in REQUIRED_FIELDS:
@@ -109,18 +110,23 @@ def _schema_errors(doc: Dict[str, Any]) -> List[str]:
         errs.append('outro_variants must be a list')
     if doc.get('sponsor_tags') is not None and not isinstance(doc['sponsor_tags'], list):
         errs.append('sponsor_tags must be a list')
+    # last_confirmed_at (optional, trust tiers): re-verification timestamp for
+    # a still-airing pattern. Absent is fine; present-but-unparseable is not.
+    if doc.get('last_confirmed_at') is not None:
+        if not isinstance(doc['last_confirmed_at'], str) or parse_iso_utc(doc['last_confirmed_at']) is None:
+            errs.append('last_confirmed_at must be an ISO 8601 UTC string')
     return errs
 
 
-def _tag_errors(doc: Dict[str, Any]) -> List[str]:
+def _tag_errors(doc: dict[str, Any]) -> list[str]:
     vt = valid_tags()
     bad = [t for t in (doc.get('sponsor_tags') or []) if t not in vt]
     return [f'unknown tag: {t}' for t in bad]
 
 
-def _quality_errors(doc: Dict[str, Any]) -> List[str]:
+def _quality_errors(doc: dict[str, Any]) -> list[str]:
     """Defense-in-depth: re-run the same quality gates from the export side."""
-    errs: List[str] = []
+    errs: list[str] = []
     text = doc.get('text_template') or ''
     if len(text) < 50:
         errs.append(f'text_template too short ({len(text)} < 50)')
@@ -139,7 +145,7 @@ def _quality_errors(doc: Dict[str, Any]) -> List[str]:
     return errs
 
 
-def _filename_errors(path: str, doc: Dict[str, Any]) -> List[str]:
+def _filename_errors(path: str, doc: dict[str, Any]) -> list[str]:
     """Reject when the on-disk filename does not equal slugify(sponsor)-<short>.json.
 
     Caught the v2.5.x PR #292 footgun where a contributor hand-edited the
@@ -163,7 +169,7 @@ def _filename_errors(path: str, doc: Dict[str, Any]) -> List[str]:
     ]
 
 
-def _truncation_warnings(doc: Dict[str, Any]) -> List[str]:
+def _truncation_warnings(doc: dict[str, Any]) -> list[str]:
     """Warn when an intro/outro variant looks cut mid-clause.
 
     Heuristic: strip trailing punctuation, split into tokens; flag the variant
@@ -174,7 +180,7 @@ def _truncation_warnings(doc: Dict[str, Any]) -> List[str]:
     and just clutters the pattern. Warning only -- the variant could still be
     a legitimate anchor.
     """
-    warnings: List[str] = []
+    warnings: list[str] = []
     for kind in ('intro_variants', 'outro_variants'):
         for i, v in enumerate(doc.get(kind) or []):
             if not isinstance(v, str):
@@ -207,7 +213,7 @@ def _truncation_warnings(doc: Dict[str, Any]) -> List[str]:
     return warnings
 
 
-def _file_shape_warnings(path: str, raw: Dict[str, Any]) -> List[str]:
+def _file_shape_warnings(path: str, raw: dict[str, Any]) -> list[str]:
     """Surface filename / payload-shape mismatches.
 
     - Bundle payload in a `<slug>-<short>.json`-shaped file: probably a hand
@@ -241,7 +247,7 @@ def _file_shape_warnings(path: str, raw: Dict[str, Any]) -> List[str]:
     return []
 
 
-def _single_pattern_errors(doc: Dict[str, Any], seed: List[Dict[str, Any]]) -> List[str]:
+def _single_pattern_errors(doc: dict[str, Any], seed: list[dict[str, Any]]) -> list[str]:
     """Reject submissions that stitch multiple ads together.
 
     Delegates to the shared `find_foreign_sponsors` helper so the import
@@ -270,7 +276,7 @@ def _diff_snippet(incoming: str, existing: str, n: int = 200) -> str:
     return f'incoming: "{inc}"\nexisting: "{exi}"'
 
 
-def dedupe(doc: Dict[str, Any], existing: List[Dict[str, Any]]) -> Tuple[str, Optional[Dict[str, Any]], float]:
+def dedupe(doc: dict[str, Any], existing: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | None, float]:
     """Compare `doc` against `existing` patterns sharing the same sponsor.
 
     Returns (classification, matched_existing_doc_or_None, best_score).
@@ -284,7 +290,7 @@ def dedupe(doc: Dict[str, Any], existing: List[Dict[str, Any]]) -> Tuple[str, Op
         return 'distinct', None, 0.0
 
     best_score = 0.0
-    best_match: Optional[Dict[str, Any]] = None
+    best_match: dict[str, Any] | None = None
     for ex in existing:
         if (ex.get('sponsor') or '').lower() != sponsor:
             continue
@@ -303,9 +309,9 @@ def dedupe(doc: Dict[str, Any], existing: List[Dict[str, Any]]) -> Tuple[str, Op
 
 def validate_doc(
     path: str,
-    doc: Dict[str, Any],
-    seed: List[Dict[str, Any]],
-    existing: List[Dict[str, Any]],
+    doc: dict[str, Any],
+    seed: list[dict[str, Any]],
+    existing: list[dict[str, Any]],
 ) -> ValidationResult:
     """Validate a single pattern doc against the seed list and existing patterns."""
     result = ValidationResult(path=path, sponsor=doc.get('sponsor'))
@@ -379,7 +385,7 @@ def validate_doc(
     return result
 
 
-def _extract_patterns(path: str, raw: Any) -> List[Tuple[str, Dict[str, Any]]]:
+def _extract_patterns(path: str, raw: Any) -> list[tuple[str, dict[str, Any]]]:
     """Yield (synthetic_path, pattern_doc) for any payload shape.
 
     A flat per-pattern file returns ``[(path, raw)]``. A bundle file returns
@@ -396,12 +402,12 @@ def _extract_patterns(path: str, raw: Any) -> List[Tuple[str, Dict[str, Any]]]:
     return [(path, raw)]
 
 
-def _load_existing_patterns(community_dir: Path) -> List[Dict[str, Any]]:
+def _load_existing_patterns(community_dir: Path) -> list[dict[str, Any]]:
     """Load every JSON file in patterns/community/ (recursive) as existing patterns.
 
     Bundle files contribute every pattern in their ``patterns[]`` array.
     """
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     if not community_dir.exists():
         return out
     for p in community_dir.rglob('*.json'):
@@ -418,7 +424,7 @@ def _load_existing_patterns(community_dir: Path) -> List[Dict[str, Any]]:
     return out
 
 
-def render_markdown_comment(results: List[ValidationResult]) -> str:
+def render_markdown_comment(results: list[ValidationResult]) -> str:
     """Render a single Markdown comment for the PR summarizing all results.
 
     Each section links back to the relevant part of `patterns/CONTRIBUTING.md`
@@ -432,7 +438,7 @@ def render_markdown_comment(results: List[ValidationResult]) -> str:
         '(../blob/main/patterns/README.md#how-to-add-a-sponsor-to-the-seed-list)'
     )
 
-    lines: List[str] = ['## Community pattern validation', '']
+    lines: list[str] = ['## Community pattern validation', '']
     rejected = [r for r in results if r.status == 'reject']
     warned = [r for r in results if r.status == 'warn']
     passed = [r for r in results if r.status == 'pass']
@@ -482,8 +488,8 @@ def render_markdown_comment(results: List[ValidationResult]) -> str:
     return '\n'.join(lines).rstrip() + '\n'
 
 
-def run(pr_files: List[str], comment_output: Optional[str] = None,
-        status_output: Optional[str] = None) -> int:
+def run(pr_files: list[str], comment_output: str | None = None,
+        status_output: str | None = None) -> int:
     """CLI driver. Returns 0 when no rejections, 1 otherwise."""
     seed = sponsor_seed()
     repo_root = _REPO_SRC.parent
@@ -510,7 +516,7 @@ def run(pr_files: List[str], comment_output: Optional[str] = None,
     if pr_community_ids:
         existing = [e for e in existing if e.get('community_id') not in pr_community_ids]
 
-    results: List[ValidationResult] = []
+    results: list[ValidationResult] = []
     for path in pr_files:
         p = Path(path)
         if not p.exists():
@@ -558,7 +564,7 @@ def run(pr_files: List[str], comment_output: Optional[str] = None,
     return 1 if rejected else 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description='Validate community pattern submissions.')
     parser.add_argument('--pr-files', nargs='+', required=True,
                         help='One or more JSON file paths from the PR diff.')

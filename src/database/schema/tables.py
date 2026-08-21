@@ -81,6 +81,12 @@ TABLE_DDL['podcasts'] = """CREATE TABLE IF NOT EXISTS podcasts (
     -- Served-RSS handling for a blacklisted episode: NULL/'serve_original'
     -- keeps it in the feed untouched, 'hide' drops it from the served feed.
     title_skip_action TEXT,
+    -- Per-feed low-ad-yield action override: NULL = use the global
+    -- low_ad_yield_action setting.
+    low_ad_yield_action TEXT,
+    -- Per-feed episode run log storage (#660): NULL = follow the global
+    -- setting, 'on' = store, 'off' = never store.
+    episode_logs TEXT,
     max_episodes INTEGER,
     only_expose_processed_episodes INTEGER,
     tags TEXT NOT NULL DEFAULT '[]',
@@ -119,6 +125,12 @@ TABLE_DDL['episodes'] = """CREATE TABLE IF NOT EXISTS episodes (
     deferred_at TEXT,
     deferred_service TEXT,
     ad_detection_status TEXT DEFAULT NULL CHECK(ad_detection_status IN (NULL, 'success', 'failed')),
+    -- Low-ad-yield policy rerun stamp: set once, ever, when the policy
+    -- requeues this episode. NULL means it has not fired.
+    low_yield_rerun_at TEXT,
+    -- Provenance of the current reprocess_requested_at stamp: 'jit' for a
+    -- play request, NULL for a person or an automatic rerun.
+    reprocess_source TEXT,
     artwork_url TEXT,
     episode_number INTEGER,
     -- Upstream podcast:chapters JSON URL, captured at RSS discovery/refresh
@@ -199,7 +211,8 @@ TABLE_DDL['ad_patterns'] = """CREATE TABLE IF NOT EXISTS ad_patterns (
     protected_from_sync INTEGER NOT NULL DEFAULT 0,
     source_language TEXT,
     content_hash TEXT,
-    category TEXT
+    category TEXT,
+    community_last_confirmed_at TEXT
 )"""
 
 TABLE_DDL['pattern_corrections'] = """CREATE TABLE IF NOT EXISTS pattern_corrections (
@@ -273,6 +286,9 @@ TABLE_DDL['processing_history'] = """CREATE TABLE IF NOT EXISTS processing_histo
     -- MinusPod version that produced this run (2.78.4); NULL for rows
     -- recorded before this release.
     app_version TEXT,
+    -- Run log pointer (#660): path relative to the data dir. NULL when the
+    -- run stored no log or the sweep pruned it.
+    log_file TEXT,
     FOREIGN KEY (podcast_id) REFERENCES podcasts(id) ON DELETE CASCADE
 )"""
 

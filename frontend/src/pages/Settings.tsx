@@ -8,7 +8,7 @@ import { getReviewerSettings, updateReviewerSettings } from '../api/community';
 import { getErrorMessage } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import LoadingSpinner from '../components/LoadingSpinner';
-import type { BadgePosition, LlmProvider, WhisperBackend, WhisperApiConfig, UpdateSettingsPayload, Settings as SettingsShape } from '../api/types';
+import type { BadgePosition, EpisodeLogLevel, LowAdYieldAction, LlmProvider, WhisperBackend, WhisperApiConfig, UpdateSettingsPayload, Settings as SettingsShape } from '../api/types';
 
 import SystemStatusSection from './settings/SystemStatusSection';
 import StorageRetentionSection from './settings/StorageRetentionSection';
@@ -236,6 +236,9 @@ function Settings() {
   const [onlyExposeProcessedDefault, setOnlyExposeProcessedDefault] = useState(false);
   const [artworkWatermarkEnabled, setArtworkWatermarkEnabled] = useState(false);
   const [artworkBadgePosition, setArtworkBadgePosition] = useState<BadgePosition>('bottom-right');
+  const [lowAdYieldAction, setLowAdYieldAction] = useState<LowAdYieldAction>('nothing');
+  const [episodeLogRetentionDays, setEpisodeLogRetentionDays] = useState(30);
+  const [episodeLogLevel, setEpisodeLogLevel] = useState<EpisodeLogLevel>('debug');
   const [audioBitrate, setAudioBitrate] = useState('');
   const [audioNormalizeEnabled, setAudioNormalizeEnabled] = useState(false);
   const [audioNormalizeIntensity, setAudioNormalizeIntensity] = useState('normal');
@@ -491,6 +494,9 @@ function Settings() {
     { key: 'onlyExposeProcessedDefault', kind: 'val', useDefault: true, value: onlyExposeProcessedDefault, set: setOnlyExposeProcessedDefault },
     { key: 'artworkWatermarkEnabled', kind: 'val', useDefault: true, value: artworkWatermarkEnabled, set: setArtworkWatermarkEnabled },
     { key: 'artworkBadgePosition', kind: 'str', useDefault: true, value: artworkBadgePosition, set: (v) => setArtworkBadgePosition(v as BadgePosition) },
+    { key: 'lowAdYieldAction', kind: 'str', useDefault: true, value: lowAdYieldAction, set: (v) => setLowAdYieldAction(v as LowAdYieldAction) },
+    { key: 'episodeLogRetentionDays', kind: 'val', useDefault: true, literal: 30, value: episodeLogRetentionDays, set: setEpisodeLogRetentionDays },
+    { key: 'episodeLogLevel', kind: 'str', useDefault: true, value: episodeLogLevel, set: (v) => setEpisodeLogLevel(v as EpisodeLogLevel) },
     { key: 'vttTranscriptsEnabled', kind: 'val', useDefault: true, value: vttTranscriptsEnabled, set: setVttTranscriptsEnabled },
     { key: 'chaptersEnabled', kind: 'val', useDefault: true, value: chaptersEnabled, set: setChaptersEnabled },
     { key: 'maxFeedEpisodes', kind: 'val', useDefault: true, value: maxFeedEpisodes, set: setMaxFeedEpisodes },
@@ -795,6 +801,9 @@ function Settings() {
         processingEpisodes={processingEpisodes}
         onCancel={(params) => cancelMutation.mutate(params)}
         cancelIsPending={cancelMutation.isPending}
+        cancelingKey={cancelMutation.variables
+          ? `${cancelMutation.variables.slug}:${cancelMutation.variables.episodeId}`
+          : null}
       />
 
       {/* Settings search: filters the configurable sections below by matching a
@@ -888,6 +897,12 @@ function Settings() {
         onOnlyExposeProcessedDefaultChange={setOnlyExposeProcessedDefault}
         processNewEpisodesFirst={settings?.processNewEpisodesFirst?.value ?? settings?.defaults?.processNewEpisodesFirst ?? true}
         onProcessNewEpisodesFirstChange={(v) => tunableMutation.mutate({ processNewEpisodesFirst: v })}
+        lowAdYieldAction={lowAdYieldAction}
+        onLowAdYieldActionChange={setLowAdYieldAction}
+        episodeLogRetentionDays={episodeLogRetentionDays}
+        onEpisodeLogRetentionDaysChange={setEpisodeLogRetentionDays}
+        episodeLogLevel={episodeLogLevel}
+        onEpisodeLogLevelChange={setEpisodeLogLevel}
       />
 
       <SegmentActionsSection

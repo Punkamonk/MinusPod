@@ -63,6 +63,8 @@ export interface Feed {
   // Per-feed auto-process queue priority (#625). Server always resolves to
   // one of the three values; null/absent reads as 'normal'.
   queuePriority?: 'high' | 'normal' | 'low' | null;
+  lowAdYieldAction?: LowAdYieldAction | null;
+  episodeLogs?: EpisodeLogsOverride | null;
   cueTemplateScoreOverride?: number | null;
   cueCreateFromPairsOverride?: boolean | null;
   cuePairMinBreakOverride?: number | null;
@@ -272,7 +274,25 @@ export interface EpisodeProcessingRun {
   inputTokens: number;
   outputTokens: number;
   llmCost: number;
+  // True when this run stored a pipeline log the run-log endpoint can serve.
+  hasLog?: boolean;
   stats: ProcessingRunStats | null;
+}
+
+// One captured pipeline log line (#660).
+export interface RunLogLine {
+  ts: string;
+  level: string;
+  logger: string;
+  msg: string;
+}
+
+export interface RunLogResponse {
+  runNumber: number;
+  lines: RunLogLine[];
+  // True when the run hit the size cap and stopped writing.
+  truncated: boolean;
+  bytes: number;
 }
 
 // Per-cue detection telemetry (#350 follow-up). One row per template cue the
@@ -381,6 +401,12 @@ export interface SettingValueNumber {
 export type LlmProvider = 'anthropic' | 'openai-compatible' | 'ollama' | 'openrouter';
 // Corner the MinusPod cover-art badge renders in (issue #600).
 export type BadgePosition = 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left';
+// Automatic response to a run that removed far less ad time than the feed
+// usually yields. Per-feed null means "use the global setting".
+export type LowAdYieldAction = 'nothing' | 'redetect' | 'reprocess' | 'full';
+// Per-feed run log storage (#660); null means "follow the global setting".
+export type EpisodeLogsOverride = 'on' | 'off';
+export type EpisodeLogLevel = 'debug' | 'info';
 export type WhisperBackend = 'local' | 'openai-api';
 
 export interface WhisperApiConfig {
@@ -427,6 +453,9 @@ export interface Settings {
   processNewEpisodesFirst: SettingValueBoolean;
   artworkWatermarkEnabled: SettingValueBoolean;
   artworkBadgePosition: SettingValue;
+  lowAdYieldAction: SettingValue;
+  episodeLogRetentionDays: SettingValueNumber;
+  episodeLogLevel: SettingValue;
   feedAuthEnabled: SettingValueBoolean;
   feedAuthKey: string | null;
   // User agents served original audio instead of triggering JIT processing.
@@ -520,6 +549,7 @@ export interface Settings {
     processNewEpisodesFirst: boolean;
     artworkWatermarkEnabled: boolean;
     artworkBadgePosition: string;
+    lowAdYieldAction: string;
     feedAuthEnabled: boolean;
     vttTranscriptsEnabled: boolean;
     chaptersEnabled: boolean;
@@ -613,6 +643,9 @@ export interface UpdateSettingsPayload {
   processNewEpisodesFirst?: boolean;
   artworkWatermarkEnabled?: boolean;
   artworkBadgePosition?: string;
+  lowAdYieldAction?: LowAdYieldAction;
+  episodeLogRetentionDays?: number;
+  episodeLogLevel?: EpisodeLogLevel;
   feedAuthEnabled?: boolean;
   jitBlockedUserAgents?: string[];
   audioBitrate?: string;

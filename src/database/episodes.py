@@ -3,7 +3,7 @@ import json
 import logging
 import sqlite3
 from email.utils import parsedate_to_datetime
-from typing import ClassVar, Optional, Dict, List, Tuple
+from typing import ClassVar
 
 from utils.constants import EpisodeStatus
 
@@ -22,7 +22,7 @@ AD_DATA_NULL_SET_SQL = """SET ad_markers_json = NULL,
                    applied_cuts_json = NULL"""
 
 
-def normalize_published_at(value: Optional[str]) -> Optional[str]:
+def normalize_published_at(value: str | None) -> str | None:
     """Normalize a published_at value to ISO 8601 format.
 
     Handles RFC 2822 (e.g. 'Tue, 10 Mar 2026 19:10:06 PDT') and passes
@@ -39,7 +39,7 @@ def normalize_published_at(value: Optional[str]) -> Optional[str]:
         return value
 
 
-def _serialize_applied_cut(cut: Dict) -> Dict:
+def _serialize_applied_cut(cut: dict) -> dict:
     """Trim an applied-cut dict to the fields persisted in applied_cuts_json.
 
     'replacement_duration' (see audio_processor.compute_applied_cuts) is kept
@@ -61,7 +61,7 @@ class EpisodeMixin:
 
     def get_episodes(self, slug: str, status: str = None,
                      limit: int = 50, offset: int = 0,
-                     sort_by: str = 'created_at', sort_dir: str = 'desc') -> Tuple[List[Dict], int]:
+                     sort_by: str = 'created_at', sort_dir: str = 'desc') -> tuple[list[dict], int]:
         """Get episodes for a podcast with pagination and sorting."""
         conn = self.get_connection()
 
@@ -82,7 +82,7 @@ class EpisodeMixin:
 
         # Get total count
         cursor = conn.execute(
-            f"SELECT COUNT(*) FROM episodes e {where_clause}",
+            f"SELECT COUNT(*) FROM episodes e {where_clause}",  # noqa: S608
             params
         )
         total = cursor.fetchone()[0]
@@ -104,14 +104,14 @@ class EpisodeMixin:
             f"""SELECT e.* FROM episodes e
                 {where_clause}
                 {order_clause}
-                LIMIT ? OFFSET ?""",
+                LIMIT ? OFFSET ?""",  # noqa: S608
             params
         )
 
         episodes = [dict(row) for row in cursor.fetchall()]
         return episodes, total
 
-    def get_episode(self, slug: str, episode_id: str) -> Optional[Dict]:
+    def get_episode(self, slug: str, episode_id: str) -> dict | None:
         """Get episode by slug and episode_id."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -132,7 +132,7 @@ class EpisodeMixin:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-    def get_episode_neighbors(self, slug: str, episode_id: str) -> Dict[str, Optional[Dict]]:
+    def get_episode_neighbors(self, slug: str, episode_id: str) -> dict[str, dict | None]:
         """Adjacent episodes in the same feed, by the feed's default newest-first
         order. The total order is (COALESCE(published_at, created_at), id); `id`
         is a stable tiebreak so episodes sharing a timestamp are deterministic.
@@ -155,13 +155,13 @@ class EpisodeMixin:
         if not cur:
             return empty
 
-        def _neighbor(comparison: str, direction: str) -> Optional[Dict]:
+        def _neighbor(comparison: str, direction: str) -> dict | None:
             row = conn.execute(
                 f"""SELECT episode_id, title FROM episodes
                     WHERE podcast_id = ?
                       AND (COALESCE(published_at, created_at), id) {comparison} (?, ?)
                     ORDER BY COALESCE(published_at, created_at) {direction}, id {direction}
-                    LIMIT 1""",
+                    LIMIT 1""",  # noqa: S608
                 (podcast_id, cur['k'], cur['id'])
             ).fetchone()
             return {'id': row['episode_id'], 'title': row['title']} if row else None
@@ -171,7 +171,7 @@ class EpisodeMixin:
             'next': _neighbor('<', 'DESC'),      # older: largest key below current
         }
 
-    def get_episode_statuses_for_podcast(self, slug: str) -> Tuple[Dict[str, str], Dict[Tuple[str, str], str]]:
+    def get_episode_statuses_for_podcast(self, slug: str) -> tuple[dict[str, str], dict[tuple[str, str], str]]:
         """Bulk-load episode statuses for a podcast (lightweight, no JOINs to details).
 
         Returns:
@@ -220,6 +220,10 @@ class EpisodeMixin:
         if row:
             # Update existing episode
             db_id = row['id']
+            # Provenance travels with the stamp: a write that re-stamps
+            # reprocess_requested_at without naming a source clears the old one.
+            if 'reprocess_requested_at' in kwargs and 'reprocess_source' not in kwargs:
+                kwargs = dict(kwargs, reprocess_source=None)
             if kwargs:
                 fields = []
                 values = []
@@ -231,7 +235,8 @@ class EpisodeMixin:
                                'error_message', 'ad_detection_status', 'artwork_url',
                                'reprocess_mode', 'reprocess_requested_at', 'retry_count',
                                'published_at', 'episode_number',
-                               'deferred_at', 'deferred_service', 'detection_degraded'):
+                               'deferred_at', 'deferred_service', 'detection_degraded',
+                               'low_yield_rerun_at', 'reprocess_source'):
                         fields.append(f"{key} = ?")
                         values.append(value)
                     elif key == 'tags':
@@ -244,7 +249,7 @@ class EpisodeMixin:
                     fields.append("updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')")
                     values.append(db_id)
                     conn.execute(
-                        f"UPDATE episodes SET {', '.join(fields)} WHERE id = ?",
+                        f"UPDATE episodes SET {', '.join(fields)} WHERE id = ?",  # noqa: S608
                         values
                     )
                     conn.commit()
@@ -257,8 +262,8 @@ class EpisodeMixin:
                     new_duration, ads_removed, ads_removed_firstpass, ads_removed_secondpass,
                     error_message, ad_detection_status, artwork_url, episode_number,
                     retry_count, published_at, deferred_at, deferred_service,
-                    reprocess_requested_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    reprocess_requested_at, reprocess_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     podcast_id,
                     episode_id,
@@ -281,7 +286,8 @@ class EpisodeMixin:
                     kwargs.get('published_at'),
                     kwargs.get('deferred_at'),
                     kwargs.get('deferred_service'),
-                    kwargs.get('reprocess_requested_at')
+                    kwargs.get('reprocess_requested_at'),
+                    kwargs.get('reprocess_source')
                 )
             )
             db_id = cursor.lastrowid
@@ -289,7 +295,7 @@ class EpisodeMixin:
 
         return db_id
 
-    def _get_episode_db_id(self, slug: str, episode_id: str) -> Optional[int]:
+    def _get_episode_db_id(self, slug: str, episode_id: str) -> int | None:
         """Lightweight lookup: resolve (slug, episode_id) to the episodes.id PK.
 
         Only joins episodes + podcasts (skips episode_details).
@@ -309,12 +315,12 @@ class EpisodeMixin:
                             transcript_text: str = None,
                             transcript_vtt: str = None,
                             chapters_json: str = None,
-                            ad_markers: List[Dict] = None,
+                            ad_markers: list[dict] = None,
                             first_pass_response: str = None,
                             first_pass_prompt: str = None,
                             second_pass_prompt: str = None,
                             second_pass_response: str = None,
-                            pending_review_count: Optional[int] = None):
+                            pending_review_count: int | None = None):
         """Save or update episode details (transcript, VTT, chapters, ad markers, pass data).
 
         pending_review_count, when provided, is written to episodes.pending_review_count
@@ -367,7 +373,7 @@ class EpisodeMixin:
             if updates:
                 values.append(row['id'])
                 conn.execute(
-                    f"UPDATE episode_details SET {', '.join(updates)} WHERE id = ?",
+                    f"UPDATE episode_details SET {', '.join(updates)} WHERE id = ?",  # noqa: S608
                     values
                 )
         else:
@@ -429,7 +435,7 @@ class EpisodeMixin:
         row = cursor.fetchone()
         return row['original_transcript_text'] if row else None
 
-    def save_original_segments(self, slug: str, episode_id: str, segments: List[Dict]):
+    def save_original_segments(self, slug: str, episode_id: str, segments: list[dict]):
         """Save original (pre-cut) Whisper segments as JSON. Write-once."""
         conn = self.get_connection()
 
@@ -452,7 +458,7 @@ class EpisodeMixin:
         conn.commit()
         logger.debug(f"[{slug}:{episode_id}] Saved {len(segments)} original segments to database")
 
-    def save_final_segments(self, slug: str, episode_id: str, segments: List[Dict]):
+    def save_final_segments(self, slug: str, episode_id: str, segments: list[dict]):
         """Save final (post-cut) segments as JSON. Overwrites on reprocess."""
         conn = self.get_connection()
 
@@ -473,7 +479,7 @@ class EpisodeMixin:
         conn.commit()
         logger.debug(f"[{slug}:{episode_id}] Saved {len(segments)} final segments to database")
 
-    def save_applied_cuts(self, slug: str, episode_id: str, cuts: List[Dict]):
+    def save_applied_cuts(self, slug: str, episode_id: str, cuts: list[dict]):
         """Save the applied cut list (original-episode coordinates) the served
         chapters JSON was generated against. Overwrites on reprocess/recut.
 
@@ -506,7 +512,7 @@ class EpisodeMixin:
         logger.debug(f"[{slug}:{episode_id}] Saved {len(cuts)} applied cut(s) to database")
 
     def save_chapters_and_applied_cuts(self, slug: str, episode_id: str,
-                                       chapters_json: str, cuts: List[Dict]):
+                                       chapters_json: str, cuts: list[dict]):
         """Persist chapters JSON and the applied cut list it was generated
         against as ONE upsert (single statement, single commit).
 
@@ -536,7 +542,7 @@ class EpisodeMixin:
         conn.commit()
         logger.debug(f"[{slug}:{episode_id}] Saved chapters JSON + {len(cuts)} applied cut(s) atomically")
 
-    def get_applied_cuts(self, slug: str, episode_id: str) -> Optional[List[Dict]]:
+    def get_applied_cuts(self, slug: str, episode_id: str) -> list[dict] | None:
         """Get the persisted applied cut list, or None when never persisted.
 
         None (column NULL) means no authoritative cuts exist (episode rendered
@@ -560,7 +566,7 @@ class EpisodeMixin:
         except (TypeError, ValueError):
             return None
 
-    def get_original_segments(self, slug: str, episode_id: str) -> Optional[List[Dict]]:
+    def get_original_segments(self, slug: str, episode_id: str) -> list[dict] | None:
         """Get original (pre-cut) Whisper segments as a list, or None."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -575,7 +581,7 @@ class EpisodeMixin:
             return None
         return json.loads(row['original_segments_json'])
 
-    def get_final_segments(self, slug: str, episode_id: str) -> Optional[List[Dict]]:
+    def get_final_segments(self, slug: str, episode_id: str) -> list[dict] | None:
         """Get final (post-cut) segments as a list, or None."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -770,7 +776,7 @@ class EpisodeMixin:
         return row is not None
 
     def get_recent_ad_yields(self, podcast_id: int, exclude_episode_id: str,
-                             limit: int = 5) -> List[float]:
+                             limit: int = 5) -> list[float]:
         """Seconds of ad time removed from the feed's most recently processed
         episodes, excluding the given one. Baseline for the low-ad-yield
         comparison (#519)."""
@@ -785,7 +791,7 @@ class EpisodeMixin:
         ).fetchall()
         return [row['removed'] for row in rows if row['removed'] is not None]
 
-    def get_detection_rows(self) -> List[Dict]:
+    def get_detection_rows(self) -> list[dict]:
         """All episodes that have ad markers, with feed metadata, for the
         cross-episode ad review endpoint."""
         conn = self.get_connection()
@@ -803,7 +809,7 @@ class EpisodeMixin:
         ''')
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_processed_episodes_for_feed(self, podcast_id: int) -> List[Dict]:
+    def get_processed_episodes_for_feed(self, podcast_id: int) -> list[dict]:
         """Get all processed episodes with files for inclusion in RSS feed."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -820,9 +826,9 @@ class EpisodeMixin:
     _EPISODE_JSON_COLS = frozenset({'ad_markers_json', 'audio_analysis_json'})
 
     def _get_recent_episode_json_col(self, slug: str, col: str,
-                                     exclude_episode_id: Optional[str] = None,
+                                     exclude_episode_id: str | None = None,
                                      limit: int = 30,
-                                     min_duration: float = 60) -> List[Dict]:
+                                     min_duration: float = 60) -> list[dict]:
         """Shared query for fetching a JSON detail column from recent processed episodes."""
         if col not in self._EPISODE_JSON_COLS:
             raise ValueError(f"Invalid column: {col!r}")
@@ -837,15 +843,15 @@ class EpisodeMixin:
                      AND e.original_duration > ?
                      AND ed.{col} IS NOT NULL
                ORDER BY COALESCE(e.published_at, e.created_at) DESC
-               LIMIT ?""",
+               LIMIT ?""",  # noqa: S608
             (slug, exclude_episode_id, min_duration, limit)
         )
         return [dict(row) for row in cursor.fetchall()]
 
     def get_recent_episode_ad_history(self, slug: str,
-                                      exclude_episode_id: Optional[str] = None,
+                                      exclude_episode_id: str | None = None,
                                       limit: int = 30,
-                                      min_duration: float = 60) -> List[Dict]:
+                                      min_duration: float = 60) -> list[dict]:
         """Get recent processed episodes' ad markers for positional prior learning.
 
         Returns newest-first rows with episode_id, original_duration and the raw
@@ -856,9 +862,9 @@ class EpisodeMixin:
             slug, 'ad_markers_json', exclude_episode_id, limit, min_duration)
 
     def get_recent_audio_analyses(self, slug: str,
-                                  exclude_episode_id: Optional[str] = None,
+                                  exclude_episode_id: str | None = None,
                                   limit: int = 5,
-                                  min_duration: float = 60) -> List[Dict]:
+                                  min_duration: float = 60) -> list[dict]:
         """Get recent processed episodes' audio analysis for splice calibration.
 
         Returns newest-first rows with episode_id, original_duration and the
@@ -867,7 +873,7 @@ class EpisodeMixin:
         return self._get_recent_episode_json_col(
             slug, 'audio_analysis_json', exclude_episode_id, limit, min_duration)
 
-    def get_episodes_by_ids(self, slug: str, episode_ids: List[str]) -> List[Dict]:
+    def get_episodes_by_ids(self, slug: str, episode_ids: list[str]) -> list[dict]:
         """Get multiple episodes by slug and episode_ids in a single query."""
         if not episode_ids:
             return []
@@ -877,12 +883,12 @@ class EpisodeMixin:
             f"""SELECT e.*, p.slug
                 FROM episodes e
                 JOIN podcasts p ON e.podcast_id = p.id
-                WHERE p.slug = ? AND e.episode_id IN ({placeholders})""",
+                WHERE p.slug = ? AND e.episode_id IN ({placeholders})""",  # noqa: S608
             [slug] + list(episode_ids)
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def batch_clear_episode_details(self, slug: str, episode_ids: List[str]) -> None:
+    def batch_clear_episode_details(self, slug: str, episode_ids: list[str]) -> None:
         """Clear episode_details for multiple episodes in one query."""
         if not episode_ids:
             return
@@ -893,16 +899,16 @@ class EpisodeMixin:
         conn = self.get_connection()
         placeholders = ','.join('?' for _ in db_ids)
         conn.execute(
-            f"DELETE FROM episode_details WHERE episode_id IN ({placeholders})",
+            f"DELETE FROM episode_details WHERE episode_id IN ({placeholders})",  # noqa: S608
             db_ids
         )
         conn.execute(
-            f"UPDATE episodes SET pending_review_count = 0 WHERE id IN ({placeholders})",
+            f"UPDATE episodes SET pending_review_count = 0 WHERE id IN ({placeholders})",  # noqa: S608
             db_ids
         )
         conn.commit()
 
-    def batch_clear_episode_ad_data(self, slug: str, episode_ids: List[str]) -> None:
+    def batch_clear_episode_ad_data(self, slug: str, episode_ids: list[str]) -> None:
         """Clear ad-detection outputs for multiple episodes while PRESERVING
         their transcripts (issue #349 LLM-only bulk reprocess). UPDATE-to-NULL
         mirror of ``batch_clear_episode_details``; see ``clear_episode_ad_data``
@@ -922,12 +928,12 @@ class EpisodeMixin:
             db_ids
         )
         conn.execute(
-            f"UPDATE episodes SET pending_review_count = 0 WHERE id IN ({placeholders})",
+            f"UPDATE episodes SET pending_review_count = 0 WHERE id IN ({placeholders})",  # noqa: S608
             db_ids
         )
         conn.commit()
 
-    def batch_reset_episodes_to_discovered(self, slug: str, episode_ids: List[str]) -> None:
+    def batch_reset_episodes_to_discovered(self, slug: str, episode_ids: list[str]) -> None:
         """Reset multiple episodes to discovered state in one query."""
         if not episode_ids:
             return
@@ -944,12 +950,12 @@ class EpisodeMixin:
                 ads_removed = 0, ads_removed_firstpass = 0, ads_removed_secondpass = 0,
                 error_message = NULL, ad_detection_status = NULL,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-            WHERE podcast_id = ? AND episode_id IN ({placeholders})""",
+            WHERE podcast_id = ? AND episode_id IN ({placeholders})""",  # noqa: S608
             [podcast['id']] + list(episode_ids)
         )
         conn.commit()
 
-    def bulk_upsert_discovered_episodes(self, slug: str, episodes: List[Dict]) -> int:
+    def bulk_upsert_discovered_episodes(self, slug: str, episodes: list[dict]) -> int:
         """Insert or update episodes as 'discovered'.
 
         On conflict, backfills empty title/description from new data but
@@ -1093,7 +1099,7 @@ class EpisodeMixin:
             ad_detection_status=None,
         )
 
-    def batch_set_episodes_pending(self, slug: str, episode_ids: List[str],
+    def batch_set_episodes_pending(self, slug: str, episode_ids: list[str],
                                     reprocess_mode: str = None,
                                     reprocess_requested_at: str = None) -> int:
         """Set multiple episodes to pending status in one query."""
@@ -1109,15 +1115,16 @@ class EpisodeMixin:
             f"""UPDATE episodes SET
                 status = 'pending', retry_count = 0, error_message = NULL,
                 reprocess_mode = ?, reprocess_requested_at = ?,
+                reprocess_source = NULL,
                 deferred_at = NULL, deferred_service = NULL,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-            WHERE podcast_id = ? AND episode_id IN ({placeholders})""",
+            WHERE podcast_id = ? AND episode_id IN ({placeholders})""",  # noqa: S608
             params
         )
         conn.commit()
         return cursor.rowcount
 
-    def delete_episodes(self, slug: str, episode_ids: List[str], storage) -> Tuple[int, float]:
+    def delete_episodes(self, slug: str, episode_ids: list[str], storage) -> tuple[int, float]:
         """Delete audio files and reset episodes to 'discovered'.
 
         Does NOT delete DB rows. Does NOT touch processing_history.

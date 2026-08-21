@@ -9,7 +9,7 @@ Package layout:
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Optional, NamedTuple
+from typing import NamedTuple
 
 from audio_enforcer import AudioEnforcer
 from cancel import _check_cancel
@@ -21,6 +21,7 @@ from llm_client import (
     get_effective_provider, model_matches_provider,
     StructuralRateLimitError,
 )
+from run_log import run_in_worker_thread
 from utils.language import get_pattern_language
 from utils.llm_call import call_llm, call_llm_for_window
 from utils.markers import mark_distinct_merge, note_merged_members
@@ -47,6 +48,7 @@ from config import (
     AD_DETECTION_PARALLEL_WINDOWS_DEFAULT,
     AD_DETECTION_PARALLEL_WINDOWS_MIN,
     AD_DETECTION_PARALLEL_WINDOWS_MAX,
+    AD_DETECTION_MAX_FAILED_WINDOW_RATIO,
     resolve_stage_tunables,
     get_stage_tunable,
     resolve_env_backed_default,
@@ -128,6 +130,7 @@ __all__ = [
     "AdDetector",
     "WindowResult",
     "_resolve_parallel_windows",
+    "_resolve_max_failed_window_ratio",
     "_model_not_found_hint",
     # re-exported from .boundaries
     "EARLY_AD_SNAP_THRESHOLD",
@@ -170,10 +173,10 @@ class WindowResult(NamedTuple):
     window_idx: int
     window_start: float
     window_end: float
-    ads: List[Dict]
-    raw_response: Optional[str]
+    ads: list[dict]
+    raw_response: str | None
     failed: bool
-    last_error: Optional[Exception]
+    last_error: Exception | None
     # Joined transcript_lines for this window, used by the category repair
     # pass to send context without rebuilding it. Left at the default ''
     # by failed windows and callers that don't populate it.
@@ -206,6 +209,25 @@ def _resolve_parallel_windows() -> int:
     )
 
 
+def _resolve_max_failed_window_ratio() -> float:
+    """Resolve the failed-window ratio that fails a pass, same seam as
+    _resolve_parallel_windows: DB value wins, env-backed default otherwise,
+    clamped to [0.0, 1.0] so a bad row cannot disable or over-trigger it."""
+    try:
+        from llm_client import _get_cached_setting
+        db_val = _get_cached_setting('ad_detection_max_failed_window_ratio')
+    except Exception:
+        db_val = None
+
+    raw = db_val if db_val is not None else resolve_env_backed_default(
+        'ad_detection_max_failed_window_ratio')
+    try:
+        ratio = float(raw) if raw is not None else AD_DETECTION_MAX_FAILED_WINDOW_RATIO
+    except (ValueError, TypeError):
+        ratio = AD_DETECTION_MAX_FAILED_WINDOW_RATIO
+    return max(0.0, min(1.0, ratio))
+
+
 def _model_not_found_hint(last_error, model) -> str:
     """Return an actionable hint if the failure is a model-not-found error, else
     ''. A bad model ID won't recover on retry, and the provider's advertised model
@@ -221,8 +243,10 @@ def _model_not_found_hint(last_error, model) -> str:
     )
 
 
-def _all_windows_failed_response(stage: str, num_windows: int, last_error, model) -> dict:
-    """Build the failure response when every window in a pass fails.
+def _windows_failed_response(stage: str, failed_windows: int, num_windows: int,
+                              last_error, model) -> dict:
+    """Build the failure response for a pass whose failed-window count hit
+    the fail threshold (all windows, or too high a share).
 
     Surfaces the last error so callers can tell rate-limit from generic failure
     (#238). A model-not-found error gets an actionable hint and is marked
@@ -231,7 +255,11 @@ def _all_windows_failed_response(stage: str, num_windows: int, last_error, model
     last_err_type = type(last_error).__name__ if last_error else 'Unknown'
     last_err_status = getattr(last_error, 'status_code', None)
     limit_exceeded = is_limit_exceeded_error(last_error) if last_error else False
-    parts = [f"All {num_windows} {stage} windows failed (last error: {last_err_type}"]
+    if failed_windows >= num_windows:
+        lead = f"All {num_windows} {stage} windows failed"
+    else:
+        lead = f"{failed_windows}/{num_windows} {stage} windows failed"
+    parts = [f"{lead} (last error: {last_err_type}"]
     if last_err_status:
         parts.append(f", status={last_err_status}")
     if last_error:
@@ -269,7 +297,7 @@ def _all_windows_failed_response(stage: str, num_windows: int, last_error, model
         "last_error_status": last_err_status,
         # Per-run stats (#519): "0/N answered" is the failure signal.
         "windows_total": num_windows,
-        "windows_failed": num_windows,
+        "windows_failed": failed_windows,
     }
 
 
@@ -447,7 +475,7 @@ _LABEL_SPAN = '_label_span'
 _MEMBER_STAGES = '_member_stages'
 
 
-def _label_reach(entry: Dict) -> float:
+def _label_reach(entry: dict) -> float:
     """Audio a member's reason/sponsor label may claim: the full span, or
     just the matched-text extent when the span is duration-estimated."""
     if entry.get('span_estimated'):
@@ -460,7 +488,7 @@ def _label_reach(entry: Dict) -> float:
     return entry['end'] - entry['start']
 
 
-def _with_category_span(entry: Dict) -> Dict:
+def _with_category_span(entry: dict) -> dict:
     """Stamp a merge accumulator with the audio its own category and label
     cover, before a later member extends the end past what it classified."""
     if entry.get('category') in SEGMENT_CATEGORIES:
@@ -492,11 +520,11 @@ class AdDetector:
     ads that have been seen before across episodes.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or get_api_key()
         if not self.api_key:
             logger.warning("No LLM API key found")
-        self._llm_client_override: Optional[LLMClient] = None
+        self._llm_client_override: LLMClient | None = None
 
         # Dependency attributes. Previously these were lazy @property
         # accessors guarded by ``if self._x is None``; the lazy form gave
@@ -514,7 +542,7 @@ class AdDetector:
         self.sponsor_service = None
 
     @property
-    def _llm_client(self) -> Optional[LLMClient]:
+    def _llm_client(self) -> LLMClient | None:
         """Current LLM client. Reads through ``get_llm_client`` on every access
         so that provider/base-URL changes via the settings API take effect
         immediately without restarting the worker."""
@@ -525,7 +553,7 @@ class AdDetector:
         return get_llm_client()
 
     @_llm_client.setter
-    def _llm_client(self, value: Optional[LLMClient]) -> None:
+    def _llm_client(self, value: LLMClient | None) -> None:
         self._llm_client_override = value
 
     def _ensure_deps(self):
@@ -571,7 +599,7 @@ class AdDetector:
             logger.error(f"Failed to initialize LLM client: {e}")
             raise
 
-    def get_available_models(self) -> List[Dict]:
+    def get_available_models(self) -> list[dict]:
         """Get list of available models from LLM provider.
 
         The underlying ``self._llm_client.list_models()`` already caches
@@ -595,7 +623,7 @@ class AdDetector:
             logger.error(f"Could not fetch models from API: {e}")
             return []
 
-    def _ensure_configured_models_present(self, models_list: List[Dict]) -> List[Dict]:
+    def _ensure_configured_models_present(self, models_list: list[dict]) -> list[dict]:
         """Ensure currently-configured models always appear in the model list.
 
         If the API/wrapper doesn't advertise a model that's actively configured
@@ -726,7 +754,7 @@ class AdDetector:
             logger.warning(f"Could not check detect_show_segments for {slug}: {e}")
             return False
 
-    def _resolve_segment_action_map(self, slug: str) -> Optional[Dict[str, str]]:
+    def _resolve_segment_action_map(self, slug: str) -> dict[str, str] | None:
         """Resolve the feed's category->action map once per detection run,
         for the merge seam to gate on.
 
@@ -1014,7 +1042,8 @@ class AdDetector:
         ordered = [None] * total
         with ThreadPoolExecutor(max_workers=max_workers,
                                 thread_name_prefix='addet-window') as executor:
-            futures = {executor.submit(_run_one, i): i for i in range(total)}
+            futures = {executor.submit(run_in_worker_thread, _run_one, i): i
+                       for i in range(total)}
             for fut in as_completed(futures):
                 i = futures[fut]
                 ordered[i] = fut.result()
@@ -1134,9 +1163,12 @@ class AdDetector:
                 f"[{slug}:{episode_id}] {failed_windows}/{len(windows)} windows "
                 f"failed during {pass_label.lower()}"
             )
-        if failed_windows >= len(windows):
-            failure = _all_windows_failed_response(
-                pass_label.lower(), len(windows), last_error, model)
+        failure_ratio = failed_windows / len(windows) if windows else 0.0
+        if failed_windows >= len(windows) or (
+                failure_ratio > _resolve_max_failed_window_ratio()):
+            failure = _windows_failed_response(
+                pass_label.lower(), failed_windows, len(windows),
+                last_error, model)
             return [], all_raw_responses, failed_windows, failure, 0, 0, 0
 
         # Raw LLM markers with no "category": the merge seam leaves these
@@ -1221,13 +1253,13 @@ class AdDetector:
             )
         return repaired
 
-    def detect_ads(self, segments: List[Dict], podcast_name: str = "Unknown",
+    def detect_ads(self, segments: list[dict], podcast_name: str = "Unknown",
                    episode_title: str = "Unknown", slug: str = None,
                    episode_id: str = None, episode_description: str = None,
                    podcast_description: str = None,
                    progress_callback=None,
                    audio_analysis=None,
-                   positional_prior_hint: str = "") -> Optional[Dict]:
+                   positional_prior_hint: str = "") -> dict | None:
         """Detect ad segments using Claude API with sliding window approach.
 
         Processes transcript in overlapping windows to ensure ads at chunk
@@ -1521,14 +1553,14 @@ class AdDetector:
                 f"removed={info['removed_fraction']:.2f} -> {len(ads)} ad spans")
         return ads
 
-    def process_transcript(self, segments: List[Dict], podcast_name: str = "Unknown",
+    def process_transcript(self, segments: list[dict], podcast_name: str = "Unknown",
                           episode_title: str = "Unknown", slug: str = None,
                           episode_id: str = None, episode_description: str = None,
                           audio_path: str = None,
                           podcast_id: str = None,
                           skip_patterns: bool = False,
                           podcast_description: str = None,
-                          podcast_tags: Optional[set] = None,
+                          podcast_tags: set | None = None,
                           progress_callback=None,
                           audio_analysis=None,
                           dai_differential=None,
@@ -1536,8 +1568,8 @@ class AdDetector:
                           *,
                           ctx=None,
                           positional_prior_hint: str = "",
-                          keep_content: Optional[bool] = None,
-                          skip_llm: bool = False) -> Dict:
+                          keep_content: bool | None = None,
+                          skip_llm: bool = False) -> dict:
         """Process transcript for ad detection using three-stage pipeline.
 
         Pipeline stages:
@@ -1983,7 +2015,7 @@ class AdDetector:
         """Return fraction of region B covered by region A (0.0-1.0)."""
         return overlap_ratio(a_start, a_end, b_start, b_end)
 
-    def _get_segment_text(self, segments: List[Dict], start: float, end: float) -> str:
+    def _get_segment_text(self, segments: list[dict], start: float, end: float) -> str:
         """Extract transcript text within a time range."""
         text_parts = []
         for seg in segments:
@@ -1992,7 +2024,7 @@ class AdDetector:
                 text_parts.append(seg.get('text', ''))
         return ' '.join(text_parts).strip()
 
-    def _ad_passes_learning_filters(self, ad: Dict, min_confidence: float) -> bool:
+    def _ad_passes_learning_filters(self, ad: dict, min_confidence: float) -> bool:
         """Apply basic eligibility filters before sponsor resolution.
 
         Returns True if the ad should proceed to sponsor extraction.
@@ -2038,7 +2070,7 @@ class AdDetector:
 
         return True
 
-    def _resolve_sponsor_for_learning(self, ad: Dict) -> Optional[str]:
+    def _resolve_sponsor_for_learning(self, ad: dict) -> str | None:
         """Resolve a usable sponsor name from an ad via 4-tier lookup.
 
         Tier 1: sponsor DB lookup on raw sponsor field
@@ -2112,8 +2144,8 @@ class AdDetector:
         return False
 
     def _create_pattern_and_fingerprint(
-        self, ad: Dict, segments: List[Dict], sponsor: str,
-        podcast_id: str, episode_id: Optional[str], audio_path: Optional[str]
+        self, ad: dict, segments: list[dict], sponsor: str,
+        podcast_id: str, episode_id: str | None, audio_path: str | None
     ) -> bool:
         """Create a text pattern and optional audio fingerprint for an ad.
 
@@ -2154,7 +2186,7 @@ class AdDetector:
         return False
 
     def learn_from_detections(
-        self, ads: List[Dict], segments: List[Dict], podcast_id: str,
+        self, ads: list[dict], segments: list[dict], podcast_id: str,
         episode_id: str = None, audio_path: str = None
     ) -> int:
         """Create patterns from high-confidence Claude detections.
@@ -2213,8 +2245,8 @@ class AdDetector:
         return patterns_created
 
     def _detect_foreign_language_ads(
-        self, segments: List[Dict], slug: str = None, episode_id: str = None
-    ) -> List[Dict]:
+        self, segments: list[dict], slug: str = None, episode_id: str = None
+    ) -> list[dict]:
         """Auto-detect non-English segments as ads (DAI in other languages).
 
         Non-English segments (Spanish, etc.) are almost always dynamically inserted
@@ -2276,10 +2308,10 @@ class AdDetector:
 
         return foreign_ads
 
-    def _merge_detection_results(self, ads: List[Dict],
-                                 segments: Optional[List[Dict]] = None,
-                                 action_map: Optional[Dict[str, str]] = None,
-                                 podcast_name: Optional[str] = None) -> List[Dict]:
+    def _merge_detection_results(self, ads: list[dict],
+                                 segments: list[dict] | None = None,
+                                 action_map: dict[str, str] | None = None,
+                                 podcast_name: str | None = None) -> list[dict]:
         """Merge overlapping ads from different detection stages.
 
         segments, when given, lets the merge verify transcript coverage of a
@@ -2499,9 +2531,9 @@ class AdDetector:
 
         return merged
 
-    def _merge_overlapping_accepted_duplicates(self, markers: List[Dict],
-                                               action_map: Optional[Dict[str, str]] = None
-                                               ) -> List[Dict]:
+    def _merge_overlapping_accepted_duplicates(self, markers: list[dict],
+                                               action_map: dict[str, str] | None = None
+                                               ) -> list[dict]:
         """Second pass: fold duplicate ACCEPTED (non-held) markers describing
         the same ad read into one union-span marker.
 
@@ -2587,14 +2619,14 @@ class AdDetector:
 
         return sorted(result, key=lambda x: x['start'])
 
-    def run_verification_detection(self, segments: List[Dict],
+    def run_verification_detection(self, segments: list[dict],
                                     podcast_name: str = "Unknown",
                                     episode_title: str = "Unknown",
                                     slug: str = None, episode_id: str = None,
                                     episode_description: str = None,
                                     podcast_description: str = None,
                                     progress_callback=None,
-                                    audio_analysis=None) -> Dict:
+                                    audio_analysis=None) -> dict:
         """Run ad detection with the verification prompt on processed audio.
 
         Uses the same sliding window approach as detect_ads() but with the

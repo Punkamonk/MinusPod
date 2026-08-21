@@ -888,3 +888,69 @@ class TestWhisperApiTimeoutSetting:
     def test_a_non_number_is_rejected(self, client):
         resp = self._put(client, {'whisperApiTimeoutSeconds': 'soon'})
         assert resp.status_code == 400
+
+
+class TestLowAdYieldAction:
+    """Global low-ad-yield action: exposed on GET, validated on PUT."""
+
+    def _put(self, client, payload):
+        return client.put('/api/v1/settings/ad-detection',
+                          data=json.dumps(payload),
+                          content_type='application/json')
+
+    def test_get_exposes_the_default(self, client):
+        body = json.loads(client.get('/api/v1/settings').data)
+        assert body['lowAdYieldAction']['value'] == 'nothing'
+        assert body['defaults']['lowAdYieldAction'] == 'nothing'
+
+    @pytest.mark.parametrize('action', ['nothing', 'redetect', 'reprocess', 'full'])
+    def test_put_accepts_each_action(self, client, action):
+        assert self._put(client, {'lowAdYieldAction': action}).status_code == 200
+        assert database.Database().get_setting('low_ad_yield_action') == action
+
+    def test_put_rejects_an_unknown_action(self, client):
+        self._put(client, {'lowAdYieldAction': 'redetect'})
+        resp = self._put(client, {'lowAdYieldAction': 'panic'})
+        assert resp.status_code == 400
+        assert 'lowAdYieldAction' in json.loads(resp.data)['error']
+        assert database.Database().get_setting('low_ad_yield_action') == 'redetect'
+
+
+class TestEpisodeLogSettings:
+    """Global run-log retention and capture level (#660)."""
+
+    def _put(self, client, payload):
+        return client.put('/api/v1/settings/ad-detection',
+                          data=json.dumps(payload),
+                          content_type='application/json')
+
+    def test_get_exposes_the_defaults(self, client):
+        body = json.loads(client.get('/api/v1/settings').data)
+        assert body['episodeLogRetentionDays']['value'] == 30
+        assert body['episodeLogLevel']['value'] == 'debug'
+        assert body['defaults']['episodeLogRetentionDays'] == 30
+        assert body['defaults']['episodeLogLevel'] == 'debug'
+
+    def test_put_accepts_a_retention_value(self, client):
+        assert self._put(client, {'episodeLogRetentionDays': 0}).status_code == 200
+        assert database.Database().get_setting('episode_log_retention_days') == '0'
+
+    def test_put_rejects_out_of_range_retention(self, client):
+        self._put(client, {'episodeLogRetentionDays': 14})
+        for bad in (-1, 366, 'lots'):
+            resp = self._put(client, {'episodeLogRetentionDays': bad})
+            assert resp.status_code == 400
+            assert 'episodeLogRetentionDays' in json.loads(resp.data)['error']
+        assert database.Database().get_setting('episode_log_retention_days') == '14'
+
+    @pytest.mark.parametrize('level', ['debug', 'info'])
+    def test_put_accepts_each_level(self, client, level):
+        assert self._put(client, {'episodeLogLevel': level}).status_code == 200
+        assert database.Database().get_setting('episode_log_level') == level
+
+    def test_put_rejects_an_unknown_level(self, client):
+        self._put(client, {'episodeLogLevel': 'info'})
+        resp = self._put(client, {'episodeLogLevel': 'trace'})
+        assert resp.status_code == 400
+        assert 'episodeLogLevel' in json.loads(resp.data)['error']
+        assert database.Database().get_setting('episode_log_level') == 'info'

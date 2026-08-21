@@ -13,7 +13,6 @@ survivorship-free telemetry, not a detection the user reviews); a separate
 near-miss histogram and unused-reason breakdown surface the new rows.
 """
 import logging
-from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,7 @@ class CueDetectionMixin:
     """CRUD + aggregates for the cue_detections telemetry table."""
 
     def record_cue_detections(self, podcast_id: int, episode_id: str,
-                              records: List[Dict]) -> int:
+                              records: list[dict]) -> int:
         """Replace this feed+episode's cue detections with ``records``.
 
         Delete-then-insert keeps the row set in sync with the latest processing
@@ -83,7 +82,7 @@ class CueDetectionMixin:
         return len(records)
 
     def list_cue_detections_for_episode(self, podcast_id: int,
-                                        episode_id: str) -> List[Dict]:
+                                        episode_id: str) -> list[dict]:
         """All recorded cue detections for a feed+episode, earliest first."""
         conn = self.get_connection()
         rows = conn.execute(
@@ -108,7 +107,7 @@ class CueDetectionMixin:
         conn.commit()
         return cursor.rowcount > 0
 
-    def cue_feed_advisory(self, podcast_id: int) -> Dict:
+    def cue_feed_advisory(self, podcast_id: int) -> dict:
         """Per-feed cue health: outcome/verdict counts, score range, confirm rate.
 
         Counts above-threshold rows only; below_threshold near-misses are
@@ -116,13 +115,13 @@ class CueDetectionMixin:
         """
         conn = self.get_connection()
         row = conn.execute(
-            f"SELECT {_ADVISORY_AGGREGATE_SQL} FROM cue_detections "
+            f"SELECT {_ADVISORY_AGGREGATE_SQL} FROM cue_detections "  # noqa: S608
             f"WHERE podcast_id = ? AND {_ABOVE_THRESHOLD}",
             (podcast_id,),
         ).fetchone()
         return _advisory_dict(row)
 
-    def cue_aggregate_stats(self) -> Dict:
+    def cue_aggregate_stats(self) -> dict:
         """Global cue telemetry: the feed-advisory shape plus histograms.
 
         Adds a match-score histogram (above-threshold rows), a near-miss
@@ -131,13 +130,13 @@ class CueDetectionMixin:
         """
         conn = self.get_connection()
         totals = conn.execute(
-            f"SELECT {_ADVISORY_AGGREGATE_SQL} FROM cue_detections "
+            f"SELECT {_ADVISORY_AGGREGATE_SQL} FROM cue_detections "  # noqa: S608
             f"WHERE {_ABOVE_THRESHOLD}"
         ).fetchone()
         buckets = conn.execute(
             f"""SELECT CAST(match_score * 10 AS INT) AS bucket, COUNT(*) AS n
                FROM cue_detections WHERE match_score IS NOT NULL AND {_ABOVE_THRESHOLD}
-               GROUP BY bucket ORDER BY bucket"""
+               GROUP BY bucket ORDER BY bucket"""  # noqa: S608
         ).fetchall()
         near_miss_buckets = conn.execute(
             """SELECT CAST(match_score * 10 AS INT) AS bucket, COUNT(*) AS n
@@ -160,16 +159,16 @@ class CueDetectionMixin:
         out['unusedReasons'] = {r['unused_reason']: r['n'] for r in reason_rows}
         return out
 
-    def cue_labeled_scores(self, podcast_id: int) -> List[Tuple[float, str]]:
+    def cue_labeled_scores(self, podcast_id: int) -> list[tuple[float, str]]:
         """Reviewed (score, verdict) pairs for the labeled threshold suggestion."""
         conn = self.get_connection()
         rows = conn.execute(
             f"""SELECT match_score, verdict FROM cue_detections
-               WHERE podcast_id = ? AND {_LABELED}""",
+               WHERE podcast_id = ? AND {_LABELED}""",  # noqa: S608
             (podcast_id,)).fetchall()
         return [(r['match_score'], r['verdict']) for r in rows]
 
-    def cue_template_paired_episode_counts(self, podcast_id: int) -> Dict[int, int]:
+    def cue_template_paired_episode_counts(self, podcast_id: int) -> dict[int, int]:
         """Distinct episodes per template with a paired outcome; cue-only safety input."""
         conn = self.get_connection()
         rows = conn.execute(
@@ -182,7 +181,7 @@ class CueDetectionMixin:
         return {r['template_id']: r['n'] for r in rows}
 
     def cue_template_recent_activity(self, podcast_id: int,
-                                     recent_episodes: int = 5) -> List[Dict]:
+                                     recent_episodes: int = 5) -> list[dict]:
         """Per-template last match / quiet flag for drift surfacing (issue #599).
 
         Quiet: matched at least once ever, but zero above-threshold rows in
@@ -208,7 +207,7 @@ class CueDetectionMixin:
                       {recent_hit_expr} AS recent_hit
                FROM cue_detections
                WHERE podcast_id = ? AND template_id IS NOT NULL
-               GROUP BY template_id""", params).fetchall()
+               GROUP BY template_id""", params).fetchall()  # noqa: S608
         out = []
         for r in rows:
             # No episodes recorded yet -> quiet stays False regardless of matched.
@@ -217,16 +216,16 @@ class CueDetectionMixin:
                         'matchedEpisodes': r['matched'], 'quiet': quiet})
         return out
 
-    def cue_template_verdict_scores(self, podcast_id: int) -> List[Dict]:
+    def cue_template_verdict_scores(self, podcast_id: int) -> list[dict]:
         """Reviewed scores grouped per template, for verdict hints."""
         conn = self.get_connection()
         rows = conn.execute(
             f"""SELECT template_id, label, match_score, verdict
                FROM cue_detections
                WHERE podcast_id = ? AND template_id IS NOT NULL AND {_LABELED}
-               ORDER BY template_id""",
+               ORDER BY template_id""",  # noqa: S608
             (podcast_id,)).fetchall()
-        grouped: Dict[int, Dict] = {}
+        grouped: dict[int, dict] = {}
         for r in rows:
             # Guard against future verdict states (the outcome CHECK was
             # already widened once); unknown verdicts must not KeyError.
@@ -239,7 +238,7 @@ class CueDetectionMixin:
         return list(grouped.values())
 
 
-def _histogram(buckets) -> List[Dict]:
+def _histogram(buckets) -> list[dict]:
     """Shape CAST(score*10) buckets into [{scoreFrom, count}] rows."""
     return [
         {'scoreFrom': round(b['bucket'] / 10, 1), 'count': b['n']}
@@ -247,7 +246,7 @@ def _histogram(buckets) -> List[Dict]:
     ]
 
 
-def _advisory_dict(row) -> Dict:
+def _advisory_dict(row) -> dict:
     """Shape a COUNT/SUM aggregate row into the advisory JSON payload.
 
     A non-GROUP-BY COUNT/SUM always returns exactly one row, so ``row`` is never

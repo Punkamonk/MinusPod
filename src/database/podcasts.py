@@ -1,7 +1,6 @@
 """Podcast CRUD mixin for MinusPod database."""
 import json
 import logging
-from typing import Optional, Dict, List
 
 from config import coerce_bool_setting, resolve_segment_category_actions_map
 from utils.constants import EpisodeStatus
@@ -25,8 +24,8 @@ _STATUS_COUNT_SELECT = ',\n'.join(
 )
 
 
-def podping_declaration_columns(uses_podping: Optional[bool],
-                                hive_accounts: Optional[List[str]]) -> Dict:
+def podping_declaration_columns(uses_podping: bool | None,
+                                hive_accounts: list[str] | None) -> dict:
     """A parsed <podcast:podping> declaration as podcasts-table columns.
 
     Stamps podping_checked_at so a feed with no tag is distinguishable from one
@@ -42,7 +41,7 @@ def podping_declaration_columns(uses_podping: Optional[bool],
 class PodcastMixin:
     """Podcast management methods."""
 
-    def get_all_podcasts(self) -> List[Dict]:
+    def get_all_podcasts(self) -> list[dict]:
         """Get all podcasts with episode counts."""
         conn = self.get_connection()
         cursor = conn.execute(f"""
@@ -55,17 +54,17 @@ class PodcastMixin:
             LEFT JOIN episodes e ON p.id = e.podcast_id
             GROUP BY p.id
             ORDER BY p.created_at DESC
-        """)
+        """)  # noqa: S608
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_podcast_feed_urls(self) -> List[Dict]:
+    def get_podcast_feed_urls(self) -> list[dict]:
         """slug + source_url only. The podping listener rebuilds its feed map
         every minute and needs nothing from the episode aggregation."""
         cursor = self.get_connection().execute(
             "SELECT slug, source_url FROM podcasts")
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_custom_network_overrides(self) -> List[str]:
+    def get_custom_network_overrides(self) -> list[str]:
         """Distinct non-empty network_id_override values across all podcasts.
 
         These are operator-typed free-text network names that act as both the id
@@ -81,7 +80,7 @@ class PodcastMixin:
         """)
         return [row['network_id_override'] for row in cursor.fetchall()]
 
-    def get_podcast_by_slug(self, slug: str) -> Optional[Dict]:
+    def get_podcast_by_slug(self, slug: str) -> dict | None:
         """Get podcast by slug with episode counts."""
         conn = self.get_connection()
         cursor = conn.execute(f"""
@@ -94,18 +93,18 @@ class PodcastMixin:
             LEFT JOIN episodes e ON p.id = e.podcast_id
             WHERE p.slug = ?
             GROUP BY p.id
-        """, (slug,))
+        """, (slug,))  # noqa: S608
         row = cursor.fetchone()
         return dict(row) if row else None
 
-    def get_podcast_slug(self, podcast_id: int) -> Optional[str]:
+    def get_podcast_slug(self, podcast_id: int) -> str | None:
         """Slug for a podcast id -- cheap single-column lookup."""
         conn = self.get_connection()
         row = conn.execute(
             "SELECT slug FROM podcasts WHERE id = ?", (podcast_id,)).fetchone()
         return row['slug'] if row else None
 
-    def get_podcast_detection_mode(self, slug: str) -> Optional[str]:
+    def get_podcast_detection_mode(self, slug: str) -> str | None:
         """Per-feed detection_mode column only -- a cheap single-row lookup that
         skips the episode aggregation get_podcast_by_slug runs."""
         conn = self.get_connection()
@@ -114,7 +113,7 @@ class PodcastMixin:
         row = cursor.fetchone()
         return row['detection_mode'] if row else None
 
-    def get_podcast_queue_priority(self, slug: str) -> Optional[int]:
+    def get_podcast_queue_priority(self, slug: str) -> int | None:
         """Per-feed queue_priority column only, without the full get_podcast_by_slug join."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -122,7 +121,7 @@ class PodcastMixin:
         row = cursor.fetchone()
         return row['queue_priority'] if row else None
 
-    def get_podcast_title_skip_patterns(self, slug: str) -> Optional[str]:
+    def get_podcast_title_skip_patterns(self, slug: str) -> str | None:
         """Per-feed title_skip_patterns column only: a cheap single-row lookup
         for the RSS gate and the JIT serve gate."""
         conn = self.get_connection()
@@ -170,7 +169,7 @@ class PodcastMixin:
         cols_sql = ', '.join(cols)
         conn = self.get_connection()
         cursor = conn.execute(
-            f"SELECT {cols_sql} FROM podcasts WHERE id = ?",
+            f"SELECT {cols_sql} FROM podcasts WHERE id = ?",  # noqa: S608
             (podcast_id,),
         )
         row = cursor.fetchone()
@@ -178,7 +177,7 @@ class PodcastMixin:
             return dict.fromkeys(cols)
         return dict(row)
 
-    def get_podcast_cue_score_override(self, podcast_id: int) -> Optional[float]:
+    def get_podcast_cue_score_override(self, podcast_id: int) -> float | None:
         """Per-feed cue_template_score_override column only -- cheap id-based lookup."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -235,6 +234,7 @@ class PodcastMixin:
                 'segment_category_actions', 'detect_show_segments',
                 'skip_second_pass', 'skip_transcription', 'cue_only_safety',
                 'queue_priority', 'title_skip_patterns', 'title_skip_action',
+                'low_ad_yield_action', 'episode_logs',
             ):
                 fields.append(f"{key} = ?")
                 values.append(value)
@@ -249,7 +249,7 @@ class PodcastMixin:
         values.append(slug)
 
         conn.execute(
-            f"UPDATE podcasts SET {', '.join(fields)} WHERE slug = ?",
+            f"UPDATE podcasts SET {', '.join(fields)} WHERE slug = ?",  # noqa: S608
             values
         )
         conn.commit()
@@ -272,7 +272,7 @@ class PodcastMixin:
         )
         conn.commit()
 
-    def get_podcast_tags(self, slug: str) -> Dict[str, List[str]]:
+    def get_podcast_tags(self, slug: str) -> dict[str, list[str]]:
         """Return the source breakdown of a podcast's tags.
 
         Returns {'effective': [...], 'rss': [...], 'episode': [...], 'user': [...]}.
@@ -316,8 +316,8 @@ class PodcastMixin:
             'user': user,
         }
 
-    def set_podcast_tags(self, slug: str, *, rss_tags: List[str] = None,
-                         user_tags: List[str] = None) -> bool:
+    def set_podcast_tags(self, slug: str, *, rss_tags: list[str] = None,
+                         user_tags: list[str] = None) -> bool:
         """Recompute and persist podcasts.tags as union of provided + episode tags.
 
         Pass `rss_tags` to update the RSS-derived layer (caller decides which
@@ -414,9 +414,9 @@ class PodcastMixin:
         # while the patterns they point at still exist to select from.
         doomed = "SELECT id FROM ad_patterns WHERE scope = 'podcast' AND podcast_id = ?"
         conn.execute(
-            f"DELETE FROM audio_fingerprints WHERE pattern_id IN ({doomed})", (slug,))
+            f"DELETE FROM audio_fingerprints WHERE pattern_id IN ({doomed})", (slug,))  # noqa: S608
         conn.execute(
-            f"DELETE FROM pattern_corrections WHERE pattern_id IN ({doomed})", (slug,))
+            f"DELETE FROM pattern_corrections WHERE pattern_id IN ({doomed})", (slug,))  # noqa: S608
         conn.execute(
             "DELETE FROM ad_patterns WHERE scope = 'podcast' AND podcast_id = ?",
             (slug,))
@@ -450,14 +450,14 @@ class PodcastMixin:
         """Stamp the last received podping for a feed (UTC ISO)."""
         self.update_podcast(slug, last_podping_at=utc_now_iso())
 
-    def set_podping_declaration(self, slug: str, uses_podping: Optional[bool],
-                                hive_accounts: List[str]) -> None:
+    def set_podping_declaration(self, slug: str, uses_podping: bool | None,
+                                hive_accounts: list[str]) -> None:
         """Store a feed's upstream <podcast:podping> declaration."""
         self.update_podcast(
             slug, **podping_declaration_columns(uses_podping, hive_accounts))
 
     @staticmethod
-    def _podping_declaration_from_row(row) -> Dict:
+    def _podping_declaration_from_row(row) -> dict:
         """Row columns to {'uses_podping', 'hive_accounts'}."""
         uses = row['podping_uses'] if 'podping_uses' in row.keys() else None
         raw = row['podping_hive_accounts'] if 'podping_hive_accounts' in row.keys() else None
@@ -474,7 +474,7 @@ class PodcastMixin:
             'hive_accounts': accounts,
         }
 
-    def get_podping_declaration(self, slug: str) -> Dict:
+    def get_podping_declaration(self, slug: str) -> dict:
         """A feed's podping declaration; uses_podping None when undeclared."""
         cursor = self.get_connection().execute(
             "SELECT podping_uses, podping_hive_accounts FROM podcasts WHERE slug = ?",
@@ -484,7 +484,7 @@ class PodcastMixin:
             return {'uses_podping': None, 'hive_accounts': []}
         return self._podping_declaration_from_row(row)
 
-    def get_all_podping_declarations(self) -> Dict[str, Dict]:
+    def get_all_podping_declarations(self) -> dict[str, dict]:
         """slug -> podping declaration, for the listener's per-feed rules."""
         cursor = self.get_connection().execute(
             "SELECT slug, podping_uses, podping_hive_accounts FROM podcasts")
@@ -509,7 +509,7 @@ class PodcastMixin:
     DEFAULT_MAX_FEED_EPISODES = 300
 
     def get_max_episodes_for_podcast(self, slug: str,
-                                     podcast: Optional[Dict] = None) -> int:
+                                     podcast: dict | None = None) -> int:
         """Resolve max_episodes for a podcast: per-feed value if set, else
         the max_feed_episodes global setting, else DEFAULT_MAX_FEED_EPISODES.
         """
@@ -527,7 +527,7 @@ class PodcastMixin:
         return self.DEFAULT_MAX_FEED_EPISODES
 
     def is_only_expose_processed_for_podcast(self, slug: str,
-                                             podcast: Optional[Dict] = None) -> bool:
+                                             podcast: dict | None = None) -> bool:
         """Resolve only_expose_processed_episodes for a podcast: per-feed
         value if non-NULL (0=off, 1=on), else the
         only_expose_processed_default global setting, else False.
@@ -540,7 +540,7 @@ class PodcastMixin:
         return self.get_setting('only_expose_processed_default') == 'true'
 
     def resolve_detect_show_segments(self, slug: str,
-                                     podcast: Optional[Dict] = None) -> bool:
+                                     podcast: dict | None = None) -> bool:
         """Resolve detect_show_segments for a podcast: per-feed value if
         non-NULL (0=off, 1=on), else the detect_show_segments global
         setting, else False.
@@ -553,7 +553,7 @@ class PodcastMixin:
         return coerce_bool_setting(self.get_setting('detect_show_segments'))
 
     def resolve_segment_actions(self, slug: str,
-                                podcast: Optional[Dict] = None) -> Dict[str, str]:
+                                podcast: dict | None = None) -> dict[str, str]:
         """Full map for every SEGMENT_CATEGORIES key: per-feed override ->
         global segment_category_actions setting -> DEFAULT_SEGMENT_ACTION.
         Malformed JSON at either level is ignored (treated as unset).

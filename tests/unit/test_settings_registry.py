@@ -73,11 +73,11 @@ SEED_SNAPSHOT = {
     'podping_enabled': 'false',
     'processing_hard_timeout_seconds': '7200',
     'processing_soft_timeout_seconds': '3600',
-    'resurrect_prompt': ('sha256', '217698265baaabc5f7ef0caa30478671dfdf95bae9f0ebd5bce4f9fe045fd454'),
+    'resurrect_prompt': ('sha256', '6f2018ab3abfd51100c89f025bec61f1c57ac8b32139ff71e3907d100ad7cd2b'),  # Updated for semantic is_ad schema line
     'retention_period_minutes': '1440',
     'review_max_boundary_shift': '60',
     'review_model': 'same_as_pass',
-    'review_prompt': ('sha256', '897102def672fcfffdfd2500e43cfdb6699aebf650606aee18549a4c033758d3'),
+    'review_prompt': ('sha256', '39a5e1808bec2b3036231a120e0fb6635f159eb7e1d33b0821dea178f95ce02f'),  # Updated for semantic is_ad schema line
     'rss_refresh_interval_minutes': '15',
     'segment_category_actions': '{}',
     'system_prompt': ('sha256', '082a8f30ee3b475c44b0f5d1af7a9e4d12035cdfdf3da8d427c8c59037acba58'),  # Updated for cross_promo semantics change
@@ -409,11 +409,13 @@ class TestGetDefaults:
         # detectShowSegments added after that (83 -> 84).
         # processNewEpisodesFirst added after that (84 -> 85).
         # jitBlockedUserAgents added after that (85 -> 86).
+        # lowAdYieldAction added after that (86 -> 87).
+        # episodeLogRetentionDays + episodeLogLevel added after that (87 -> 89).
         payload_keys = {
             spec.payload_key for spec in SETTINGS_REGISTRY.values()
             if spec.payload_key
         }
-        assert len(payload_keys) == 86
+        assert len(payload_keys) == 89
         assert 'audioCuePairOrientWindowSeconds' not in payload_keys
         assert 'audioCuePairMaxBreakFraction' in payload_keys
 

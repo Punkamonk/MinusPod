@@ -6,7 +6,6 @@ duplicated across ad_detector.py and text_pattern_matcher.py.
 
 import re
 from enum import Enum
-from typing import Optional
 
 
 class EpisodeStatus(str, Enum):
@@ -124,7 +123,7 @@ def is_sponsor_reasoning_rationale(text) -> bool:
     return False
 
 
-def sanitize_sponsor_label(text, show_name: Optional[str] = None) -> Optional[str]:
+def sanitize_sponsor_label(text, show_name: str | None = None) -> str | None:
     """Reject an LLM-mislabeled sponsor slot before it reaches a marker.
 
     Returns None when `text` is falsy, is reasoning prose caught by
@@ -147,7 +146,7 @@ def sanitize_sponsor_label(text, show_name: Optional[str] = None) -> Optional[st
     return text
 
 
-def names_the_show(text, show_name: Optional[str]) -> bool:
+def names_the_show(text, show_name: str | None) -> bool:
     """Whether a sponsor label is just the show's own name.
 
     A self-promo or listener-support read has no advertiser, so the model
@@ -1088,3 +1087,12 @@ OUTRO EXAMPLE:
 
 Output: [{"start": 2324.5, "end": 2381.1, "confidence": 0.85, "category": "outro", "reason": "Show sign-off and closing theme music", "end_text": "[closing theme music]"}]
 """
+
+
+# Provenance of a reprocess_requested_at stamp. The stamp itself only says
+# "may bypass the auto-process gate", which is not the same as a person asking.
+REPROCESS_SOURCE_JIT = 'jit'
+REPROCESS_SOURCE_DEGRADED = 'degraded'
+REPROCESS_SOURCE_POLICY = 'policy'
+# Sources the pipeline wrote for itself; a NULL source means a person.
+PIPELINE_REPROCESS_SOURCES = (REPROCESS_SOURCE_JIT, REPROCESS_SOURCE_DEGRADED)

@@ -1,7 +1,6 @@
 """Auto-process queue mixin for MinusPod database."""
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Set, Tuple
 
 from utils.time import ISO_FORMAT, utc_now
 
@@ -15,6 +14,9 @@ FRESH_WINDOW_HOURS = 48
 
 # Bound on the row-level detail returned by get_queue_status.
 _QUEUE_STATUS_ITEMS_LIMIT = 100
+
+# Bound on the pending rows returned by get_pending_queued_episodes.
+_PENDING_QUEUE_LIMIT = 200
 
 
 def compute_queue_priority(feed_priority, published_at_iso, manual=False, now=None,
@@ -43,7 +45,7 @@ class QueueMixin:
         return setting == 'true' if setting else True  # Default to enabled
 
     def is_auto_process_enabled_for_podcast(self, slug: str,
-                                            podcast: Optional[Dict] = None) -> bool:
+                                            podcast: dict | None = None) -> bool:
         """Check if auto-process is enabled for a specific podcast.
 
         podcast: an already-fetched row, so a caller that needs other columns
@@ -72,7 +74,7 @@ class QueueMixin:
                                       original_url: str, title: str = None,
                                       published_at: str = None,
                                       description: str = None,
-                                      priority: int = 0) -> Optional[int]:
+                                      priority: int = 0) -> int | None:
         """Add an episode to the auto-process queue. Returns queue ID or None if already queued."""
         conn = self.get_connection()
 
@@ -103,7 +105,7 @@ class QueueMixin:
                                       original_url: str, title: str = None,
                                       published_at: str = None,
                                       description: str = None,
-                                      priority: int = 0) -> Optional[int]:
+                                      priority: int = 0) -> int | None:
         """Add or reset an episode in the auto-process queue to 'pending'.
 
         Unlike queue_episode_for_processing (which skips already-queued rows),
@@ -153,7 +155,7 @@ class QueueMixin:
             return None
 
 
-    def get_next_queued_episode(self) -> Optional[Dict]:
+    def get_next_queued_episode(self) -> dict | None:
         """Get the next pending episode from the queue (FIFO order, read-only)."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -167,7 +169,30 @@ class QueueMixin:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-    def claim_next_queued_episode(self) -> Optional[Dict]:
+    def get_pending_queued_episodes(self, limit: int = _PENDING_QUEUE_LIMIT) -> list[dict]:
+        """Pending queue rows in dequeue order (same ORDER BY as the claim).
+
+        Feeds the Processing Queue panel, which showed only the active job plus
+        the display queue and so hid the auto-process backlog entirely. Capped
+        at `limit` rows; each row carries total_pending (the uncapped count,
+        via a window function evaluated before the LIMIT) so a caller can say
+        how much of the backlog it is showing.
+        """
+        conn = self.get_connection()
+        cursor = conn.execute(
+            """SELECT q.episode_id, q.title, q.priority, q.created_at,
+                      p.slug as podcast_slug, p.title as podcast_title,
+                      COUNT(*) OVER () as total_pending
+               FROM auto_process_queue q
+               JOIN podcasts p ON q.podcast_id = p.id
+               WHERE q.status = 'pending'
+               ORDER BY q.priority DESC, q.created_at ASC
+               LIMIT ?""",
+            (limit,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def claim_next_queued_episode(self) -> dict | None:
         """Atomically claim the next pending episode, marking it 'processing'.
 
         Closes the SELECT-then-mark gap in get_next_queued_episode: the
@@ -204,30 +229,59 @@ class QueueMixin:
             # Lost the race to another consumer; try the next pending row.
         return None
 
-    def update_queue_status(self, queue_id: int, status: str,
-                            error_message: str = None) -> bool:
-        """Update the status of a queued episode."""
+    def _update_queue_status(self, queue_id: int, status: str,
+                             error_message: str = None,
+                             expect_status: str = None) -> bool:
+        """Write a queue row's status. Returns whether a row changed.
+
+        Private: callers reporting on a claim they hold go through
+        close_claimed_queue_row, whose guard keeps a mid-run requeue alive.
+        ``expect_status`` is that guard.
+        """
         conn = self.get_connection()
+        where = 'WHERE id = ?'
+        tail = [queue_id]
+        if expect_status is not None:
+            where += ' AND status = ?'
+            tail.append(expect_status)
         if error_message:
-            conn.execute(
-                """UPDATE auto_process_queue SET
+            cursor = conn.execute(
+                f"""UPDATE auto_process_queue SET
                    status = ?,
                    error_message = ?,
                    attempts = attempts + 1,
                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                   WHERE id = ?""",
-                (status, error_message, queue_id)
+                   {where}""",  # noqa: S608
+                (status, error_message, *tail)
             )
         else:
-            conn.execute(
-                """UPDATE auto_process_queue SET
+            cursor = conn.execute(
+                f"""UPDATE auto_process_queue SET
                    status = ?,
                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                   WHERE id = ?""",
-                (status, queue_id)
+                   {where}""",  # noqa: S608
+                (status, *tail)
             )
         conn.commit()
-        return True
+        return cursor.rowcount > 0
+
+    def close_claimed_queue_row(self, queue_id: int, status: str,
+                                error_message: str = None) -> bool:
+        """Report a drainer verdict on a row this claim still holds.
+
+        The write is skipped when something re-queued the episode mid-run
+        (degraded re-detect, low-ad-yield rerun), so that rerun survives.
+        Returns whether a row changed.
+        """
+        return self._update_queue_status(queue_id, status, error_message,
+                                         expect_status='processing')
+
+    def get_queue_row_status(self, queue_id: int) -> str | None:
+        """Current status of one queue row, or None when it is gone."""
+        row = self.get_connection().execute(
+            'SELECT status FROM auto_process_queue WHERE id = ?', (queue_id,)
+        ).fetchone()
+        return row['status'] if row else None
 
     def close_queue_rows_for_episode(self, slug: str, episode_id: str) -> int:
         """Mark any non-terminal queue rows for this episode as completed.
@@ -260,7 +314,7 @@ class QueueMixin:
             conn.rollback()
             raise
 
-    def get_queue_status(self) -> Dict:
+    def get_queue_status(self) -> dict:
         """Auto-process queue status summary, plus the pending/processing rows
         (with priority) driving the dequeue order (#625)."""
         conn = self.get_connection()
@@ -337,7 +391,7 @@ class QueueMixin:
         conn.commit()
         return cursor.rowcount
 
-    def reset_orphaned_queue_items(self, stuck_minutes: int = 35, max_attempts: int = 3) -> Tuple[int, int]:
+    def reset_orphaned_queue_items(self, stuck_minutes: int = 35, max_attempts: int = 3) -> tuple[int, int]:
         """Reset queue items stuck in 'processing' for too long.
 
         This catches orphaned queue items where the worker crashed or was killed
@@ -434,7 +488,7 @@ class QueueMixin:
 
     # -- Offline queue (#482): deferred-episode lifecycle --
 
-    def get_deferred_episodes(self) -> List[Dict]:
+    def get_deferred_episodes(self) -> list[dict]:
         """All episodes waiting in the offline queue, oldest deferral first."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -454,7 +508,7 @@ class QueueMixin:
         ).fetchone()
         return row['n'] if row else 0
 
-    def expire_deferred_episodes(self, ttl_hours: int) -> List[Dict]:
+    def expire_deferred_episodes(self, ttl_hours: int) -> list[dict]:
         """Fail offline-queue episodes whose TTL has run out.
 
         Marked permanently_failed (a plain 'failed' would be resurrected by
@@ -510,7 +564,7 @@ class QueueMixin:
         conn.commit()
         return expired
 
-    def requeue_deferred_episodes(self, services: Set[str]) -> int:
+    def requeue_deferred_episodes(self, services: set[str]) -> int:
         """Flip deferred episodes back to pending for reachable services.
 
         Each episode gets its auto_process_queue row upserted to pending (the

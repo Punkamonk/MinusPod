@@ -8,7 +8,8 @@ audio signals for ad detection.
 import logging
 import time
 import os
-from typing import Dict, List, Optional, Any, Tuple
+from collections.abc import Callable
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from .base import AudioAnalysisResult
@@ -17,6 +18,7 @@ from .transition_detector import TransitionDetector
 from .cue_template_matcher import AudioCueTemplateMatcher
 from .silence_detector import SilenceDetector
 from .splice_detector import SpliceDetector
+from run_log import run_in_worker_thread
 from config import (
     AUDIO_CUE_FORMANT_ATTEN_DB,
     resolve_cue_template_score,
@@ -37,7 +39,7 @@ DEFAULT_VOLUME_TIMEOUT_MULTIPLIER = 2.0    # ~2s per min of audio
 MIN_VOLUME_TIMEOUT = 180    # 3 minutes
 
 
-def calculate_component_timeouts(duration_seconds: float) -> Dict[str, int]:
+def calculate_component_timeouts(duration_seconds: float) -> dict[str, int]:
     """Calculate per-component timeouts based on episode duration.
 
     Returns timeouts in seconds for each analysis component.
@@ -102,7 +104,7 @@ class AudioAnalyzer:
         # current settings, not here, so the experiment toggle takes effect
         # without a restart (this analyzer is a long-lived singleton).
 
-    def _load_settings(self) -> Dict[str, Any]:
+    def _load_settings(self) -> dict[str, Any]:
         """Load settings from database."""
         settings = {}
         if self.db:
@@ -121,8 +123,8 @@ class AudioAnalyzer:
 
         return settings
 
-    def _load_cue_config(self, feed_id: Optional[int] = None, force: bool = False,
-                         errors: Optional[List[str]] = None):
+    def _load_cue_config(self, feed_id: int | None = None, force: bool = False,
+                         errors: list[str] | None = None):
         """Resolve the audio cue detector for this run (issue #350).
 
         This analyzer is a long-lived singleton, so reading the settings here --
@@ -218,7 +220,7 @@ class AudioAnalyzer:
             logger.warning(f"Failed to load audio cue settings: {e}")
             return False, None
 
-    def _load_silence_config(self, feed_id: Optional[int] = None):
+    def _load_silence_config(self, feed_id: int | None = None):
         """Return a SilenceDetector when silence-snap is enabled for this feed.
 
         Returns None when the flag is off (default) or no DB is available.
@@ -253,7 +255,7 @@ class AudioAnalyzer:
             return False
 
     @staticmethod
-    def _collect_component(name: str, future, timeout: int) -> Tuple[Any, Optional[str]]:
+    def _collect_component(name: str, future, timeout: int) -> tuple[Any, str | None]:
         """Collect a pooled component future with timeout protection.
 
         Returns (result, error); result is None if timeout/error occurred.
@@ -274,10 +276,10 @@ class AudioAnalyzer:
     def analyze(
         self,
         audio_path: str,
-        transcript_segments: Optional[List[Dict]] = None,
+        transcript_segments: list[dict] | None = None,
         run_parallel: bool = False,
-        status_callback: Optional[callable] = None,
-        feed_id: Optional[int] = None,
+        status_callback: Callable | None = None,
+        feed_id: int | None = None,
         force_cue_detection: bool = False,
     ) -> AudioAnalysisResult:
         """
@@ -350,13 +352,14 @@ class AudioAnalyzer:
         # simultaneously-running full-decode components.
         timeout_factor = n_components
 
-        cue_near_misses: List[Dict[str, Any]] = []
-        silence_spans: List[Dict[str, Any]] = []
+        cue_near_misses: list[dict[str, Any]] = []
+        silence_spans: list[dict[str, Any]] = []
         splice_evidence = None
 
         pool = ThreadPoolExecutor(max_workers=n_components)
         try:
-            vol_future = pool.submit(self.volume_analyzer.analyze, audio_path)
+            vol_future = pool.submit(run_in_worker_thread,
+                                     self.volume_analyzer.analyze, audio_path)
 
             # Audio cue detection (issue #350) -- opt-in. Settings are read per
             # run so the toggle takes effect without a restart. Runs its own
@@ -367,6 +370,7 @@ class AudioAnalyzer:
                 # Matcher path surfaces near-misses via detect_with_debug; spectral uses detect().
                 is_matcher = isinstance(cue_detector, AudioCueTemplateMatcher)
                 cue_future = pool.submit(
+                    run_in_worker_thread,
                     cue_detector.detect_with_debug if is_matcher
                     else cue_detector.detect,
                     audio_path,
@@ -376,7 +380,8 @@ class AudioAnalyzer:
             # Runs its own ffmpeg silencedetect pass; skipped when flag is off (default).
             silence_future = None
             if silence_detector:
-                silence_future = pool.submit(silence_detector.detect, audio_path)
+                silence_future = pool.submit(run_in_worker_thread,
+                                             silence_detector.detect, audio_path)
 
             if status_callback:
                 status_callback("analyzing: volume", 30)
@@ -402,6 +407,7 @@ class AudioAnalyzer:
             splice_future = None
             if splice_enabled:
                 splice_future = pool.submit(
+                    run_in_worker_thread,
                     self.splice_detector.detect, audio_path, duration, frames)
 
             # Transition detection (runs on volume frames, no extra I/O)

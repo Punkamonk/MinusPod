@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import GlobalDefaultsSection from './GlobalDefaultsSection';
+import type { EpisodeLogLevel, LowAdYieldAction } from '../../api/types';
 
 function Harness({ onCommit }: { onCommit: (minutes: number) => void }) {
   const [minutes, setMinutes] = useState(15);
@@ -29,6 +30,12 @@ function Harness({ onCommit }: { onCommit: (minutes: number) => void }) {
         onOnlyExposeProcessedDefaultChange={() => {}}
         processNewEpisodesFirst
         onProcessNewEpisodesFirstChange={() => {}}
+        lowAdYieldAction="nothing"
+        onLowAdYieldActionChange={() => {}}
+        episodeLogRetentionDays={30}
+        onEpisodeLogRetentionDaysChange={() => {}}
+        episodeLogLevel="debug"
+        onEpisodeLogLevelChange={() => {}}
       />
       <button onClick={() => onCommit(minutes)}>Commit</button>
     </>
@@ -56,6 +63,12 @@ function PodpingHarness({ onCommit }: { onCommit: (payload: PodpingState) => voi
         onOnlyExposeProcessedDefaultChange={() => {}}
         processNewEpisodesFirst
         onProcessNewEpisodesFirstChange={() => {}}
+        lowAdYieldAction="nothing"
+        onLowAdYieldActionChange={() => {}}
+        episodeLogRetentionDays={30}
+        onEpisodeLogRetentionDaysChange={() => {}}
+        episodeLogLevel="debug"
+        onEpisodeLogLevelChange={() => {}}
       />
       <button onClick={() => onCommit({ podpingEnabled })}>Commit</button>
     </>
@@ -83,6 +96,12 @@ function ProcessNewFirstHarness({ onCommit }: { onCommit: (payload: ProcessNewFi
         onOnlyExposeProcessedDefaultChange={() => {}}
         processNewEpisodesFirst={processNewEpisodesFirst}
         onProcessNewEpisodesFirstChange={setProcessNewEpisodesFirst}
+        lowAdYieldAction="nothing"
+        onLowAdYieldActionChange={() => {}}
+        episodeLogRetentionDays={30}
+        onEpisodeLogRetentionDaysChange={() => {}}
+        episodeLogLevel="debug"
+        onEpisodeLogLevelChange={() => {}}
       />
       <button onClick={() => onCommit({ processNewEpisodesFirst })}>Commit</button>
     </>
@@ -201,5 +220,130 @@ describe('GlobalDefaultsSection: no Segment actions details block', () => {
     const { container } = render(<Harness onCommit={() => {}} />);
     expect(screen.queryByText('Segment actions')).toBeNull();
     expect(container.querySelector('details')).toBeNull();
+  });
+});
+
+interface LowAdYieldState {
+  lowAdYieldAction: LowAdYieldAction;
+}
+
+function LowAdYieldHarness({ onCommit }: { onCommit: (payload: LowAdYieldState) => void }) {
+  const [lowAdYieldAction, setLowAdYieldAction] = useState<LowAdYieldAction>('nothing');
+  return (
+    <>
+      <GlobalDefaultsSection
+        autoProcessEnabled={false}
+        onAutoProcessEnabledChange={() => {}}
+        rssRefreshIntervalMinutes={15}
+        onRssRefreshIntervalMinutesChange={() => {}}
+        podpingEnabled={false}
+        onPodpingEnabledChange={() => {}}
+        maxFeedEpisodes={10}
+        onMaxFeedEpisodesChange={() => {}}
+        onlyExposeProcessedDefault={false}
+        onOnlyExposeProcessedDefaultChange={() => {}}
+        processNewEpisodesFirst
+        onProcessNewEpisodesFirstChange={() => {}}
+        lowAdYieldAction={lowAdYieldAction}
+        onLowAdYieldActionChange={setLowAdYieldAction}
+        episodeLogRetentionDays={30}
+        onEpisodeLogRetentionDaysChange={() => {}}
+        episodeLogLevel="debug"
+        onEpisodeLogLevelChange={() => {}}
+      />
+      <button onClick={() => onCommit({ lowAdYieldAction })}>Commit</button>
+    </>
+  );
+}
+
+describe('GlobalDefaultsSection: low ad yield action', () => {
+  it('defaults to Do nothing', () => {
+    render(<LowAdYieldHarness onCommit={() => {}} />);
+    const select = screen.getByLabelText('When an episode detects fewer ads than usual') as HTMLSelectElement;
+    expect(select.value).toBe('nothing');
+  });
+
+  it('offers all four actions', () => {
+    render(<LowAdYieldHarness onCommit={() => {}} />);
+    const select = screen.getByLabelText('When an episode detects fewer ads than usual') as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(
+      ['nothing', 'redetect', 'reprocess', 'full']);
+  });
+
+  it('commits the chosen action', async () => {
+    let committed: LowAdYieldState | null = null;
+    render(<LowAdYieldHarness onCommit={(payload) => { committed = payload; }} />);
+    const user = userEvent.setup();
+
+    await user.selectOptions(
+      screen.getByLabelText('When an episode detects fewer ads than usual'), 'full');
+    await user.click(screen.getByRole('button', { name: 'Commit' }));
+    expect(committed!.lowAdYieldAction).toBe('full');
+  });
+});
+
+interface EpisodeLogState {
+  retentionDays: number;
+  level: EpisodeLogLevel;
+}
+
+function EpisodeLogHarness({ onCommit }: { onCommit: (payload: EpisodeLogState) => void }) {
+  const [retentionDays, setRetentionDays] = useState(30);
+  const [level, setLevel] = useState<EpisodeLogLevel>('debug');
+  return (
+    <>
+      <GlobalDefaultsSection
+        autoProcessEnabled={false}
+        onAutoProcessEnabledChange={() => {}}
+        rssRefreshIntervalMinutes={15}
+        onRssRefreshIntervalMinutesChange={() => {}}
+        podpingEnabled={false}
+        onPodpingEnabledChange={() => {}}
+        maxFeedEpisodes={10}
+        onMaxFeedEpisodesChange={() => {}}
+        onlyExposeProcessedDefault={false}
+        onOnlyExposeProcessedDefaultChange={() => {}}
+        processNewEpisodesFirst
+        onProcessNewEpisodesFirstChange={() => {}}
+        lowAdYieldAction="nothing"
+        onLowAdYieldActionChange={() => {}}
+        episodeLogRetentionDays={retentionDays}
+        onEpisodeLogRetentionDaysChange={setRetentionDays}
+        episodeLogLevel={level}
+        onEpisodeLogLevelChange={setLevel}
+      />
+      <button onClick={() => onCommit({ retentionDays, level })}>Commit</button>
+    </>
+  );
+}
+
+describe('GlobalDefaultsSection: episode run logs', () => {
+  it('shows the current retention and level', () => {
+    render(<EpisodeLogHarness onCommit={() => {}} />);
+    expect((screen.getByLabelText('Keep episode run logs for') as HTMLInputElement).value).toBe('30');
+    expect((screen.getByLabelText('Detail kept in a run log') as HTMLSelectElement).value).toBe('debug');
+  });
+
+  it('commits a new retention value', async () => {
+    let committed: EpisodeLogState | null = null;
+    render(<EpisodeLogHarness onCommit={(payload) => { committed = payload; }} />);
+    const user = userEvent.setup();
+
+    const input = screen.getByLabelText('Keep episode run logs for');
+    await user.clear(input);
+    await user.type(input, '7');
+    await user.tab();
+    await user.click(screen.getByRole('button', { name: 'Commit' }));
+    expect(committed!.retentionDays).toBe(7);
+  });
+
+  it('commits the chosen level', async () => {
+    let committed: EpisodeLogState | null = null;
+    render(<EpisodeLogHarness onCommit={(payload) => { committed = payload; }} />);
+    const user = userEvent.setup();
+
+    await user.selectOptions(screen.getByLabelText('Detail kept in a run log'), 'info');
+    await user.click(screen.getByRole('button', { name: 'Commit' }));
+    expect(committed!.level).toBe('info');
   });
 });

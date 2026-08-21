@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import time
-from typing import Optional
 from urllib.parse import urlparse
 
 import defusedxml.ElementTree as DefusedET
@@ -33,6 +32,8 @@ from config import (
     PROCESSING_MODE_CUE_ONLY,
     PROCESSING_MODE_COLUMN_UPDATES,
     CUE_ONLY_SAFETY_VALUES,
+    LOW_AD_YIELD_ACTIONS,
+    EPISODE_LOGS_VALUES,
     cue_only_missing_roles,
 )
 from differential_fetcher import is_likely_dai_feed
@@ -40,6 +41,7 @@ from positional_prior import compute_ad_distribution
 # Module import (not `from rss_parser import RSSParser`) so tests patching
 # rss_parser.RSSParser take effect at call time.
 import rss_parser
+import run_log
 from utils.constants import EpisodeStatus
 from utils.http import safe_url_for_log
 from utils.language import LANGUAGE_CODE_RE
@@ -219,6 +221,32 @@ def _normalize_chapters_mode(value):
 # (not 0) to keep unset rows clean; both read back as 'normal' downstream.
 QUEUE_PRIORITY_DB_VALUES = {'high': 10, 'low': -10}
 _QUEUE_PRIORITY_API_VALUES = {v: k for k, v in QUEUE_PRIORITY_DB_VALUES.items()}
+
+
+def _normalize_low_ad_yield_action(value):
+    """Validate the per-feed lowAdYieldAction override.
+
+    Returns (db_value, error). None clears the override (stored NULL, which
+    means "use the global setting").
+    """
+    if value is None:
+        return None, None
+    if value in LOW_AD_YIELD_ACTIONS:
+        return value, None
+    return None, f"lowAdYieldAction must be one of: {', '.join(LOW_AD_YIELD_ACTIONS)}"
+
+
+def _normalize_episode_logs(value):
+    """Validate the per-feed episodeLogs override (#660).
+
+    Returns (db_value, error). None clears the override (stored NULL, which
+    means "follow the global setting").
+    """
+    if value is None:
+        return None, None
+    if value in EPISODE_LOGS_VALUES:
+        return value, None
+    return None, f"episodeLogs must be one of: {', '.join(EPISODE_LOGS_VALUES)}"
 
 
 def _normalize_queue_priority(value):
@@ -426,7 +454,7 @@ def _refresh_error_fields(podcast) -> dict:
     }
 
 
-def _slug_from_url_path(source_url: str) -> Optional[str]:
+def _slug_from_url_path(source_url: str) -> str | None:
     # Final-resort slug derivation when neither an upstream OPML title nor
     # an RSS <title> is available. Strips ``.xml`` / ``.rss`` suffixes
     # because they would otherwise become part of the slug. Returns None
@@ -462,6 +490,8 @@ def _podcast_base_json(podcast, feed_url) -> dict:
         'detectionMode': podcast.get('detection_mode'),
         'chaptersMode': podcast.get('chapters_mode'),
         'queuePriority': _serialize_queue_priority(podcast.get('queue_priority')),
+        'lowAdYieldAction': podcast.get('low_ad_yield_action'),
+        'episodeLogs': podcast.get('episode_logs'),
         'titleSkipPatterns': _deserialize_title_skip_patterns(podcast.get('title_skip_patterns')),
         'titleSkipAction': podcast.get('title_skip_action') or 'serve_original',
         'segmentCategoryActions': _deserialize_segment_category_actions(
@@ -1009,6 +1039,18 @@ def update_feed(slug):
             return error_response(qp_err, 400)
         updates['queue_priority'] = qp_val
 
+    if 'lowAdYieldAction' in data:
+        ly_val, ly_err = _normalize_low_ad_yield_action(data['lowAdYieldAction'])
+        if ly_err:
+            return error_response(ly_err, 400)
+        updates['low_ad_yield_action'] = ly_val
+
+    if 'episodeLogs' in data:
+        logs_val, logs_err = _normalize_episode_logs(data['episodeLogs'])
+        if logs_err:
+            return error_response(logs_err, 400)
+        updates['episode_logs'] = logs_val
+
     if 'titleSkipPatterns' in data:
         patterns_val, patterns_err = _normalize_title_skip_patterns(data['titleSkipPatterns'])
         if patterns_err:
@@ -1184,6 +1226,7 @@ def delete_feed(slug):
 
         # Delete files
         storage.cleanup_podcast_dir(slug)
+        run_log.delete_feed_logs(storage.data_dir, slug)
 
         logger.info(f"Deleted feed: {slug}")
         return json_response({'message': 'Feed deleted', 'slug': slug})
@@ -1315,7 +1358,7 @@ def regenerate_feeds():
         return error_response('Failed to regenerate feeds', 500)
 
 
-def _extract_artwork_url_from_feed(source_url: str) -> Optional[str]:
+def _extract_artwork_url_from_feed(source_url: str) -> str | None:
     """Extract artwork URL from a podcast's RSS feed."""
     try:
         from rss_parser import RSSParser

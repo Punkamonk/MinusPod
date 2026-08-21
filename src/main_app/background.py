@@ -4,7 +4,11 @@ import os
 import shutil
 import time
 
-from config import MAX_EPISODE_RETRIES, title_matches_skip_patterns
+import run_log
+from config import (
+    MAX_EPISODE_RETRIES, resolve_episode_log_retention_days,
+    title_matches_skip_patterns,
+)
 from utils.constants import CANCELED_ERROR_MESSAGE, EpisodeStatus
 # Singletons are bound in main_app/__init__.py before this submodule
 # is loaded by the explicit `from main_app.background import ...` at
@@ -50,6 +54,21 @@ def run_cleanup():
                         shutil.rmtree(orphan_path, ignore_errors=True)
     except Exception as e:
         refresh_logger.error(f"Orphan cleanup failed: {e}")
+
+    # Episode run logs (#660): prune by age and drop files no row points at.
+    # Hourly at most; the cleanup tick runs far more often than the log tree
+    # changes, and the sweep walks every stored log.
+    try:
+        last_sweep = getattr(run_cleanup, '_last_run_log_sweep', 0)
+        if time.time() - last_sweep > 3600:
+            run_cleanup._last_run_log_sweep = time.time()
+            pruned, orphans = run_log.sweep_expired_logs(
+                db, storage.data_dir, resolve_episode_log_retention_days(db))
+            if pruned or orphans:
+                refresh_logger.info(
+                    f"Cleanup: removed {pruned} expired run log(s) and {orphans} orphan file(s)")
+    except Exception as e:
+        refresh_logger.error(f"Run log cleanup failed: {e}")
 
     # Periodic search index rebuild (every 6 hours). rebuild_search_index
     # logs "Search index rebuilt with N items" itself, so no duplicate log
@@ -153,6 +172,8 @@ def background_queue_processor():
                 description = queued.get('description')
 
                 try:
+                    # Every status write below reports on the row this claim
+                    # holds, so all of them go through close_claimed_queue_row.
                     # One podcast fetch feeds both gates below (auto-process
                     # override and title_skip_patterns live on the same row).
                     podcast = db.get_podcast_by_slug(slug)
@@ -173,7 +194,7 @@ def background_queue_processor():
                     # user (reprocess_requested_at set).
                     if not auto_process_enabled:
                         if not user_requested:
-                            db.update_queue_status(queue_id, 'completed', 'Auto-process disabled for this feed')
+                            db.close_claimed_queue_row(queue_id, 'completed', 'Auto-process disabled for this feed')
                             refresh_logger.info(f"[{slug}:{episode_id}] Skipped - auto-process disabled for this feed")
                             continue
                         refresh_logger.info(f"[{slug}:{episode_id}] Auto-process disabled but user-initiated reprocess; honoring")
@@ -181,7 +202,7 @@ def background_queue_processor():
                     # Title blacklist gate: mirrors the auto-process gate above,
                     # also bypassed by an explicit user reprocess.
                     if title_blacklisted and not user_requested:
-                        db.update_queue_status(queue_id, 'completed', 'skipped: title blacklist')
+                        db.close_claimed_queue_row(queue_id, 'completed', 'skipped: title blacklist')
                         refresh_logger.info(f"[{slug}:{episode_id}] Skipped - title blacklist match: {title}")
                         continue
 
@@ -228,13 +249,20 @@ def background_queue_processor():
                         # Check final status
                         episode = db.get_episode(slug, episode_id)
                         if episode and episode['status'] == 'processed':
-                            db.update_queue_status(queue_id, 'completed')
-                            refresh_logger.info(f"[{slug}:{episode_id}] Auto-process completed successfully")
+                            # finalize already closes the row on success, so only a
+                            # row back in 'pending' means the run queued a rerun.
+                            if (db.close_claimed_queue_row(queue_id, 'completed')
+                                    or db.get_queue_row_status(queue_id) != 'pending'):
+                                refresh_logger.info(f"[{slug}:{episode_id}] Auto-process completed successfully")
+                            else:
+                                refresh_logger.info(
+                                    f"[{slug}:{episode_id}] Auto-process completed; a rerun was "
+                                    f"queued during the run and stays queued")
                         elif episode and episode['status'] == 'processing':
                             # Still running: requeue rather than fail. The next
                             # claim restarts an orphan, since the lock gates a
                             # start, not the row's status.
-                            db.update_queue_status(queue_id, 'pending')
+                            db.close_claimed_queue_row(queue_id, 'pending')
                             if queue.is_processing(slug, episode_id):
                                 refresh_logger.info(f"[{slug}:{episode_id}] Still processing after {waited}s, will check again later")
                             else:
@@ -244,36 +272,40 @@ def background_queue_processor():
                             # the row so it is not counted as a failure (the
                             # retry ladder would skip it anyway); the re-drive
                             # re-opens it as pending once the service is back.
-                            db.update_queue_status(queue_id, 'completed')
+                            db.close_claimed_queue_row(queue_id, 'completed')
                             refresh_logger.info(f"[{slug}:{episode_id}] Deferred to offline queue (endpoint unreachable)")
                         elif (episode and episode['status'] == 'pending'
                                 and episode.get('error_message') == CANCELED_ERROR_MESSAGE):
                             # Only a user cancel closes the row. The stuck-row
                             # sweep also writes 'pending', and that one still
                             # needs the retry ladder.
-                            db.update_queue_status(queue_id, 'completed')
+                            db.close_claimed_queue_row(queue_id, 'completed')
                             refresh_logger.info(f"[{slug}:{episode_id}] Cancelled; queue row closed")
                         else:
                             # Actually failed - get the real error message
                             error_msg = episode.get('error_message') if episode else None
                             if not error_msg:
                                 error_msg = f"Processing ended with status: {episode.get('status') if episode else 'unknown'}"
-                            db.update_queue_status(queue_id, 'failed', error_msg)
+                            wrote = db.close_claimed_queue_row(queue_id, 'failed', error_msg)
                             episode_status = episode.get('status') if episode else None
-                            if episode_status == EpisodeStatus.PERMANENTLY_FAILED:
+                            if not wrote and db.get_queue_row_status(queue_id) == 'pending':
+                                refresh_logger.info(
+                                    f"[{slug}:{episode_id}] Run ended as {episode_status}; a rerun "
+                                    f"was queued during the run and stays queued")
+                            elif episode_status == EpisodeStatus.PERMANENTLY_FAILED:
                                 refresh_logger.warning(f"[{slug}:{episode_id}] Auto-process permanently failed: {error_msg}")
                             else:
                                 refresh_logger.info(f"[{slug}:{episode_id}] Auto-process failed (transient), will auto-retry: {error_msg}")
                     elif reason == "already_processing":
                         # Episode is already being processed elsewhere. Release our
                         # claim back to 'pending' so it is re-checked later, then wait.
-                        db.update_queue_status(queue_id, 'pending')
+                        db.close_claimed_queue_row(queue_id, 'pending')
                         refresh_logger.info(f"[{slug}:{episode_id}] Already processing, waiting {backoff_seconds}s...")
                         shutdown_event.wait(timeout=backoff_seconds)
                         backoff_seconds = min(backoff_seconds * 2, 300)  # Max 5 minutes
                     else:
                         # Queue is busy with another episode, try again later with backoff
-                        db.update_queue_status(queue_id, 'pending')  # Put back in queue
+                        db.close_claimed_queue_row(queue_id, 'pending')  # Put back in queue
                         refresh_logger.debug(f"[{slug}:{episode_id}] Queue busy, will retry in {backoff_seconds}s")
                         shutdown_event.wait(timeout=backoff_seconds)
                         backoff_seconds = min(backoff_seconds * 2, 300)  # Max 5 minutes
@@ -282,7 +314,7 @@ def background_queue_processor():
                     # Clear any leaked transaction before the status write so
                     # the bookkeeping cannot commit partial work (issue #566).
                     db.clear_leaked_transaction(refresh_logger, 'auto-process error path')
-                    db.update_queue_status(queue_id, 'failed', str(e))
+                    db.close_claimed_queue_row(queue_id, 'failed', str(e))
                     refresh_logger.error(f"[{slug}:{episode_id}] Auto-process error: {e}")
 
             else:

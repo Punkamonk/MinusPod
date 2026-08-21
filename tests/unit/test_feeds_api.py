@@ -363,3 +363,107 @@ def test_patch_invalid_title_skip_action_rejected(app_client, seeded_feed):
                             json={'titleSkipAction': 'delete'}, headers=headers)
     assert resp.status_code == 400
     assert seeded_feed['db'].get_podcast_by_slug(slug)['title_skip_action'] is None
+
+
+# -- lowAdYieldAction per-feed override --
+
+def test_get_feed_echoes_null_low_ad_yield_action(app_client, seeded_feed):
+    slug = seeded_feed['slug']
+    _authed(app_client)
+
+    resp = app_client.get(f'/api/v1/feeds/{slug}')
+    assert resp.status_code == 200
+    assert resp.get_json()['lowAdYieldAction'] is None
+
+
+@pytest.mark.parametrize('action', ['nothing', 'redetect', 'reprocess', 'full'])
+def test_patch_sets_each_low_ad_yield_action(app_client, seeded_feed, action):
+    slug = seeded_feed['slug']
+    _authed(app_client)
+    headers = _csrf_headers(app_client)
+
+    resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                            json={'lowAdYieldAction': action}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.get_json()['lowAdYieldAction'] == action
+    assert seeded_feed['db'].get_podcast_by_slug(slug)['low_ad_yield_action'] == action
+
+
+def test_patch_null_clears_low_ad_yield_action(app_client, seeded_feed):
+    slug = seeded_feed['slug']
+    _authed(app_client)
+    headers = _csrf_headers(app_client)
+
+    app_client.patch(f'/api/v1/feeds/{slug}',
+                     json={'lowAdYieldAction': 'full'}, headers=headers)
+    resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                            json={'lowAdYieldAction': None}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.get_json()['lowAdYieldAction'] is None
+    assert seeded_feed['db'].get_podcast_by_slug(slug)['low_ad_yield_action'] is None
+
+
+def test_patch_invalid_low_ad_yield_action_rejected(app_client, seeded_feed):
+    slug = seeded_feed['slug']
+    _authed(app_client)
+    headers = _csrf_headers(app_client)
+
+    app_client.patch(f'/api/v1/feeds/{slug}',
+                     json={'lowAdYieldAction': 'full'}, headers=headers)
+    resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                            json={'lowAdYieldAction': 'panic'}, headers=headers)
+    assert resp.status_code == 400
+    assert 'lowAdYieldAction' in resp.get_json()['error']
+    assert seeded_feed['db'].get_podcast_by_slug(slug)['low_ad_yield_action'] == 'full'
+
+
+# -- episodeLogs per-feed override (#660) --
+
+def test_get_feed_echoes_null_episode_logs(app_client, seeded_feed):
+    slug = seeded_feed['slug']
+    _authed(app_client)
+
+    resp = app_client.get(f'/api/v1/feeds/{slug}')
+    assert resp.status_code == 200
+    assert resp.get_json()['episodeLogs'] is None
+
+
+@pytest.mark.parametrize('value', ['on', 'off'])
+def test_patch_sets_each_episode_logs_value(app_client, seeded_feed, value):
+    slug = seeded_feed['slug']
+    _authed(app_client)
+    headers = _csrf_headers(app_client)
+
+    resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                            json={'episodeLogs': value}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.get_json()['episodeLogs'] == value
+    assert seeded_feed['db'].get_podcast_by_slug(slug)['episode_logs'] == value
+
+
+def test_patch_null_clears_episode_logs(app_client, seeded_feed):
+    slug = seeded_feed['slug']
+    _authed(app_client)
+    headers = _csrf_headers(app_client)
+
+    app_client.patch(f'/api/v1/feeds/{slug}',
+                     json={'episodeLogs': 'off'}, headers=headers)
+    resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                            json={'episodeLogs': None}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.get_json()['episodeLogs'] is None
+    assert seeded_feed['db'].get_podcast_by_slug(slug)['episode_logs'] is None
+
+
+def test_patch_invalid_episode_logs_rejected(app_client, seeded_feed):
+    slug = seeded_feed['slug']
+    _authed(app_client)
+    headers = _csrf_headers(app_client)
+
+    app_client.patch(f'/api/v1/feeds/{slug}',
+                     json={'episodeLogs': 'off'}, headers=headers)
+    resp = app_client.patch(f'/api/v1/feeds/{slug}',
+                            json={'episodeLogs': 'sometimes'}, headers=headers)
+    assert resp.status_code == 400
+    assert 'episodeLogs' in resp.get_json()['error']
+    assert seeded_feed['db'].get_podcast_by_slug(slug)['episode_logs'] == 'off'

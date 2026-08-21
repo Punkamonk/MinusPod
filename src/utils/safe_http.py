@@ -15,24 +15,26 @@ Defenses layered on top of the tier check:
 - HTTPS -> HTTP downgrade blocked at every tier.
 - Validates the final URL every request so a compromised DNS lookup cannot
   turn a registered hostname into a private IP mid-flight.
-
-DNS-rebinding defense (resolving hostname -> IP once, then connecting to the
-IP with SNI preserved for the original hostname) is a follow-up iteration;
-the current validation layer still catches static private/metadata targets
-before any bytes hit the wire.
+- DNS-rebinding defense: every request (and every redirect hop) resolves the
+  hostname once, validates all resolved addresses, and connects to the pinned
+  address with the URL, Host header, SNI, and certificate verification left on
+  the original hostname. Set ``SSRF_IP_PINNING=false`` to fall back to the
+  stock adapters and validate-then-fetch behavior.
 """
 
 from __future__ import annotations
 
 import enum
 import logging
+import os
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Protocol
 from urllib.parse import urlparse
 
 import requests
 
 from config import HTTP_MAX_REDIRECTS_API, HTTP_TIMEOUT_API, HTTP_TIMEOUT_FETCH
+from utils.pinned_transport import PinnedHTTPAdapter
 from utils.url import SSRFError, validate_base_url, validate_url
 
 logger = logging.getLogger(__name__)
@@ -92,7 +94,7 @@ def read_response_capped(
     return bytes(buf)
 
 
-def _declared_length(response: _ChunkedResponse) -> Optional[int]:
+def _declared_length(response: _ChunkedResponse) -> int | None:
     """Declared Content-Length, or None when absent, malformed, or the body was
     content-encoded: iter_content decodes gzip, so the header counts encoded bytes."""
     headers = response.headers
@@ -145,6 +147,15 @@ class _RevalidatingSession(requests.Session):
         super().__init__()
         self._trust = trust
         self.max_redirects = max_redirects
+        # Explicit falsey list, not coerce_bool_setting: unknown values must
+        # keep the security control ON (fail secure), not fall back to False.
+        pinning = os.environ.get('SSRF_IP_PINNING', 'true').strip().lower()
+        if pinning not in ('0', 'false', 'no', 'off'):
+            adapter = PinnedHTTPAdapter(
+                allow_private=trust is URLTrust.OPERATOR_CONFIGURED
+            )
+            self.mount('http://', adapter)
+            self.mount('https://', adapter)
 
     def rebuild_auth(self, prepared_request, response):
         original_host = urlparse(response.request.url).hostname if response.request else None
@@ -167,7 +178,7 @@ def safe_get(
     max_redirects: int = HTTP_MAX_REDIRECTS_API,
     timeout: float = HTTP_TIMEOUT_FETCH,
     stream: bool = False,
-    headers: Optional[dict] = None,
+    headers: dict | None = None,
 ) -> requests.Response:
     """GET ``url`` via a session that revalidates every redirect hop.
 
@@ -175,6 +186,7 @@ def safe_get(
     and ``requests.RequestException`` for network errors. Callers apply
     ``read_response_capped`` on the returned response to enforce size.
     """
+    # Pre-flight verdict only; PinnedHTTPAdapter re-validates at connect time.
     _validate_for_tier(url, trust)
     session = _RevalidatingSession(trust, max_redirects)
     try:
@@ -191,7 +203,7 @@ def get_capped(
     *,
     max_redirects: int = HTTP_MAX_REDIRECTS_API,
     timeout: float = HTTP_TIMEOUT_FETCH,
-    headers: Optional[dict] = None,
+    headers: dict | None = None,
 ) -> bytes:
     """GET ``url`` and return the body, enforcing a hard byte cap on the
     streamed response so a small compressed payload cannot balloon in memory.
@@ -213,7 +225,7 @@ def safe_head(
     *,
     max_redirects: int = HTTP_MAX_REDIRECTS_API,
     timeout: float = HTTP_TIMEOUT_API,
-    headers: Optional[dict] = None,
+    headers: dict | None = None,
 ) -> requests.Response:
     """HEAD ``url`` via a session that revalidates every redirect hop."""
     _validate_for_tier(url, trust)
@@ -233,7 +245,7 @@ def safe_post(
     data=None,
     json=None,
     files=None,
-    headers: Optional[dict] = None,
+    headers: dict | None = None,
     stream: bool = False,
 ) -> requests.Response:
     """POST ``url`` via a session that revalidates every redirect hop.

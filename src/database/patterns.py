@@ -1,14 +1,13 @@
 """Ad patterns and corrections mixin for MinusPod database."""
 import json
 import logging
-from typing import Optional, Dict, List
 
 from config import SEGMENT_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
 
-def _parse_bounds(raw: Optional[str]) -> Optional[Dict]:
+def _parse_bounds(raw: str | None) -> dict | None:
     """Parse a bounds JSON string to {'start': float, 'end': float}, or None."""
     if not raw:
         return None
@@ -19,7 +18,7 @@ def _parse_bounds(raw: Optional[str]) -> Optional[Dict]:
         return None
 
 
-def _row_with_category(row: Dict) -> Dict:
+def _row_with_category(row: dict) -> dict:
     """Drop a NULL or unrecognized `category` so an unclassified pattern is
     unset the same way an unclassified marker is: key absent, never
     present-and-None, which silently defeats a .get('category', default)."""
@@ -33,7 +32,7 @@ class PatternMixin:
 
     def get_ad_patterns(self, scope: str = None, podcast_id: str = None,
                         network_id: str = None, active_only: bool = True,
-                        source: str = None) -> List[Dict]:
+                        source: str = None) -> list[dict]:
         """Get ad patterns with optional filtering. Includes podcast_name when available."""
         conn = self.get_connection()
 
@@ -69,7 +68,7 @@ class PatternMixin:
         cursor = conn.execute(query, params)
         return [_row_with_category(dict(row)) for row in cursor.fetchall()]
 
-    def find_patterns_by_community_ids(self, community_ids: List[str]) -> Dict[str, Dict]:
+    def find_patterns_by_community_ids(self, community_ids: list[str]) -> dict[str, dict]:
         """Batch lookup: return {community_id: pattern_row} for the given ids.
 
         Avoids the N+1 pattern when applying a manifest.
@@ -79,7 +78,7 @@ class PatternMixin:
         conn = self.get_connection()
         placeholders = ','.join('?' * len(community_ids))
         cursor = conn.execute(
-            f"SELECT * FROM ad_patterns WHERE community_id IN ({placeholders})",
+            f"SELECT * FROM ad_patterns WHERE community_id IN ({placeholders})",  # noqa: S608
             community_ids,
         )
         return {row['community_id']: _row_with_category(dict(row)) for row in cursor.fetchall()}
@@ -99,7 +98,7 @@ class PatternMixin:
         )
         return {row['s'] for row in cursor.fetchall() if row['s']}
 
-    def get_ad_pattern_by_id(self, pattern_id: int) -> Optional[Dict]:
+    def get_ad_pattern_by_id(self, pattern_id: int) -> dict | None:
         """Get a single ad pattern by ID with podcast info."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -114,7 +113,7 @@ class PatternMixin:
         row = cursor.fetchone()
         return _row_with_category(dict(row)) if row else None
 
-    def get_ad_patterns_by_ids(self, pattern_ids: List[int]) -> Dict[int, Dict]:
+    def get_ad_patterns_by_ids(self, pattern_ids: list[int]) -> dict[int, dict]:
         """Batch-load ad patterns by id. Returns ``{id: row}`` for every
         id that exists. Used by `build_bundle` to avoid 200+ single-row
         SELECTs on the "select all" path."""
@@ -128,12 +127,12 @@ class PatternMixin:
                FROM ad_patterns ap
                LEFT JOIN podcasts p ON ap.podcast_id = p.slug
                LEFT JOIN known_sponsors ks ON ap.sponsor_id = ks.id
-               WHERE ap.id IN ({placeholders})""",
+               WHERE ap.id IN ({placeholders})""",  # noqa: S608
             tuple(pattern_ids),
         )
         return {row['id']: _row_with_category(dict(row)) for row in cursor.fetchall()}
 
-    def find_pattern_by_text(self, text_template: str, podcast_id: str = None) -> Optional[Dict]:
+    def find_pattern_by_text(self, text_template: str, podcast_id: str = None) -> dict | None:
         """Find an existing pattern with the same text_template (for deduplication)."""
         conn = self.get_connection()
         if podcast_id:
@@ -158,8 +157,8 @@ class PatternMixin:
     def _create_ad_pattern_conn(self, conn, scope: str, text_template: str = None,
                           sponsor_id: int = None, podcast_id: str = None,
                           network_id: str = None, dai_platform: str = None,
-                          intro_variants: List[str] = None,
-                          outro_variants: List[str] = None,
+                          intro_variants: list[str] = None,
+                          outro_variants: list[str] = None,
                           created_from_episode_id: str = None,
                           duration: float = None,
                           created_by: str = 'auto',
@@ -170,7 +169,8 @@ class PatternMixin:
                           protected_from_sync: int = 0,
                           source_language: str = None,
                           content_hash: str = None,
-                          category: str = None) -> int:
+                          category: str = None,
+                          community_last_confirmed_at: str = None) -> int:
         """Insert an ad pattern on the caller's connection without committing.
         Lets a multi-statement caller (e.g. replace-mode import) own the
         transaction boundary so the whole batch is atomic. Returns pattern ID.
@@ -183,15 +183,15 @@ class PatternMixin:
                 intro_variants, outro_variants, created_from_episode_id,
                 avg_duration, duration_samples, created_by,
                 source, community_id, version, submitted_app_version, protected_from_sync,
-                source_language, content_hash, category)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_language, content_hash, category, community_last_confirmed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (scope, text_template, sponsor_id, podcast_id, network_id, dai_platform,
              json.dumps(intro_variants or []), json.dumps(outro_variants or []),
              created_from_episode_id,
              duration, 1 if duration is not None else 0,
              created_by,
              source, community_id, version, submitted_app_version, protected_from_sync,
-             source_language, content_hash, category)
+             source_language, content_hash, category, community_last_confirmed_at)
         )
         return cursor.lastrowid
 
@@ -211,7 +211,7 @@ class PatternMixin:
                        'avg_duration', 'duration_samples', 'created_by',
                        'source', 'community_id', 'version', 'submitted_app_version',
                        'protected_from_sync', 'source_language', 'content_hash',
-                       'category'):
+                       'category', 'community_last_confirmed_at'):
                 fields.append(f"{key} = ?")
                 values.append(value)
             elif key in ('intro_variants', 'outro_variants'):
@@ -223,7 +223,7 @@ class PatternMixin:
 
         values.append(pattern_id)
         conn.execute(
-            f"UPDATE ad_patterns SET {', '.join(fields)} WHERE id = ?",
+            f"UPDATE ad_patterns SET {', '.join(fields)} WHERE id = ?",  # noqa: S608
             values
         )
         return True
@@ -233,7 +233,7 @@ class PatternMixin:
         with self.transaction() as conn:
             return self._update_ad_pattern_conn(conn, pattern_id, **kwargs)
 
-    def find_pattern_by_community_id(self, community_id: str) -> Optional[Dict]:
+    def find_pattern_by_community_id(self, community_id: str) -> dict | None:
         """Find a pattern by its community_id. Returns dict or None."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -243,11 +243,11 @@ class PatternMixin:
         row = cursor.fetchone()
         return _row_with_category(dict(row)) if row else None
 
-    def get_patterns_by_source(self, source: str, active_only: bool = True) -> List[Dict]:
+    def get_patterns_by_source(self, source: str, active_only: bool = True) -> list[dict]:
         """List ad patterns filtered by source ('local'|'community'|'imported')."""
         conn = self.get_connection()
         query = "SELECT * FROM ad_patterns WHERE source = ?"
-        params: List = [source]
+        params: list = [source]
         if active_only:
             query += " AND is_active = 1"
         query += " ORDER BY id"
@@ -264,35 +264,35 @@ class PatternMixin:
         conn.commit()
         return cursor.rowcount > 0
 
-    def _bulk_delete_patterns_conn(self, conn, ids: List[int]) -> int:
+    def _bulk_delete_patterns_conn(self, conn, ids: list[int]) -> int:
         """Hard-delete patterns by id on the caller's connection (no commit)."""
         if not ids:
             return 0
         placeholders = ','.join('?' * len(ids))
         # Explicit as well as the FK cascade: enforcement is per connection.
         conn.execute(
-            f"DELETE FROM audio_fingerprints WHERE pattern_id IN ({placeholders})",
+            f"DELETE FROM audio_fingerprints WHERE pattern_id IN ({placeholders})",  # noqa: S608
             ids,
         )
         cursor = conn.execute(
-            f"DELETE FROM ad_patterns WHERE id IN ({placeholders})",
+            f"DELETE FROM ad_patterns WHERE id IN ({placeholders})",  # noqa: S608
             ids,
         )
         return cursor.rowcount
 
-    def bulk_delete_patterns(self, ids: List[int]) -> int:
+    def bulk_delete_patterns(self, ids: list[int]) -> int:
         """Hard-delete patterns by id in its own transaction. Returns rows deleted."""
         with self.transaction() as conn:
             return self._bulk_delete_patterns_conn(conn, ids)
 
-    def bulk_disable_patterns(self, ids: List[int]) -> int:
+    def bulk_disable_patterns(self, ids: list[int]) -> int:
         """Set is_active=0 on patterns by id. Returns rows changed."""
         if not ids:
             return 0
         conn = self.get_connection()
         placeholders = ','.join('?' * len(ids))
         cursor = conn.execute(
-            f"UPDATE ad_patterns SET is_active = 0, "
+            f"UPDATE ad_patterns SET is_active = 0, "  # noqa: S608
             f"disabled_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
             f"disabled_reason = COALESCE(disabled_reason, 'bulk-disable') "
             f"WHERE id IN ({placeholders})",
@@ -301,13 +301,13 @@ class PatternMixin:
         conn.commit()
         return cursor.rowcount
 
-    def get_sponsor_tags_map(self) -> Dict[int, List[str]]:
+    def get_sponsor_tags_map(self) -> dict[int, list[str]]:
         """Return {sponsor_id: [tags]} for all active sponsors. Used by matcher."""
         conn = self.get_connection()
         cursor = conn.execute(
             "SELECT id, tags FROM known_sponsors WHERE is_active = 1"
         )
-        result: Dict[int, List[str]] = {}
+        result: dict[int, list[str]] = {}
         for row in cursor.fetchall():
             try:
                 tags = json.loads(row['tags'] or '[]')
@@ -385,8 +385,8 @@ class PatternMixin:
 
     def create_pattern_correction(self, correction_type: str, pattern_id: int = None,
                                    episode_id: str = None, podcast_title: str = None,
-                                   episode_title: str = None, original_bounds: Dict = None,
-                                   corrected_bounds: Dict = None, text_snippet: str = None,
+                                   episode_title: str = None, original_bounds: dict = None,
+                                   corrected_bounds: dict = None, text_snippet: str = None,
                                    sponsor_id: int = None,
                                    source_hold_reason: str = None) -> int:
         """Create a pattern correction record. Returns correction ID.
@@ -456,7 +456,7 @@ class PatternMixin:
             conn.commit()
         return deleted
 
-    def get_pattern_corrections(self, pattern_id: int = None, limit: int = 100) -> List[Dict]:
+    def get_pattern_corrections(self, pattern_id: int = None, limit: int = 100) -> list[dict]:
         """Get pattern corrections, optionally filtered by pattern_id."""
         conn = self.get_connection()
 
@@ -475,7 +475,7 @@ class PatternMixin:
 
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_episode_corrections(self, episode_id: str) -> List[Dict]:
+    def get_episode_corrections(self, episode_id: str) -> list[dict]:
         """Get all corrections for a specific episode."""
         conn = self.get_connection()
         cursor = conn.execute(
@@ -495,7 +495,7 @@ class PatternMixin:
             results.append(item)
         return results
 
-    def get_review_corrections(self) -> List[Dict]:
+    def get_review_corrections(self) -> list[dict]:
         """All corrections that resolve a detection (confirm, false_positive,
         boundary_adjustment) with parsed bounds, for resolution matching in
         the cross-episode ad review endpoint."""
@@ -526,7 +526,7 @@ class PatternMixin:
             })
         return out
 
-    def get_false_positive_corrections(self, episode_id: str) -> List[Dict]:
+    def get_false_positive_corrections(self, episode_id: str) -> list[dict]:
         """Get false_positive corrections for an episode with parsed bounds.
 
         Returns list of dicts with 'start' and 'end' keys for easy overlap checking.
@@ -544,7 +544,7 @@ class PatternMixin:
                 results.append(bounds)
         return results
 
-    def get_confirmed_corrections(self, episode_id: str) -> List[Dict]:
+    def get_confirmed_corrections(self, episode_id: str) -> list[dict]:
         """Get confirmed corrections for an episode with parsed bounds.
 
         Returns list of dicts with 'start' and 'end' keys for easy overlap
@@ -569,7 +569,7 @@ class PatternMixin:
         return results
 
     def get_podcast_corrections_for_prior(self, podcast_slug: str,
-                                          episode_ids: List[str]) -> List[Dict]:
+                                          episode_ids: list[str]) -> list[dict]:
         """Get correction bounds for positional prior learning.
 
         Returns dicts with episode_id, correction_type, start, end. create,
@@ -595,7 +595,7 @@ class PatternMixin:
             AND pc.correction_type IN
                 ('false_positive', 'confirm', 'boundary_adjustment', 'create')
             AND pc.episode_id IN ({placeholders})
-        ''', [podcast_slug] + list(episode_ids))
+        ''', [podcast_slug] + list(episode_ids))  # noqa: S608
 
         results = []
         for row in cursor.fetchall():
@@ -621,7 +621,7 @@ class PatternMixin:
             results.append(result)
         return results
 
-    def get_podcast_false_positive_texts(self, podcast_slug: str, limit: int = 100) -> List[Dict]:
+    def get_podcast_false_positive_texts(self, podcast_slug: str, limit: int = 100) -> list[dict]:
         """Get all false positive texts for a podcast for cross-episode matching.
 
         Returns list of dicts with:

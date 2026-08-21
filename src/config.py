@@ -8,7 +8,8 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+import sqlite3
+from typing import Any
 from urllib.parse import urlparse
 
 _tunable_logger = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ def normalize_segment_category(value: Any) -> str:
 DEFAULT_COMMUNITY_SYNC_CATEGORIES_JSON = json.dumps(list(SEGMENT_CATEGORIES))
 
 
-def resolve_community_sync_categories(raw_json: Optional[str]) -> List[str]:
+def resolve_community_sync_categories(raw_json: str | None) -> list[str]:
     """Parse community_sync_categories JSON into accepted categories, falling
     back to every category on missing, blank, or malformed input. An explicit
     empty list is kept as-is (deliberate 'accept nothing'), not treated as unset.
@@ -97,7 +98,7 @@ def resolve_community_sync_categories(raw_json: Optional[str]) -> List[str]:
     return [c for c in parsed if c in SEGMENT_CATEGORIES]
 
 
-def resolve_jit_blocked_user_agents(raw_json: Optional[str]) -> List[str]:
+def resolve_jit_blocked_user_agents(raw_json: str | None) -> list[str]:
     """Parse jit_blocked_user_agents JSON into patterns, empty on bad input."""
     if not raw_json:
         return []
@@ -110,7 +111,7 @@ def resolve_jit_blocked_user_agents(raw_json: Optional[str]) -> List[str]:
     return [p.strip() for p in parsed if isinstance(p, str) and p.strip()]
 
 
-def user_agent_is_jit_blocked(user_agent: Optional[str], patterns: List[str]) -> bool:
+def user_agent_is_jit_blocked(user_agent: str | None, patterns: list[str]) -> bool:
     """True when the agent matches a pattern. A leading '^' anchors to the
     start, which short agents like 'atc/' need so they cannot match mid-string.
     """
@@ -128,8 +129,8 @@ def user_agent_is_jit_blocked(user_agent: Optional[str], patterns: List[str]) ->
 
 
 def resolve_segment_category_actions_map(
-        raw_json: Optional[str],
-        baseline: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        raw_json: str | None,
+        baseline: dict[str, str] | None = None) -> dict[str, str]:
     """Parse segment_category_actions JSON and merge over `baseline` (default:
     every category at DEFAULT_SEGMENT_ACTION). Invalid JSON, non-dict payloads,
     and unknown category/action pairs are ignored rather than clearing keys.
@@ -687,6 +688,89 @@ PROCESSING_MODE_COLUMN_UPDATES = {
 }
 
 
+# Low-ad-yield response policy: what to do when a pipeline run finishes with
+# far less ad time removed than the feed usually yields. Values map to the
+# reprocess modes the reprocess endpoint accepts.
+LOW_AD_YIELD_ACTION_MODES = {
+    'redetect': 'llm',
+    'reprocess': 'reprocess',
+    'full': 'full',
+}
+LOW_AD_YIELD_ACTION_NOTHING = 'nothing'
+LOW_AD_YIELD_ACTIONS = (LOW_AD_YIELD_ACTION_NOTHING, *LOW_AD_YIELD_ACTION_MODES)
+
+
+def resolve_low_ad_yield_action(db, podcast_row) -> str:
+    """Per-feed low-ad-yield action if set, else the global setting.
+
+    Unknown or unset values resolve to 'nothing' so a bad row cannot start
+    reruns nobody asked for.
+    """
+    feed_value = (podcast_row or {}).get('low_ad_yield_action')
+    if feed_value in LOW_AD_YIELD_ACTIONS:
+        return feed_value
+    try:
+        value = db.get_setting('low_ad_yield_action')
+    except Exception:
+        return LOW_AD_YIELD_ACTION_NOTHING
+    if value is None:
+        value = resolve_env_backed_default('low_ad_yield_action')
+    return value if value in LOW_AD_YIELD_ACTIONS else LOW_AD_YIELD_ACTION_NOTHING
+
+
+# Episode run logs (#660): per-feed override values and the global bounds.
+EPISODE_LOGS_ON = 'on'
+EPISODE_LOGS_OFF = 'off'
+EPISODE_LOGS_VALUES = (EPISODE_LOGS_ON, EPISODE_LOGS_OFF)
+EPISODE_LOG_RETENTION_DAYS_DEFAULT = 30
+EPISODE_LOG_RETENTION_DAYS_MIN = 0
+EPISODE_LOG_RETENTION_DAYS_MAX = 365
+EPISODE_LOG_LEVEL_DEBUG = 'debug'
+EPISODE_LOG_LEVEL_INFO = 'info'
+EPISODE_LOG_LEVELS = (EPISODE_LOG_LEVEL_DEBUG, EPISODE_LOG_LEVEL_INFO)
+
+
+def _episode_log_setting(db, key):
+    """One episode-log setting from the given handle, or None to use the
+    env-backed default. The handle is the only source read."""
+    try:
+        raw = db.get_setting(key)
+    except sqlite3.Error as err:
+        _tunable_logger.warning("Could not read %s from the given handle: %s", key, err)
+        return None
+    return raw if raw is not None and str(raw).strip() != '' else None
+
+
+def resolve_episode_log_retention_days(db) -> int:
+    """Days to keep episode run logs; 0 disables run-log storage entirely."""
+    raw = _episode_log_setting(db, 'episode_log_retention_days')
+    if raw is None:
+        raw = resolve_env_backed_default('episode_log_retention_days')
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        days = int(resolve_env_backed_default('episode_log_retention_days'))
+    return max(EPISODE_LOG_RETENTION_DAYS_MIN,
+               min(EPISODE_LOG_RETENTION_DAYS_MAX, days))
+
+
+def resolve_episode_log_level(db) -> int:
+    """Minimum level kept in a run log, as a logging level constant."""
+    raw = _episode_log_setting(db, 'episode_log_level')
+    if raw is None:
+        raw = resolve_env_backed_default('episode_log_level')
+    return (logging.INFO if str(raw).strip().lower() == EPISODE_LOG_LEVEL_INFO
+            else logging.DEBUG)
+
+
+def resolve_episode_log_storage(db, podcast_row) -> bool:
+    """Whether this run's log is stored: retention 0 disables everything,
+    otherwise the per-feed override wins and NULL follows the global on."""
+    if resolve_episode_log_retention_days(db) <= 0:
+        return False
+    return (podcast_row or {}).get('episode_logs') != EPISODE_LOGS_OFF
+
+
 def resolve_skip_second_pass(podcast_row):
     """Whether the feed opts out of the pass-2 verification scan (issue #599).
 
@@ -886,7 +970,7 @@ def differential_fetch_effective(explicit, dai_platform=None, dai_likely=False):
     return bool(dai_platform or dai_likely)
 
 
-def resolve_max_ad_duration_override(db, podcast_id) -> Optional[float]:
+def resolve_max_ad_duration_override(db, podcast_id) -> float | None:
     """Per-feed max ad duration cap in seconds (Phase C held-for-review).
 
     Returns None when unset or on any error -- None means no cap (the
@@ -1269,7 +1353,7 @@ PROVIDERS_NON_ANTHROPIC = ('openai-compatible', 'ollama')
 class ModelNotConfiguredError(ValueError):
     """Raised when a resolver has no configured model to return."""
 
-    def __init__(self, setting_key: str, message: Optional[str] = None):
+    def __init__(self, setting_key: str, message: str | None = None):
         # message: reconstructs this type after it crossed a dict boundary
         # (e.g. ad_detector's failure response) with the original text intact.
         self.setting_key = setting_key
@@ -1494,7 +1578,7 @@ STAGE_TUNABLE_RANGES = {
 STAGE_TUNABLE_REASONING_LEVELS = {"none", "low", "medium", "high"}
 
 
-def _coerce_tunable(key: str, raw: Any, source_label: str) -> Optional[Any]:
+def _coerce_tunable(key: str, raw: Any, source_label: str) -> Any | None:
     """Coerce a stored or env value to int/float/enum. Returns None on bad value
     (caller treats None as 'use default')."""
     if raw is None:
@@ -1536,7 +1620,7 @@ def _coerce_tunable(key: str, raw: Any, source_label: str) -> Optional[Any]:
     return v
 
 
-def get_stage_tunable(key: str, settings: Optional[dict] = None) -> Any:
+def get_stage_tunable(key: str, settings: dict | None = None) -> Any:
     """Resolve DB > env > default for a per-stage tunable.
 
     Same precedence as every other env-backed setting: a value saved in the
@@ -1563,7 +1647,7 @@ def get_stage_tunable(key: str, settings: Optional[dict] = None) -> Any:
     # DB lookup first. Caller-supplied dict takes precedence; otherwise use
     # the shared TTL cache so stage code calling this on every window doesn't
     # hammer SQLite. 5s TTL still propagates Settings UI changes promptly.
-    db_val: Optional[str] = None
+    db_val: str | None = None
     if settings is not None:
         entry = settings.get(key)
         if isinstance(entry, dict):
@@ -1603,7 +1687,7 @@ def get_stage_tunable(key: str, settings: Optional[dict] = None) -> Any:
     return default
 
 
-def stage_tunable_env_override(key: str) -> Optional[str]:
+def stage_tunable_env_override(key: str) -> str | None:
     """Return the env-var name supplying this key's default, or None.
 
     Env no longer beats a UI-saved value (issue #491 consolidation); the
@@ -1654,7 +1738,7 @@ STAGE_TUNABLE_PAYLOAD_KEYS = (
 )
 
 
-def resolve_chapter_geometry(settings: Optional[dict] = None):
+def resolve_chapter_geometry(settings: dict | None = None):
     """Read (target, window, max_boundaries, min_duration) for chapter density.
 
     Clamped so a stored combination that slipped past API validation, or an env
@@ -1670,7 +1754,7 @@ def resolve_chapter_geometry(settings: Optional[dict] = None):
     return target, window, max_boundaries, min_duration
 
 
-def resolve_stage_tunables(prefix: str, settings: Optional[dict] = None):
+def resolve_stage_tunables(prefix: str, settings: dict | None = None):
     """Read (max_tokens, temperature, reasoning) for a stage prefix.
 
     Reasoning picks the right key based on the active provider: numeric budget
@@ -1701,6 +1785,16 @@ AD_DETECTION_PARALLEL_WINDOWS_MIN = 1
 AD_DETECTION_PARALLEL_WINDOWS_MAX = 32
 
 
+# Above this failed-window ratio the whole detection pass fails (episode
+# retried later) instead of publishing with blind spots. 1.0 disables.
+# Parse-time default only: the runtime reads the DB-backed setting via
+# ad_detector._resolve_max_failed_window_ratio.
+AD_DETECTION_MAX_FAILED_WINDOW_RATIO_DEFAULT = '0.25'
+AD_DETECTION_MAX_FAILED_WINDOW_RATIO = float(
+    os.environ.get('AD_DETECTION_MAX_FAILED_WINDOW_RATIO',
+                   AD_DETECTION_MAX_FAILED_WINDOW_RATIO_DEFAULT))
+
+
 # Ad-reviewer parallelism. Tracks the same shape as the detector knob but
 # is tuned separately because each reviewer call is one ad (not one
 # transcript window), so the cost / latency profile is different.
@@ -1715,6 +1809,22 @@ def _validate_audio_bitrate(value: str) -> bool:
 
 def _validate_bool_string(value: str) -> bool:
     return str(value).strip().lower() in ('true', 'false', '1', '0', 'yes', 'no')
+
+
+def _validate_low_ad_yield_action(value: str) -> bool:
+    return value in LOW_AD_YIELD_ACTIONS
+
+
+def _validate_episode_log_retention_days(value: str) -> bool:
+    try:
+        days = int(value)
+    except (ValueError, TypeError):
+        return False
+    return EPISODE_LOG_RETENTION_DAYS_MIN <= days <= EPISODE_LOG_RETENTION_DAYS_MAX
+
+
+def _validate_episode_log_level(value: str) -> bool:
+    return value in EPISODE_LOG_LEVELS
 
 
 def _validate_badge_position(value: str) -> bool:
@@ -1746,6 +1856,13 @@ def _validate_parallel_windows(value: str) -> bool:
     except (ValueError, TypeError):
         return False
     return AD_DETECTION_PARALLEL_WINDOWS_MIN <= n <= AD_DETECTION_PARALLEL_WINDOWS_MAX
+
+
+def _validate_failed_window_ratio(value: str) -> bool:
+    try:
+        return 0.0 <= float(value) <= 1.0
+    except (ValueError, TypeError):
+        return False
 
 
 def _validate_reviewer_parallel(value: str) -> bool:
@@ -1858,6 +1975,12 @@ ENV_BACKED_SETTINGS = (
         _validate_parallel_windows,
     ),
     (
+        'ad_detection_max_failed_window_ratio',
+        'AD_DETECTION_MAX_FAILED_WINDOW_RATIO',
+        AD_DETECTION_MAX_FAILED_WINDOW_RATIO_DEFAULT,
+        _validate_failed_window_ratio,
+    ),
+    (
         'ad_reviewer_parallel_ads',
         'AD_REVIEWER_PARALLEL_ADS',
         str(AD_REVIEWER_PARALLEL_ADS_DEFAULT),
@@ -1876,10 +1999,20 @@ ENV_BACKED_SETTINGS = (
     ('feed_auth_enabled', 'FEED_AUTH_ENABLED', 'false', _validate_bool_string),
     ('artwork_watermark_enabled', 'ARTWORK_WATERMARK_ENABLED', 'false', _validate_bool_string),
     ('artwork_badge_position', 'ARTWORK_BADGE_POSITION', 'bottom-right', _validate_badge_position),
+    # Gates the reviewer calibration self-test auto-run on review_model change.
+    ('reviewer_calibration_on_change', 'REVIEWER_CALIBRATION_ON_CHANGE', 'true', _validate_bool_string),
+    # Automatic response to a low-ad-yield pipeline run; per-feed overridable.
+    ('low_ad_yield_action', 'LOW_AD_YIELD_ACTION', LOW_AD_YIELD_ACTION_NOTHING,
+     _validate_low_ad_yield_action),
+    # Episode run logs (#660): retention 0 turns the subsystem off.
+    ('episode_log_retention_days', 'EPISODE_LOG_RETENTION_DAYS',
+     str(EPISODE_LOG_RETENTION_DAYS_DEFAULT), _validate_episode_log_retention_days),
+    ('episode_log_level', 'EPISODE_LOG_LEVEL', EPISODE_LOG_LEVEL_DEBUG,
+     _validate_episode_log_level),
 )
 
 
-def resolve_env_backed_default(key: str) -> Optional[str]:
+def resolve_env_backed_default(key: str) -> str | None:
     """Return the validated env_var value for a registered key, or its
     fallback default. Returns None if the key is not in ENV_BACKED_SETTINGS.
     """

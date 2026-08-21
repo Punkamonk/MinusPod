@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+from datetime import datetime, timezone
 
 from flask import Response, redirect, request, send_file, abort, url_for
 
@@ -15,6 +16,7 @@ from config import (
     is_pending_review, resolve_feed_processing_mode,
     PROCESSING_MODE_PASSTHROUGH, PROCESSING_MODE_SKIP_DETECTION, PROCESSING_MODE_CUE_ONLY,
 )
+from ad_yield import latest_completed_run, low_ad_yield
 from audio_peaks import compute_peaks, PeaksError
 from audio_processor import get_replacement_duration
 from chapters_generator import ChaptersGenerator
@@ -22,13 +24,17 @@ from database.queue import compute_queue_priority
 from embedded_chapters import embed_chapters
 from llm_client import start_episode_token_tracking, get_episode_token_totals
 from processing_queue import ProcessingQueue
+from reprocess_modes import (
+    REPROCESS_MODE_NEEDS_TRANSCRIPT, batch_clear_episodes_for_mode,
+    clear_episode_for_mode, reset_episode_for_reprocess,
+)
 from split_planning import build_split_candidates, build_split_pieces
 from utils.constants import EpisodeStatus
 from utils.episode_paths import episode_public_url
 from utils.text import (
     extract_timed_spans_in_range, parse_transcript_segments,
 )
-from utils.time import utc_now_iso
+from utils.time import ISO_FORMAT, utc_now_iso
 
 logger = logging.getLogger('podcast.api')
 
@@ -73,41 +79,25 @@ def _check_recut_preconditions(db, slug, episode_id, episode):
 # reprocess_episode_with_mode = 'single'). Fields:
 #   contexts:         endpoints that may request the mode. recut stays
 #                     single-episode-only by design.
-#   clear:            what to wipe before requeueing. 'details' wipes the whole
-#                     episode_details row; 'ad_data' keeps the saved transcript
-#                     (clears just the ad-detection outputs) so transcription is
-#                     skipped; 'none' keeps everything -- recut re-cuts the
-#                     retained original from the saved ad detections and
-#                     re-times the saved transcript, so clearing either would
-#                     break it (the derived audio/VTT/chapters are overwritten
-#                     during the recut).
-#   needs_transcript: mode reuses the saved transcript to skip re-transcription
-#                     and cannot run without one (issue #349).
 #   preconditions:    extra per-episode input checks, single-episode-only
 #                     (returns an error_response or None).
+# What each mode wipes before requeueing, and which modes need a saved
+# transcript, live in reprocess_modes, which the pipeline imports as well.
 REPROCESS_MODE_SPECS = {
     'reprocess': {
         'contexts': ('batch', 'bulk', 'single'),
-        'clear': 'details',
-        'needs_transcript': False,
         'preconditions': None,
     },
     'full': {
         'contexts': ('batch', 'bulk', 'single'),
-        'clear': 'details',
-        'needs_transcript': False,
         'preconditions': None,
     },
     'llm': {
         'contexts': ('batch', 'bulk', 'single'),
-        'clear': 'ad_data',
-        'needs_transcript': True,
         'preconditions': None,
     },
     'recut': {
         'contexts': ('single',),
-        'clear': 'none',
-        'needs_transcript': False,
         'preconditions': _check_recut_preconditions,
     },
 }
@@ -116,17 +106,6 @@ REPROCESS_MODE_SPECS = {
 def _mode_allowed(mode, context):
     spec = REPROCESS_MODE_SPECS.get(mode)
     return spec is not None and context in spec['contexts']
-
-
-def _clear_episode_for_mode(db, slug, episode_id, mode):
-    """Clear cached detection data before a reprocess, per the mode's spec."""
-    clear = REPROCESS_MODE_SPECS[mode]['clear']
-    if clear == 'none':
-        return
-    if clear == 'ad_data':
-        db.clear_episode_ad_data(slug, episode_id)
-    else:
-        db.clear_episode_details(slug, episode_id)
 
 
 def _processed_url(slug: str, episode_id: str, version: int,
@@ -142,18 +121,11 @@ def _processed_url(slug: str, episode_id: str, version: int,
     return episode_public_url("", slug, episode_id, version, key=key)
 
 
-def _latest_completed_run(runs):
-    """Most recent completed run from a processingRuns list, or None. The
-    run that produced the currently served audio."""
-    return next((r for r in reversed(runs) if r.get('status') == 'completed'),
-                None)
-
-
 def _episode_token_fields(runs) -> dict:
     """API token fields from the most recent completed run (or empty dict).
     Derived from the processingRuns list already queried for the response,
     replacing a second (unindexed) processing_history lookup."""
-    run = _latest_completed_run(runs)
+    run = latest_completed_run(runs)
     if not run:
         return {}
     return {
@@ -303,62 +275,20 @@ def _processing_runs(db, episode):
             'inputTokens': row.get('input_tokens') or 0,
             'outputTokens': row.get('output_tokens') or 0,
             'llmCost': round(row.get('llm_cost') or 0.0, 6),
+            'hasLog': bool(row.get('log_file')),
             'stats': _run_stats_to_api(stats),
         })
     return runs
 
 
-# A run is flagged only when the feed has an established ad load (average
-# of at least 2 minutes over 3+ recent episodes) and this episode removed
-# under 35% of it. DAI copies served with unfilled slots trip this; so
-# would a real detection miss.
-_LOW_YIELD_MIN_AVG_SECONDS = 120
-_LOW_YIELD_MIN_SAMPLES = 3
-_LOW_YIELD_FRACTION = 0.35
-
-
-def _low_ad_yield(db, episode, runs):
-    """Compare this episode's removed ad time against the feed's recent
-    average (#519). Returns the comparison dict when far below it.
-
-    Pass-through runs (#521) and skip-detection runs (#538) remove nothing
-    by design, so they never get the badge. The check keys on the run that
-    produced the served audio (the latest completed one), not merely the
-    newest history row, so a failed later attempt cannot un-suppress it.
-    Suppressed siblings in the baseline only drag the feed average down,
-    which makes the badge less likely to fire, not more.
-    """
-    latest_completed = _latest_completed_run(runs) if runs else None
-    latest_stats = ((latest_completed or {}).get('stats')) or {}
-    if latest_stats.get('mode') == 'passthrough' or latest_stats.get('detectionSkipped'):
-        return None
-    original = episode.get('original_duration')
-    new = episode.get('new_duration')
-    if not original or new is None:
-        return None
-    removed = original - new
-    yields = db.get_recent_ad_yields(episode['podcast_id'],
-                                     episode['episode_id'])
-    if len(yields) < _LOW_YIELD_MIN_SAMPLES:
-        return None
-    average = sum(yields) / len(yields)
-    if average < _LOW_YIELD_MIN_AVG_SECONDS or removed >= average * _LOW_YIELD_FRACTION:
-        return None
-    return {
-        'removedSeconds': round(removed, 1),
-        'feedAverageSeconds': round(average, 1),
-        'sampleSize': len(yields),
-    }
-
-
 def _partial_detection(episode, runs):
     """Degraded pass-1 completion (episodes.detection_degraded). Window
     counts come from the run that produced the served audio (the latest
-    completed one, same lookup _low_ad_yield uses above), when available."""
+    completed one, same lookup low_ad_yield uses), when available."""
     reason = episode.get('detection_degraded')
     if not reason:
         return None
-    latest_completed = _latest_completed_run(runs) if runs else None
+    latest_completed = latest_completed_run(runs) if runs else None
     latest_stats = ((latest_completed or {}).get('stats')) or {}
     windows = latest_stats.get('windows') or {}
     return {
@@ -486,7 +416,7 @@ def get_episode(slug, episode_id):
         'verificationResponse': episode.get('second_pass_response'),
         'rssDuration': episode.get('rss_duration'),
         'processingRuns': processing_runs,
-        'lowAdYield': _low_ad_yield(db, episode, processing_runs),
+        'lowAdYield': low_ad_yield(db, episode, processing_runs),
         'navigation': db.get_episode_neighbors(slug, episode_id),
         **_episode_token_fields(processing_runs),
     })
@@ -616,6 +546,117 @@ def serve_original_audio(slug, episode_id):
     # download serially and refuse to seek past the buffered tail.
     response.headers['Accept-Ranges'] = 'bytes'
     return response
+
+
+# Straight from the stdlib so warning/critical aliases cannot drift from what
+# the recorder writes.
+RUN_LOG_LEVELS = {name.lower(): value
+                  for name, value in logging.getLevelNamesMapping().items()}
+# A level name the map does not know ranks above every filter, so a custom or
+# future level is never silently hidden.
+UNKNOWN_RUN_LOG_LEVEL = 100
+
+
+def _run_log_row(db, slug, episode_id, run_number):
+    """The history row for this run, or (None, error_response)."""
+    episode = db.get_episode(slug, episode_id)
+    if not episode:
+        return None, error_response('Episode not found', 404)
+    for row in db.get_episode_processing_runs(episode['podcast_id'],
+                                              episode['episode_id']):
+        if row.get('reprocess_number') == run_number:
+            return row, None
+    return None, error_response('Processing run not found', 404)
+
+
+def _missing_log_response(code, message):
+    """404 that says whether the log was never stored or has been pruned."""
+    return json_response({'error': message, 'status': 404, 'code': code}, 404)
+
+
+@api.route('/feeds/<slug>/episodes/<episode_id>/runs/<int:run_number>/log',
+           methods=['GET'])
+@log_request
+def get_episode_run_log(slug, episode_id, run_number):
+    """Return one processing run's pipeline log (#660).
+
+    Query params:
+        format (json|raw, default json) - raw downloads the JSONL file
+        level  (debug|info|warning|error) - minimum level, json only
+    """
+    from run_log import TRUNCATION_MARKER, resolve_stored_log_path
+    from storage import PathContainmentError
+
+    db = get_database()
+    row, err = _run_log_row(db, slug, episode_id, run_number)
+    if err is not None:
+        return err
+    if not row.get('log_file'):
+        return _missing_log_response(
+            'log_not_stored', 'No log was stored for this run')
+
+    try:
+        path = resolve_stored_log_path(get_storage().data_dir, row['log_file'])
+    except PathContainmentError:
+        logger.warning(f"Run log pointer escapes the data dir: {row['log_file']}")
+        return _missing_log_response('log_pruned', 'Run log is no longer available')
+    if not path.exists():
+        return _missing_log_response('log_pruned', 'Run log is no longer available')
+
+    if request.args.get('format') == 'raw':
+        filename = f"{slug}-{episode_id}-run{run_number}.jsonl"
+        try:
+            response = send_file(path, mimetype='text/plain', as_attachment=True,
+                                 download_name=filename, conditional=True)
+        except OSError:
+            # The sweep can land between the check above and this read.
+            return _missing_log_response('log_pruned', 'Run log is no longer available')
+        # Quoted filename: werkzeug leaves a bare token unquoted, and the
+        # documented header shape is the quoted one.
+        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        # Log text is attacker-influenced (episode titles, LLM output), so the
+        # browser must neither sniff it nor run anything from it.
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['Content-Security-Policy'] = "default-src 'none'"
+        return response
+
+    level_arg = (request.args.get('level') or '').lower()
+    if level_arg and level_arg not in RUN_LOG_LEVELS:
+        return error_response(
+            f"level must be one of: {', '.join(sorted(RUN_LOG_LEVELS))}", 400)
+    # Server-side filter kept alongside the viewer's client-side chips: the
+    # API is usable on its own, the viewer filters without a refetch per chip.
+    minimum = RUN_LOG_LEVELS.get(level_arg, 0)
+
+    try:
+        text = path.read_text(encoding='utf-8', errors='replace')
+        size = path.stat().st_size
+    except OSError:
+        return _missing_log_response('log_pruned', 'Run log is no longer available')
+
+    lines = []
+    truncated = False
+    for raw_line in text.splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            entry = json.loads(raw_line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if entry.get('msg') == TRUNCATION_MARKER:
+            truncated = True
+        rank = RUN_LOG_LEVELS.get(str(entry.get('level', '')).lower(),
+                                  UNKNOWN_RUN_LOG_LEVEL)
+        if rank < minimum:
+            continue
+        lines.append(entry)
+
+    return json_response({
+        'runNumber': run_number,
+        'lines': lines,
+        'truncated': truncated,
+        'bytes': size,
+    })
 
 
 @api.route('/feeds/<slug>/episodes/<episode_id>/peaks', methods=['GET'])
@@ -978,7 +1019,6 @@ def reprocess_all_episodes(slug):
 
     if not _mode_allowed(mode, 'batch'):
         return error_response('Invalid mode. Use "reprocess", "full", or "llm"', 400)
-    mode_spec = REPROCESS_MODE_SPECS[mode]
 
     podcast = db.get_podcast_by_slug(slug)
     if not podcast:
@@ -1007,14 +1047,14 @@ def reprocess_all_episodes(slug):
             continue
 
         # LLM-only reprocess needs a saved transcript; skip episodes without one.
-        if mode_spec['needs_transcript'] and not db.has_transcript(slug, episode_id):
+        if REPROCESS_MODE_NEEDS_TRANSCRIPT[mode] and not db.has_transcript(slug, episode_id):
             skipped.append({'episodeId': episode_id,
                             'reason': 'No transcript for LLM-only reprocess'})
             continue
 
         try:
             # Keep existing audio until the new version is durable (orchestration-5).
-            _clear_episode_for_mode(db, slug, episode_id, mode)
+            clear_episode_for_mode(db, slug, episode_id, mode)
 
             # Reset status to pending with reprocess mode for priority queue
             db.upsert_episode(
@@ -1106,7 +1146,6 @@ def bulk_episode_action(slug):
     elif action in ('reprocess', 'reprocess_full', 'reprocess_llm'):
         # File cleanup must be per-episode, but DB updates are batched
         mode = {'reprocess_full': 'full', 'reprocess_llm': 'llm'}.get(action, 'reprocess')
-        mode_spec = REPROCESS_MODE_SPECS[mode]
         eligible_ids = []
         for episode_id in episode_ids:
             try:
@@ -1115,7 +1154,7 @@ def bulk_episode_action(slug):
                     skipped += 1
                     continue
                 # LLM-only reprocess needs a saved transcript; skip episodes without one.
-                if mode_spec['needs_transcript'] and not db.has_transcript(slug, episode_id):
+                if REPROCESS_MODE_NEEDS_TRANSCRIPT[mode] and not db.has_transcript(slug, episode_id):
                     skipped += 1
                     continue
                 # Keep existing audio until the new version is durable (orchestration-5).
@@ -1124,11 +1163,7 @@ def bulk_episode_action(slug):
                 logger.error(f"Bulk action error for {slug}:{episode_id}: {e}")
                 errors.append(f"{episode_id}: bulk action failed")
         if eligible_ids:
-            # LLM-only mode preserves the transcript; other modes wipe the row.
-            if mode_spec['clear'] == 'ad_data':
-                db.batch_clear_episode_ad_data(slug, eligible_ids)
-            else:
-                db.batch_clear_episode_details(slug, eligible_ids)
+            batch_clear_episodes_for_mode(db, slug, eligible_ids, mode)
             now_str = utc_now_iso()
             queued = db.batch_set_episodes_pending(slug, eligible_ids,
                                                     reprocess_mode=mode,
@@ -1281,10 +1316,23 @@ def retry_ad_detection(slug, episode_id):
 
 # ========== Processing Queue Endpoints ==========
 
+def _epoch_to_iso(ts):
+    """Epoch seconds (StatusService's display queue) as an ISO string, so every
+    queuedAt in the response has the same shape as the DB's created_at."""
+    if not ts:
+        return None
+    return datetime.fromtimestamp(ts, timezone.utc).strftime(ISO_FORMAT)
+
+
 @api.route('/episodes/processing', methods=['GET'])
 @log_request
 def get_processing_episodes():
-    """Episodes processing now (DB + StatusService current_job). Issue #236."""
+    """Episodes processing now, then the full pending queue in dequeue order.
+
+    Sources: the DB's 'processing' rows plus StatusService.current_job for the
+    active job; auto_process_queue pending rows plus StatusService's display
+    queue for the backlog. Issue #236.
+    """
     db = get_database()
     conn = db.get_connection()
 
@@ -1324,25 +1372,55 @@ def get_processing_episodes():
                 'stage': current.stage,
             })
 
-    # Append queued episodes (waiting on the lock) so the panel and banner
-    # surface "what's next" alongside the active job.
+    # Append the waiting queue after the active job(s). The auto_process_queue
+    # rows are the real backlog, so they come first and in dequeue order
+    # (priority DESC, created_at ASC, the same ORDER BY the worker claims by);
+    # StatusService's display queue only holds entries an enqueue path added by
+    # hand, so it contributes just the rows the DB does not already cover.
     seen = {(e['slug'], e['episodeId']) for e in episodes}
+    queued = []
+    pending_rows = db.get_pending_queued_episodes()
+    pending_total = pending_rows[0]['total_pending'] if pending_rows else 0
+    for row in pending_rows:
+        key = (row['podcast_slug'], row['episode_id'])
+        if key in seen:
+            continue
+        seen.add(key)
+        queued.append({
+            'episodeId': row['episode_id'],
+            'slug': row['podcast_slug'],
+            'title': row['title'] or 'Unknown',
+            'podcast': row['podcast_title'] or row['podcast_slug'],
+            'startedAt': None,
+            'queuedAt': row['created_at'],
+            'priority': row['priority'],
+            'stage': 'queued',
+        })
+
     for q in status.queued_episodes:
         key = (q['slug'], q['episode_id'])
         if key in seen:
             continue
         seen.add(key)
-        episodes.append({
+        queued.append({
             'episodeId': q['episode_id'],
             'slug': q['slug'],
             'title': q.get('title') or 'Unknown',
             'podcast': q.get('podcast_name') or q['slug'],
             'startedAt': None,
-            'queuedAt': q.get('queued_at'),
+            'queuedAt': _epoch_to_iso(q.get('queued_at')),
+            'priority': None,
             'stage': 'queued',
         })
 
-    return json_response(episodes)
+    # queueTotal counts the whole backlog even when the row list is capped, so
+    # the panel's "Waiting (N)" does not silently under-report a long queue.
+    queue_total = (pending_total - len(pending_rows)) + len(queued)
+    for position, entry in enumerate(queued, start=1):
+        entry['queuePosition'] = position
+        entry['queueTotal'] = queue_total
+
+    return json_response(episodes + queued)
 
 
 @api.route('/feeds/<slug>/episodes/<episode_id>/cancel', methods=['POST'])
@@ -1462,7 +1540,7 @@ def reprocess_episode_with_mode(slug, episode_id):
 
     # LLM-only reprocess reuses the saved transcript to skip re-transcription;
     # it cannot run without one. Mirror retry-ad-detection's guard.
-    if mode_spec['needs_transcript'] and not db.has_transcript(slug, episode_id):
+    if REPROCESS_MODE_NEEDS_TRANSCRIPT[mode] and not db.has_transcript(slug, episode_id):
         return error_response(
             'No transcript available for LLM-only reprocess. '
             'Use "reprocess" or "full" to re-transcribe first.', 400)
@@ -1473,23 +1551,11 @@ def reprocess_episode_with_mode(slug, episode_id):
             return err
 
     try:
-        # 1. Set reprocess_mode FIRST so process_episode can read it
-        db.upsert_episode(
-            slug, episode_id,
-            status=EpisodeStatus.PENDING.value,
-            reprocess_mode=mode,
-            reprocess_requested_at=utc_now_iso(),
-            retry_count=0,
-            error_message=None,
-            deferred_at=None,
-            deferred_service=None,
-        )
+        # Mode, user-request mark, and the per-mode clear. The processed audio
+        # stays until the new version is durable (orchestration-5).
+        reset_episode_for_reprocess(db, slug, episode_id, mode)
 
-        # 2. Clear cached detection data; keep the processed audio until the new
-        # version is durable (orchestration-5).
-        _clear_episode_for_mode(db, slug, episode_id, mode)
-
-        # 3. Get episode metadata for processing
+        # Get episode metadata for processing
         episode_url = episode.get('original_url')
         episode_title = episode.get('title', 'Unknown')
         podcast_name = podcast.get('title', slug)

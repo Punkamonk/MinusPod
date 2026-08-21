@@ -10,7 +10,7 @@ Handles:
 import logging
 import json
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple
+from datetime import datetime, timedelta
 
 from config import (
     PODCAST_TO_NETWORK_THRESHOLD,
@@ -28,6 +28,7 @@ from utils.constants import (
     LEARNING_LONG_DURATION_THRESHOLD,
 )
 from utils.text import extract_text_from_segments
+from utils.time import parse_iso_utc
 from sponsor_normalize import get_or_create_known_sponsor
 from community_export import (
     find_foreign_sponsors,
@@ -44,8 +45,36 @@ VERIFICATION_LONG_DURATION_THRESHOLD = LEARNING_LONG_DURATION_THRESHOLD
 
 logger = logging.getLogger('podcast.patterns')
 
+TRUST_ACTIVE_WINDOW_DAYS = 90
+TRUST_STALE_WINDOW_DAYS = 365
 
-def _splice_prefix(text: str, prefix: str) -> Tuple[str, bool]:
+
+def compute_pattern_trust(row: dict, now: datetime) -> str:
+    """Trust tier for a pattern row: 'active' | 'unproven' | 'stale'.
+
+    'stale' requires source == 'community' and every relevant timestamp
+    older than TRUST_STALE_WINDOW_DAYS; local patterns are never 'stale'.
+    """
+    last_matched = parse_iso_utc(row.get('last_matched_at'))
+    if last_matched is not None and now - last_matched <= timedelta(days=TRUST_ACTIVE_WINDOW_DAYS):
+        return 'active'
+
+    if row.get('source') != 'community':
+        return 'unproven'
+
+    candidates = [
+        parse_iso_utc(row.get('community_last_confirmed_at')),
+        parse_iso_utc(row.get('created_at')),
+    ]
+    parsed = [d for d in candidates if d is not None]
+    if not parsed:
+        return 'unproven'
+    if now - max(parsed) > timedelta(days=TRUST_STALE_WINDOW_DAYS):
+        return 'stale'
+    return 'unproven'
+
+
+def _splice_prefix(text: str, prefix: str) -> tuple[str, bool]:
     """Return (text-without-prefix, applied?). Whitespace- and
     case-insensitive: a leading space on either side or a case mismatch
     doesn't block the splice. When `prefix` is empty or doesn't actually
@@ -60,7 +89,7 @@ def _splice_prefix(text: str, prefix: str) -> Tuple[str, bool]:
     return (text[:offset] + stripped[len(prefix):]).lstrip(), True
 
 
-def _splice_suffix(text: str, suffix: str) -> Tuple[str, bool]:
+def _splice_suffix(text: str, suffix: str) -> tuple[str, bool]:
     """Mirror of `_splice_prefix` for the tail end."""
     if not suffix:
         return text, False
@@ -145,7 +174,7 @@ class PatternMatch:
     pattern_id: int
     scope: str
     confidence: float
-    sponsor: Optional[str]
+    sponsor: str | None
     text_similarity: float
 
 
@@ -168,7 +197,7 @@ class PatternService:
         """
         self.db = db
 
-    def detect_dai_platform(self, feed_url: str, feed_content: str = None) -> Optional[str]:
+    def detect_dai_platform(self, feed_url: str, feed_content: str = None) -> str | None:
         """
         Detect the DAI (Dynamic Ad Insertion) platform from feed metadata.
 
@@ -200,7 +229,7 @@ class PatternService:
         return None
 
     def detect_network(self, feed_url: str, feed_title: str = None,
-                       feed_description: str = None, feed_author: str = None) -> Optional[str]:
+                       feed_description: str = None, feed_author: str = None) -> str | None:
         """
         Detect the podcast network from feed metadata.
 
@@ -233,7 +262,7 @@ class PatternService:
         self,
         podcast_id: str,
         network_id: str = None
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """
         Get all applicable patterns for a podcast, ordered by scope priority.
 
@@ -284,7 +313,7 @@ class PatternService:
 
         return patterns
 
-    def check_for_promotion(self, pattern_id: int) -> Optional[str]:
+    def check_for_promotion(self, pattern_id: int) -> str | None:
         """
         Check if a pattern should be promoted to a broader scope.
 
@@ -379,9 +408,9 @@ class PatternService:
 
     def merge_similar_patterns(
         self,
-        pattern_ids: List[int],
+        pattern_ids: list[int],
         target_scope: str = 'network'
-    ) -> Optional[int]:
+    ) -> int | None:
         """
         Merge multiple similar patterns into a single pattern.
 
@@ -504,7 +533,7 @@ class PatternService:
             logger.error(f"Failed to merge patterns: {e}")
             return None
 
-    def _count_similar_patterns_in_network(self, pattern: Dict) -> int:
+    def _count_similar_patterns_in_network(self, pattern: dict) -> int:
         """Count how many podcasts in the same network have similar patterns."""
         if not self.db:
             return 0
@@ -530,7 +559,7 @@ class PatternService:
 
         return len(similar_podcasts)
 
-    def _count_networks_with_similar_pattern(self, pattern: Dict) -> int:
+    def _count_networks_with_similar_pattern(self, pattern: dict) -> int:
         """Count how many networks have similar patterns."""
         if not self.db:
             return 0
@@ -622,7 +651,7 @@ class PatternService:
         feed_title: str = None,
         feed_description: str = None,
         feed_author: str = None
-    ) -> Dict[str, Optional[str]]:
+    ) -> dict[str, str | None]:
         """
         Detect and store DAI platform and network for a podcast.
 
@@ -799,8 +828,8 @@ class PatternService:
             return 0
 
     def record_verification_misses(self, slug: str, episode_id: str,
-                                   missed_ads: List[Dict],
-                                   segments: Optional[List[Dict]] = None) -> None:
+                                   missed_ads: list[dict],
+                                   segments: list[dict] | None = None) -> None:
         """Record ads found by verification that were missed by the first pass.
 
         Boosts matching patterns so they're more likely to be detected in
@@ -1042,7 +1071,7 @@ class PatternService:
         self._text_pattern_matcher = None
         return True
 
-    def import_community_pattern(self, data: Dict) -> int:
+    def import_community_pattern(self, data: dict) -> int:
         """Insert or update an ad pattern carrying a community_id.
 
         New community_id -> INSERT with source='community', protected_from_sync=0.
@@ -1094,10 +1123,12 @@ class PatternService:
                 source_language=data.get('source_language'),
                 content_hash=content_hash,
             )
-            # Overwrite category only when the payload carries the key: an
-            # old-format payload (no 'category' key) must not null out a stored category.
+            # Overwrite category/last_confirmed_at only when the payload carries the
+            # key: an old-format payload lacking it must not null out a stored value.
             if 'category' in data:
                 update_kwargs['category'] = data.get('category')
+            if 'last_confirmed_at' in data:
+                update_kwargs['community_last_confirmed_at'] = data.get('last_confirmed_at')
             self.db.update_ad_pattern(existing['id'], **update_kwargs)
             return existing['id']
 
@@ -1124,5 +1155,6 @@ class PatternService:
             source_language=data.get('source_language'),
             content_hash=content_hash,
             category=data.get('category'),
+            community_last_confirmed_at=data.get('last_confirmed_at'),
         )
         return pattern_id

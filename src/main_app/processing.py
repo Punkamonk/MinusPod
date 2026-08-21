@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import threading
 import time
+from dataclasses import replace
 
 import requests
 import requests.exceptions
@@ -20,9 +21,9 @@ from ad_detector.cue_pair_ads import synthesize_ads_from_cue_pairs
 from ad_detector.cue_telemetry import build_cue_detection_records
 from ad_detector.boundaries import snap_terminal_ad_to_splice
 from ad_detector.silence_boundary_snap import snap_ad_boundaries_to_silence
+from ad_yield import low_ad_yield
 from ad_reviewer import (
-    AdReviewer, ReviewVerdict, is_contradiction_hold,
-    split_resurrection_pool,
+    AdReviewer, is_contradiction_hold, split_resurrection_pool,
 )
 from audio_analysis.cue_template_matcher import AudioCueTemplateMatcher
 from audio_processor import get_replacement_duration, AudioProcessor
@@ -30,7 +31,7 @@ from cancel import ProcessingCancelled, _check_cancel, _cancel_events, _cancel_e
 from differential_fetcher import fetch_and_diff, is_likely_dai_feed
 from utils.audio import get_audio_codec, get_audio_duration
 from utils.time import (
-    adjust_timestamp, merge_cut_spans, overlap_ratio, overlap_seconds,
+    adjust_timestamp, merge_cut_spans, overlap_ratio,
     ranges_overlap, span_inside_any_cut, utc_now_iso,
 )
 from verification_pass import _build_timestamp_map, _map_correction_to_processed, _map_to_original
@@ -41,13 +42,8 @@ from config import (
     CORRECTION_MATCH_MIN_COVERAGE,
     HOLD_REASON_NO_CUE,
     HOLD_REASON_REVIEWER_CONTRADICTION,
-    HOLD_REASON_VERIFICATION_KEPT_CONFLICT,
-    HOLD_REASON_VERIFICATION_MISS,
     PASS2_AUTOAPPROVE_HOLD_REASONS,
-    PASS2_AUTOAPPROVE_PROPOSED_IOU,
     PASS2_AUTOAPPROVE_TRIM_SLACK_S,
-    PASS2_DIFFERENTIAL_AUTOAPPROVE_MIN_AD_INSIDE,
-    PASS2_DIFFERENTIAL_AUTOAPPROVE_MIN_HOLD_COVERAGE,
     PROCESSING_MODE_PASSTHROUGH,
     PROCESSING_MODE_SKIP_DETECTION,
     PROCESSING_MODE_CUE_ONLY,
@@ -73,6 +69,10 @@ from config import (
     resolve_max_ad_duration,
     resolve_max_ad_duration_confirmed,
     resolve_cue_gated_approval,
+    resolve_low_ad_yield_action,
+    resolve_episode_log_level,
+    resolve_episode_log_storage,
+    LOW_AD_YIELD_ACTION_MODES,
     differential_fetch_effective,
     resolve_differential_fetch_setting,
     TERMINAL_SNAP_WINDOW_SECONDS,
@@ -95,9 +95,16 @@ from llm_client import (
 from offline_queue import is_offline_queue_enabled
 from utils.circuit_breaker import CircuitBreakerOpen
 from positional_prior import format_prior_hint, load_positional_prior
+import run_log
+from reprocess_modes import (
+    REPROCESS_MODE_NEEDS_TRANSCRIPT, clear_episode_for_mode,
+)
 from splice_calibration import compute_splice_calibration
 from transcriber import extract_audio_chunk
-from utils.constants import CANCELED_ERROR_MESSAGE, EpisodeStatus
+from utils.constants import (
+    CANCELED_ERROR_MESSAGE, EpisodeStatus, PIPELINE_REPROCESS_SOURCES,
+    REPROCESS_SOURCE_DEGRADED, REPROCESS_SOURCE_POLICY,
+)
 from utils.episode_paths import episode_relative_path
 from utils.errors import ServiceUnavailableError, AudioTooLargeError, AudioExtractionTimeout
 from utils.gpu import get_available_memory_gb, clear_gpu_memory
@@ -113,6 +120,16 @@ from webhook_service import (
 audio_logger = logging.getLogger('podcast.audio')
 
 from main_app.episode_context import EpisodeContext
+from main_app.verification_reconciliation import (
+    _apply_pass2_heuristic_rolls,
+    _corroborated_span,  # noqa: F401 re-exported for processing.<name> test patch targets
+    _corroborates_hold,  # noqa: F401 re-exported for processing.<name> test patch targets
+    _covered_by_cuts,
+    _drop_uncovered_pass2_ads,
+    _exclude_kept_spans_from_verification,
+    _gate_verification_ads_by_confidence,
+    _proposed_span_agrees,  # noqa: F401 re-exported for processing.<name> test patch targets
+)
 # Singletons created in main_app/__init__.py before this submodule is
 # loaded by the explicit `from main_app.processing import ...` near the
 # bottom of that module, so the apparent circular import is safe.
@@ -233,6 +250,10 @@ def _process_episode_background(slug, episode_id, original_url, title, podcast_n
     from processing_queue import ProcessingQueue
     queue = ProcessingQueue()
     start_time = time.time()
+    # The run log is bracketed here, not inside process_episode: the fallback
+    # failure handler below writes a history row too, and it needs a live
+    # recorder to finalize onto it (#660).
+    recorder = _start_run_log(slug, episode_id)
     try:
         process_episode(slug, episode_id, original_url, title, podcast_name, description, artwork_url, published_at, cancel_event=cancel_event)
     except ProcessingCancelled:
@@ -266,6 +287,7 @@ def _process_episode_background(slug, episode_id, original_url, title, podcast_n
         except Exception as handler_err:
             audio_logger.error(f"[{slug}:{episode_id}] Failed to handle failure: {handler_err}")
     finally:
+        _end_run_log(recorder)
         # Backstop for swallowed write failures anywhere in the run: this
         # thread's connection must not leave here with an open transaction.
         db.clear_leaked_transaction(audio_logger, 'episode processing')
@@ -756,8 +778,16 @@ def _detect_ads_first_pass(ctx, segments, audio_path,
         # Degraded continue: a transient, non-auth failure that still left
         # pattern/cross-fetch markers publishes those instead of failing the
         # episode. Auth-class failures and zero markers still raise.
+        # A partial window failure (some windows answered) is excluded: the
+        # provider is working well enough that a retry will likely complete,
+        # so publishing pattern-only cuts permanently would discard the LLM
+        # markers the successful windows found. Only a total outage degrades.
+        windows_total = ad_result.get('windows_total') or 0
+        windows_failed = ad_result.get('windows_failed') or 0
+        partial_window_failure = 0 < windows_failed < windows_total
         classification_error = Exception(error_msg)
-        if (first_pass_ads and is_transient_error(classification_error)
+        if (first_pass_ads and not partial_window_failure
+                and is_transient_error(classification_error)
                 and not is_auth_error(classification_error)):
             sanitized = ' '.join(error_msg.split())[:300]
             audio_logger.warning(
@@ -1499,7 +1529,7 @@ def _apply_pass2_reviewer(ctx, v_ads_to_cut, v_ads_for_ui, v_ads_held,
     # Index by (start, end) so verdict application is O(V), not O(V*N).
     original_to_processed = {
         (orig.get('start'), orig.get('end')): proc
-        for orig, proc in zip(verification_ads_original, verification_ads_processed)
+        for orig, proc in zip(verification_ads_original, verification_ads_processed, strict=True)
     }
     ui_by_key = {(a.get('start'), a.get('end')): a for a in v_ads_for_ui}
     original_by_key = {(a.get('start'), a.get('end')): a for a in verification_ads_original}
@@ -1513,7 +1543,8 @@ def _apply_pass2_reviewer(ctx, v_ads_to_cut, v_ads_for_ui, v_ads_held,
         # result.held_by_contradiction): the ad must NOT cut. Checked before
         # the adjust->confirmed coercion so a held adjust is not coerced into
         # a full-span cut.
-        if v.pool == 'accepted' and is_contradiction_hold(v.verdict, v.reasoning):
+        if v.pool == 'accepted' and is_contradiction_hold(
+                v.verdict, v.reasoning, v.structured_is_ad):
             if proc_ad is not None:
                 if proc_ad in v_ads_to_cut:
                     v_ads_to_cut.remove(proc_ad)
@@ -1546,13 +1577,8 @@ def _apply_pass2_reviewer(ctx, v_ads_to_cut, v_ads_for_ui, v_ads_held,
                 f"[{slug}:{episode_id}] Pass 2 reviewer proposed adjust "
                 f"@ {v.original_start:.1f}s; treating as confirmed"
             )
-            coerced = ReviewVerdict(
-                pool=v.pool, pass_num=v.pass_num, verdict='confirmed',
-                original_start=v.original_start, original_end=v.original_end,
-                reasoning=v.reasoning, confidence=v.confidence,
-                model_used=v.model_used, latency_ms=v.latency_ms,
-                success=v.success,
-            )
+            coerced = replace(v, verdict='confirmed',
+                              adjusted_start=None, adjusted_end=None)
             if proc_ad is not None:
                 _stamp_reviewer_fields(proc_ad, coerced)
             if ui_ad is not None:
@@ -1616,7 +1642,7 @@ def _ad_review_enabled(db) -> bool:
 def _apply_reviewer_verdict_to_ad(ad, v):
     """Merge a single reviewer verdict into the master ad dict, in place."""
     _stamp_reviewer_fields(ad, v)
-    if is_contradiction_hold(v.verdict, v.reasoning):
+    if is_contradiction_hold(v.verdict, v.reasoning, v.structured_is_ad):
         # Contradiction guard (spec 1.4): hold for a human, never auto-reject.
         # Boundaries stay at the pass-1 values; an "adjust" whose reasoning
         # denies the ad exists is not a boundary correction to trust.
@@ -1771,7 +1797,7 @@ def _snap_terminal_starts(slug, episode_id, ads_to_remove, all_ads_with_validati
         coverage_ads=coverage_ads, podcast_name=podcast_name,
     )
     changed = False
-    for old, new in zip(ads_to_remove, snapped):
+    for old, new in zip(ads_to_remove, snapped, strict=True):
         if new['start'] >= old['start']:
             continue
         changed = True
@@ -1817,7 +1843,7 @@ def _complete_cut_tails(slug, episode_id, ads_to_remove, all_ads_with_validation
     )
 
     changed = False
-    for old, new in zip(ads_to_remove, extended):
+    for old, new in zip(ads_to_remove, extended, strict=True):
         if new['end'] <= old['end']:
             continue
         changed = True
@@ -1842,38 +1868,6 @@ def _complete_cut_tails(slug, episode_id, ads_to_remove, all_ads_with_validation
 
     storage.save_combined_ads(slug, episode_id, all_ads_with_validation)
     return extended
-
-
-def _apply_pass2_heuristic_rolls(slug, episode_id, verification_ads_processed,
-                                  verification_ads_original, verification_segments,
-                                  ads_to_remove, podcast_name, skip_patterns):
-    """Append pass-2 heuristic pre/post-rolls in both processed and original coords."""
-    if not verification_segments:
-        return
-    from roll_detector import detect_preroll, detect_postroll
-    processed_dur = verification_segments[-1]['end'] if verification_segments else 0
-    ts_map = _build_timestamp_map(ads_to_remove) if ads_to_remove else None
-    beep = get_replacement_duration()
-
-    # Sequential by design: the post-roll detector must see any pre-roll
-    # already appended to verification_ads_processed.
-    for label in ('pre-roll', 'post-roll'):
-        if label == 'pre-roll':
-            roll = detect_preroll(verification_segments, verification_ads_processed,
-                                  podcast_name=podcast_name, skip_patterns=skip_patterns)
-        else:
-            roll = detect_postroll(verification_segments, verification_ads_processed,
-                                   episode_duration=processed_dur, skip_patterns=skip_patterns)
-        if not roll:
-            continue
-        verification_ads_processed.append(roll)
-        mapped = roll.copy()
-        if ts_map:
-            mapped['start'] = _map_to_original(roll['start'], ts_map, beep)
-            mapped['end'] = _map_to_original(roll['end'], ts_map, beep)
-        verification_ads_original.append(mapped)
-        shown_start = 0.0 if label == 'pre-roll' else roll['start']
-        audio_logger.info(f"[{slug}:{episode_id}] Pass 2 heuristic {label}: {shown_start:.1f}s-{roll['end']:.1f}s")
 
 
 def _validate_verification_ads(slug, episode_id, verification_ads_processed,
@@ -1942,7 +1936,7 @@ def _validate_verification_ads(slug, episode_id, verification_ads_processed,
     # ad.copy() inside validate() carries the reference through; a merge
     # keeps the surviving ad's twin and drops the absorbed one, so the
     # original list mirrors the processed list 1:1.
-    for proc, orig in zip(verification_ads_processed, verification_ads_original):
+    for proc, orig in zip(verification_ads_processed, verification_ads_original, strict=True):
         proc['_orig_twin'] = orig
 
     v_validation = v_validator.validate(verification_ads_processed)
@@ -1969,257 +1963,6 @@ def _validate_verification_ads(slug, episode_id, verification_ads_processed,
         kept_processed.append(ad)
         kept_original.append(orig)
     return kept_processed, kept_original
-
-
-def _proposed_span_agrees(hold, orig_ad):
-    """True when the hold carries the reviewer's own proposed ad sub-span
-    and the pass-2 ad names essentially the same audio (IoU of the two
-    sub-spans at or above PASS2_AUTOAPPROVE_PROPOSED_IOU). Two independent
-    signals agreeing on a sub-span corroborates regardless of how much of
-    the (padded) hold either one covers."""
-    p_start = hold.get('reviewer_proposed_start')
-    p_end = hold.get('reviewer_proposed_end')
-    if p_start is None or p_end is None or p_end <= p_start:
-        return False
-    # The proposed span must actually reach into the hold: a reviewer that
-    # relocated the ad entirely outside the held span is not corroborating
-    # the hold, and intersecting a disjoint span would invert the stamped
-    # bounds and file a degenerate confirm.
-    if overlap_seconds(p_start, p_end, hold['start'], hold['end']) <= 0:
-        return False
-    inter = overlap_seconds(orig_ad['start'], orig_ad['end'], p_start, p_end)
-    union = max(orig_ad['end'], p_end) - min(orig_ad['start'], p_start)
-    return union > 0 and inter / union >= PASS2_AUTOAPPROVE_PROPOSED_IOU
-
-
-def _corroborates_hold(overlapping, orig_ad, confidence,
-                        min_cut_confidence):
-    """True when a confident non-held pass-2 ad is the independent
-    corroboration a held span was waiting for: it overlaps exactly that one
-    pending marker, and either covers nearly all of it while sitting mostly
-    inside it, or agrees with the reviewer's own proposed sub-span (see
-    _proposed_span_agrees). The ad is still dropped (pending audio is never
-    cut mid-pipeline); the hold is stamped for auto-approval instead."""
-    if (confidence < min_cut_confidence
-            or len(overlapping) != 1
-            or overlapping[0].get('hold_reason')
-            not in PASS2_AUTOAPPROVE_HOLD_REASONS):
-        return False
-    hold = overlapping[0]
-    ad_inside = overlap_ratio(hold['start'], hold['end'],
-                              orig_ad['start'], orig_ad['end'])
-    hold_covered = overlap_ratio(orig_ad['start'], orig_ad['end'],
-                                 hold['start'], hold['end'])
-    if (ad_inside >= PASS2_DIFFERENTIAL_AUTOAPPROVE_MIN_AD_INSIDE
-            and hold_covered >= PASS2_DIFFERENTIAL_AUTOAPPROVE_MIN_HOLD_COVERAGE):
-        return True
-    return _proposed_span_agrees(hold, orig_ad)
-
-
-def _corroborated_span(hold, orig_ad):
-    """The sub-span the corroboration attests, clamped inside the hold: the
-    reviewer's proposed span when that is what agreed with the pass-2 ad
-    (_proposed_span_agrees), else the hold itself. Either way intersected
-    with the pass-2 ad's own bounds, since the ad never attests audio
-    outside itself."""
-    lo, hi = hold['start'], hold['end']
-    if _proposed_span_agrees(hold, orig_ad):
-        lo = max(lo, hold['reviewer_proposed_start'])
-        hi = min(hi, hold['reviewer_proposed_end'])
-    return {
-        'start': max(lo, orig_ad['start']),
-        'end': min(hi, orig_ad['end']),
-    }
-
-
-def _exclude_kept_spans_from_verification(verification_ads_processed,
-                                           verification_ads_original,
-                                           pass1_kept_markers, pass1_cuts):
-    """Divert pass-2 findings that overlap a kept pass-1 span into review
-    rather than cutting them.
-
-    A kept span reflects the operator's segment-action map, so pass 2 must
-    not cut through it. Silently discarding the finding hid a real
-    disagreement, so each one is stamped held_for_review and returned
-    separately for the pending-review queue.
-
-    Runs before _gate_verification_ads_by_confidence so none of its
-    autocut/hold/log branches ever see a finding inside a kept span.
-    pass1_kept_markers (original coordinates) are mapped onto the processed
-    timeline via adjust_timestamp with pass1_cuts, matching the coordinate
-    space of verification_ads_processed.
-
-    Returns (surviving_processed, surviving_original, conflicts) with an
-    empty conflicts list when there are no kept markers.
-    """
-    if not pass1_kept_markers:
-        return verification_ads_processed, verification_ads_original, []
-    replacement_duration = get_replacement_duration()
-    kept_spans_processed = [
-        (adjust_timestamp(m['start'], pass1_cuts, replacement_duration),
-         adjust_timestamp(m['end'], pass1_cuts, replacement_duration))
-        for m in pass1_kept_markers
-    ]
-    surviving_processed = []
-    surviving_original = []
-    conflicts = []
-    for ad, orig_ad in zip(verification_ads_processed, verification_ads_original):
-        overlap = next(
-            (span for span in kept_spans_processed
-             if ranges_overlap(ad['start'], ad['end'], span[0], span[1])),
-            None)
-        if overlap is not None:
-            audio_logger.info(
-                f"Pass-2 finding {ad['start']:.1f}s-{ad['end']:.1f}s "
-                f"(processed) contradicts kept span {overlap[0]:.1f}s-"
-                f"{overlap[1]:.1f}s: holding for review instead of cutting"
-            )
-            orig_ad['held_for_review'] = True
-            orig_ad['was_cut'] = False
-            orig_ad['hold_reason'] = HOLD_REASON_VERIFICATION_KEPT_CONFLICT
-            conflicts.append(orig_ad)
-            continue
-        surviving_processed.append(ad)
-        surviving_original.append(orig_ad)
-    return surviving_processed, surviving_original, conflicts
-
-
-def _gate_verification_ads_by_confidence(verification_ads_processed,
-                                          verification_ads_original,
-                                          min_cut_confidence,
-                                          pass1_held_markers=None,
-                                          verification_miss_hold_min_confidence=None,
-                                          verification_miss_autocut_min_confidence=None):
-    """Confidence gate pass-2 ads.
-
-    Returns (v_ads_to_cut, v_ads_for_ui, v_ads_held, corroborated_count).
-
-    Held ads (held_for_review=True) divert to v_ads_held as original-coord
-    twins with was_cut=False. They must NOT enter v_ads_for_ui: that list
-    feeds all_cuts_for_assets (transcript/chapter mapping) and the pass-2
-    reviewer's accepted pool. Contamination would corrupt both.
-
-    ``pass1_held_markers`` are pass-1 marker dicts held for review (original
-    coordinates). A pass-2 cut overlapping one is ALWAYS dropped -- cutting
-    would destroy audio the hold protects, and a second held marker would
-    double-count pending_review_count. When the dropped ad corroborates a
-    releasable hold (see _corroborates_hold), the hold's
-    marker dict is stamped pass2_corroborated in place so
-    _file_corroborated_hold_approvals can approve it through the standard
-    human-approval path, before the run finalizes, and the run's own recut
-    cuts it. corroborated_count is the number of newly stamped markers (they
-    need a re-save).
-
-    Note: verification ads can never carry cue evidence (snap is pass-1 only),
-    so on a cue-gated feed every pass-2 proposal is held -- intended
-    conservative behavior, documented here.
-
-    A standalone miss (below min_cut_confidence, overlapping no pass-1
-    marker) used to be silently discarded. It now either auto-cuts (when
-    ``verification_miss_autocut_min_confidence`` is enabled, i.e. > 0, and
-    the ad clears it -- routed into v_ads_to_cut exactly like a gated cut
-    ad) or, failing that, is held for review when it clears
-    ``verification_miss_hold_min_confidence`` (HOLD_REASON_VERIFICATION_MISS,
-    diverted to v_ads_held same as any other held ad). Below both floors it
-    is still discarded, now with a log line naming what was dropped and why.
-    Missing kwargs fall back to the settings-registry defaults so direct
-    callers (tests, ad-hoc gate invocations) get the same behavior as an
-    unconfigured install.
-    """
-    if verification_miss_hold_min_confidence is None:
-        verification_miss_hold_min_confidence = registry_get_default(
-            'verification_miss_hold_min_confidence')
-    if verification_miss_autocut_min_confidence is None:
-        verification_miss_autocut_min_confidence = registry_get_default(
-            'verification_miss_autocut_min_confidence')
-    pass1_held_markers = pass1_held_markers or []
-    v_ads_to_cut = []
-    v_ads_for_ui = []
-    v_ads_held = []
-    corroborated_count = 0
-    for ad, orig_ad in zip(verification_ads_processed, verification_ads_original):
-        # Held ads divert to the held list; never cut, never enter the UI/reviewer pool.
-        if ad.get('held_for_review'):
-            orig_ad['was_cut'] = False
-            orig_ad['held_for_review'] = True
-            orig_ad['hold_reason'] = ad.get('hold_reason')
-            v_ads_held.append(orig_ad)
-            continue
-        confidence = ad.get('validation', {}).get('adjusted_confidence', ad.get('confidence', 1.0))
-        overlapping = [m for m in pass1_held_markers
-                       if ranges_overlap(orig_ad['start'], orig_ad['end'],
-                                         m['start'], m['end'])]
-        if overlapping:
-            # A pass-2 cut overlapping a pass-1 held span would destroy the
-            # audio the hold protects; drop it (never cut). The pass-1 held
-            # marker already represents the region, so no second held marker
-            # either -- that would double-count pending_review_count.
-            if _corroborates_hold(overlapping, orig_ad,
-                                   confidence, min_cut_confidence):
-                hold = overlapping[0]
-                if not hold.get('pass2_corroborated'):
-                    hold['pass2_corroborated'] = True
-                    # The corroborated sub-span: what pass 2 actually attested
-                    # as ad, clamped inside the hold (or, when the reviewer's
-                    # own proposed span is what agreed, clamped inside that
-                    # instead). The auto-approve confirm is trimmed to this,
-                    # so hold padding the detection excluded is never cut on
-                    # the detection's authority.
-                    hold['pass2_corroborated_span'] = _corroborated_span(
-                        hold, orig_ad)
-                    flags = hold.setdefault('validation', {}).setdefault('flags', [])
-                    flags.append('INFO: Pass-2 independently re-detected this span as an ad')
-                    corroborated_count += 1
-                audio_logger.info(
-                    f"Pass-2 ad {orig_ad['start']:.1f}s-{orig_ad['end']:.1f}s "
-                    f"corroborates {hold.get('hold_reason')} hold "
-                    f"{hold['start']:.1f}s-{hold['end']:.1f}s: stamping it "
-                    f"for auto-approval")
-            else:
-                audio_logger.info(
-                    f"Dropping pass-2 cut {orig_ad['start']:.1f}s-{orig_ad['end']:.1f}s: "
-                    f"overlaps a pass-1 held span")
-            ad['was_cut'] = False
-            orig_ad['was_cut'] = False
-            continue
-        if confidence >= min_cut_confidence:
-            ad['was_cut'] = True
-            ad['detection_stage'] = 'verification'
-            v_ads_to_cut.append(ad)
-            orig_ad['was_cut'] = True
-            orig_ad['detection_stage'] = 'verification'
-            v_ads_for_ui.append(orig_ad)
-            continue
-        # Standalone miss: below min_cut_confidence, overlaps no pass-1
-        # marker. Deliberately re-reads raw confidence rather than reusing
-        # ``confidence`` (which prefers the validator's adjusted_confidence)
-        # -- this bucketing is a distinct, more conservative decision from
-        # the primary cut gate above.
-        conf = float(ad.get('confidence') or 0.0)
-        if (verification_miss_autocut_min_confidence > 0
-                and conf >= verification_miss_autocut_min_confidence):
-            ad['was_cut'] = True
-            ad['detection_stage'] = 'verification_miss'
-            v_ads_to_cut.append(ad)
-            orig_ad['was_cut'] = True
-            orig_ad['detection_stage'] = 'verification_miss'
-            v_ads_for_ui.append(orig_ad)
-        elif conf >= verification_miss_hold_min_confidence:
-            ad['was_cut'] = False
-            orig_ad['was_cut'] = False
-            orig_ad['held_for_review'] = True
-            orig_ad['hold_reason'] = HOLD_REASON_VERIFICATION_MISS
-            orig_ad['detection_stage'] = 'verification_miss'
-            v_ads_held.append(orig_ad)
-        else:
-            ad['was_cut'] = False
-            audio_logger.info(
-                f"Dropping standalone pass-2 miss {orig_ad['start']:.1f}s-"
-                f"{orig_ad['end']:.1f}s (sponsor={orig_ad.get('sponsor')!r}, "
-                f"confidence={conf:.2f}, below verification-miss hold floor "
-                f"{verification_miss_hold_min_confidence:.2f})"
-            )
-    return v_ads_to_cut, v_ads_for_ui, v_ads_held, corroborated_count
 
 
 def _file_corroborated_hold_approvals(slug, episode_id, markers):
@@ -2357,47 +2100,6 @@ def _recut_processed_audio(slug, episode_id, processed_path, v_ads_to_cut,
     return processed_path, None, False
 
 
-def _covered_by_cuts(ad, applied_cuts, total_duration=None, tolerance=0.01):
-    """True when ``ad`` falls inside one of the cuts ffmpeg applied.
-
-    ``total_duration`` clamps the ad to the audio bounds first: applied cuts
-    are clamped (compute_applied_cuts), so an ad whose end overruns the file
-    (Whisper's last segment vs ffprobe) would never match its own cut.
-    """
-    start = max(0.0, ad['start'])
-    end = min(ad['end'], total_duration) if total_duration else ad['end']
-    return any(c['start'] <= start + tolerance and end <= c['end'] + tolerance
-               for c in applied_cuts)
-
-
-def _drop_uncovered_pass2_ads(slug, episode_id, v_ads_to_cut, v_ads_for_ui,
-                               recut_applied, verification_ads_processed,
-                               verification_ads_original, total_duration=None):
-    """Drop pass-2 ads the recut did not actually remove (e.g. <10s filtered).
-
-    Mutates v_ads_to_cut / v_ads_for_ui in place so the count and the UI list
-    only claim cuts that exist in the audio. Merged-away ads still count: a
-    merged span covers its members.
-    """
-    twin = {id(p): o for p, o in zip(verification_ads_processed,
-                                     verification_ads_original)}
-    for ad in [a for a in v_ads_to_cut
-               if not _covered_by_cuts(a, recut_applied, total_duration)]:
-        v_ads_to_cut.remove(ad)
-        ad['was_cut'] = False
-        ui_ad = twin.get(id(ad))
-        if ui_ad is not None:
-            ui_ad['was_cut'] = False
-            for i, u in enumerate(v_ads_for_ui):
-                if u is ui_ad:
-                    del v_ads_for_ui[i]
-                    break
-        audio_logger.info(
-            f"[{slug}:{episode_id}] Pass 2 ad {ad['start']:.1f}s-{ad['end']:.1f}s "
-            f"was filtered out of the recut; not counting it as removed"
-        )
-
-
 def _run_verification_pass(ctx, processed_path, pass1_cuts,
                             skip_patterns, min_cut_confidence,
                             local_audio_processor, progress_callback,
@@ -2485,9 +2187,11 @@ def _run_verification_pass(ctx, processed_path, pass1_cuts,
         storage.save_ads_json(slug, episode_id, verification_result, pass_number=2)
 
         v_status = verification_result.get('status')
-        if v_status in ('no_segments', 'transcription_failed'):
+        if v_status in ('no_segments', 'transcription_failed', 'detection_failed'):
+            v_error = verification_result.get('error')
+            detail = f": {v_error}" if v_error else ""
             audio_logger.warning(
-                f"[{slug}:{episode_id}] Verification incomplete ({v_status}); "
+                f"[{slug}:{episode_id}] Verification incomplete ({v_status}{detail}); "
                 "not reporting a clean scan")
             return (verification_count, v_ads_for_ui, v_cuts_for_assets,
                     v_ads_held, processed_path, verification_cue_count,
@@ -3020,13 +2724,93 @@ def _maybe_enqueue_degraded_redetect(slug, episode_id, episode_url, episode_titl
     if (episode_data or {}).get('detection_degraded'):
         return
     db.upsert_episode(slug, episode_id, reprocess_mode='llm',
-                       reprocess_requested_at=utc_now_iso())
+                       reprocess_requested_at=utc_now_iso(),
+                       reprocess_source=REPROCESS_SOURCE_DEGRADED)
     db.upsert_episode_for_processing(
         slug, episode_id, episode_url, episode_title,
         episode_published_at, episode_description, priority=-10)
     audio_logger.info(
         f"[{slug}:{episode_id}] Degraded pass-1 detection; queued one "
         f"low-priority automatic llm re-detect")
+
+
+def _maybe_fire_low_ad_yield_action(slug, episode_id, episode_url, episode_title,
+                                     podcast_name, episode_description,
+                                     episode_published_at, episode_data, run_stats,
+                                     podcast_row=None):
+    """Queue one automatic rerun when a run removed far less ad time than the
+    feed usually yields.
+
+    Fires once per episode ever (the low_yield_rerun_at stamp) and only for
+    runs nobody asked for by hand: scheduled auto-process and play requests
+    qualify, manual reprocesses and this policy's own reruns do not. Never
+    raises into the pipeline.
+
+    podcast_row, when given, is the already-fetched podcasts row the pipeline
+    holds; None falls back to fetching it here.
+    """
+    try:
+        row = episode_data or {}
+        # The stamp alone only clears the auto-process gate; the source says
+        # whether the pipeline or a person asked for this run.
+        if (row.get('reprocess_requested_at')
+                and row.get('reprocess_source') not in PIPELINE_REPROCESS_SOURCES):
+            return
+        # A degraded run queues its own re-detect, and its yield says nothing
+        # about detection quality.
+        if (run_stats or {}).get('detection_degraded'):
+            return
+        # A cue-only feed reruns the same cue pipeline whatever mode is asked
+        # for, so a rerun can only spend the one shot.
+        if (run_stats or {}).get('cue_only'):
+            return
+        podcast = podcast_row if podcast_row is not None else db.get_podcast_by_slug(slug)
+        action = resolve_low_ad_yield_action(db, podcast)
+        if action not in LOW_AD_YIELD_ACTION_MODES:
+            return
+        episode = db.get_episode(slug, episode_id)
+        if not episode:
+            return
+        if episode.get('low_yield_rerun_at'):
+            audio_logger.info(
+                f"[{slug}:{episode_id}] low_ad_yield_action suppressed: "
+                f"already rerun at {episode['low_yield_rerun_at']}")
+            return
+        yield_info = low_ad_yield(db, episode,
+                                  [{'status': 'completed', 'stats': run_stats}])
+        if not yield_info:
+            return
+
+        mode = LOW_AD_YIELD_ACTION_MODES[action]
+        if REPROCESS_MODE_NEEDS_TRANSCRIPT[mode] and not db.has_transcript(slug, episode_id):
+            audio_logger.info(
+                f"[{slug}:{episode_id}] low_ad_yield_action redetect needs a "
+                f"stored transcript; falling back to reprocess")
+            mode = 'reprocess'
+
+        # Stamped before anything is queued so a crash cannot fire twice.
+        db.upsert_episode(slug, episode_id, low_yield_rerun_at=utc_now_iso())
+        # Status stays 'processed' so the episode keeps serving until the rerun
+        # starts, which is also when the per-mode clear runs. The policy source
+        # stops this rerun from triggering the policy again.
+        db.upsert_episode(slug, episode_id, reprocess_mode=mode,
+                          reprocess_requested_at=utc_now_iso(),
+                          reprocess_source=REPROCESS_SOURCE_POLICY)
+
+        # Queued rather than started: this run still holds the processing lock,
+        # so the queue processor picks it up after the release. Low priority,
+        # like the degraded re-detect: fresh episodes come first.
+        db.upsert_episode_for_processing(
+            slug, episode_id, episode_url, episode_title,
+            episode_published_at, episode_description, priority=-10)
+        status_service.queue_episode(slug, episode_id, episode_title, podcast_name)
+        audio_logger.info(
+            f"low_ad_yield_action fired action={mode} slug={slug} "
+            f"episode_id={episode_id} removed={yield_info['removedSeconds']:.1f}s "
+            f"feed_avg={yield_info['feedAverageSeconds']:.1f}s")
+    except Exception as err:
+        audio_logger.warning(
+            f"[{slug}:{episode_id}] low_ad_yield_action hook failed: {err}")
 
 
 def _refresh_rss_for_slug(slug, episode_id):
@@ -3077,6 +2861,57 @@ def _log_completion_summary(slug, episode_id, pass1_cut_count, *, verification_c
     return token_totals
 
 
+def _start_run_log(slug, episode_id):
+    """Attach a run-log recorder when this feed stores logs (#660).
+
+    Returns the recorder or None; setup problems disable capture for the run
+    rather than touching the pipeline.
+    """
+    try:
+        if not resolve_episode_log_storage(db, db.get_podcast_by_slug(slug)):
+            return None
+        recorder = run_log.RunLogRecorder(
+            slug, episode_id, resolve_episode_log_level(db),
+            run_log.run_log_temp_dir(storage.data_dir))
+        recorder.attach()
+        return recorder
+    except Exception as err:
+        audio_logger.warning(f"[{slug}:{episode_id}] run log setup failed: {err}")
+        return None
+
+
+def _end_run_log(recorder):
+    """Detach the recorder; a run that never wrote a history row drops its file."""
+    if recorder is None:
+        return
+    try:
+        recorder.detach()
+        recorder.discard()
+    except Exception as err:
+        audio_logger.warning(f"run log teardown failed: {err}")
+
+
+def _finalize_run_log(db, history_id, slug, episode_id):
+    """Move this run's log onto its freshly written history row."""
+    recorder = run_log.current_recorder()
+    if recorder is None or not history_id:
+        return
+    if recorder.tag != f"[{slug}:{episode_id}]":
+        # The slot holds another run's recorder; finalizing would file its log
+        # under this row.
+        audio_logger.warning(
+            f"[{slug}:{episode_id}] run log slot holds {recorder.tag}; not finalizing")
+        return
+    try:
+        if recorder.finalize(
+                run_log.run_log_path(storage.data_dir, slug, episode_id, history_id)):
+            db.set_history_log_pointer(
+                history_id,
+                run_log.run_log_relative_path(slug, episode_id, history_id))
+    except Exception as err:
+        audio_logger.warning(f"[{slug}:{episode_id}] run log finalize failed: {err}")
+
+
 def _record_history_row(db, slug, episode_id, episode_title, podcast_name, status,
                         processing_time, ads_detected, token_totals,
                         error_message=None, audio_cues_detected=0,
@@ -3086,7 +2921,7 @@ def _record_history_row(db, slug, episode_id, episode_title, podcast_name, statu
     podcast_data = db.get_podcast_by_slug(slug)
     if not podcast_data:
         return False
-    db.record_processing_history(
+    history_id = db.record_processing_history(
         podcast_id=podcast_data['id'], podcast_slug=slug,
         podcast_title=podcast_data.get('title') or podcast_name,
         episode_id=episode_id, episode_title=episode_title,
@@ -3098,6 +2933,7 @@ def _record_history_row(db, slug, episode_id, episode_title, podcast_name, statu
         audio_cues_detected=audio_cues_detected,
         processing_stats=run_stats,
     )
+    _finalize_run_log(db, history_id, slug, episode_id)
     return True
 
 
@@ -3880,6 +3716,12 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
             upsert_kwargs['published_at'] = episode_published_at
         db.upsert_episode(slug, episode_id, **upsert_kwargs)
 
+        # A policy rerun keeps the episode served until this point, so its
+        # per-mode clear happens here rather than when the rerun was queued.
+        if (reprocess_mode
+                and (episode_data or {}).get('reprocess_source') == REPROCESS_SOURCE_POLICY):
+            clear_episode_for_mode(db, slug, episode_id, reprocess_mode)
+
         # Stage 1: Download and transcribe
         audio_path, segments = _download_and_transcribe(
             slug, episode_id, episode_url, podcast_name,
@@ -4404,6 +4246,12 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                                ads_held=held_count, ads_not_cut=not_cut_count)
 
             _fire_degraded_redetect()
+            # After finalize: the heuristic reads the durations and history
+            # this run just persisted.
+            _maybe_fire_low_ad_yield_action(
+                slug, episode_id, episode_url, episode_title, podcast_name,
+                episode_description, episode_published_at, episode_data, run_stats,
+                podcast_row=podcast_settings)
 
             status_service.complete_job()
             return True

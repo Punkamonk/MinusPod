@@ -6,7 +6,8 @@ import os
 import threading
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from flask import request, send_file
 
@@ -36,6 +37,9 @@ from config import (
     MAX_AUDIO_DOWNLOAD_MB_MIN,
     PODCAST_SEARCH_PROVIDERS,
     SEGMENT_CATEGORIES, SEGMENT_ACTIONS,
+    LOW_AD_YIELD_ACTIONS,
+    EPISODE_LOG_LEVELS,
+    EPISODE_LOG_RETENTION_DAYS_MIN, EPISODE_LOG_RETENTION_DAYS_MAX,
     resolve_segment_category_actions_map,
     resolve_community_sync_categories,
     resolve_jit_blocked_user_agents,
@@ -61,6 +65,7 @@ from llm_client import (
     get_effective_provider, get_effective_base_url, get_api_key, get_effective_openrouter_api_key,
     get_llm_client, create_client_for_provider, _JSON_FORMAT_SETTING_KEY,
 )
+from tools.reviewer_calibration import maybe_trigger_reviewer_calibration
 from utils.language import LANGUAGE_CODE_RE
 from utils.opml import modified_feed_url
 from utils.url import validate_base_url, validate_outbound_host, SSRFError
@@ -98,13 +103,13 @@ class SettingEntry:
     is_default: bool
 
 
-def _settings_view(raw: Mapping[str, Any]) -> Dict[str, SettingEntry]:
+def _settings_view(raw: Mapping[str, Any]) -> dict[str, SettingEntry]:
     """Wrap the raw get_all_settings() dict into a SettingEntry mapping.
 
     Skips entries that lack the expected shape so a malformed row can't
     crash the GET /settings endpoint.
     """
-    view: Dict[str, SettingEntry] = {}
+    view: dict[str, SettingEntry] = {}
     for key, info in raw.items():
         if not isinstance(info, Mapping):
             continue
@@ -213,6 +218,16 @@ def get_settings():
     artwork_badge_position = _setting_value(
         settings, 'artwork_badge_position',
         registry_default('artwork_badge_position'))
+    low_ad_yield_action = _setting_value(
+        settings, 'low_ad_yield_action',
+        registry_default('low_ad_yield_action'))
+    episode_log_retention_days = get_env_backed_int(
+        'episode_log_retention_days',
+        floor=EPISODE_LOG_RETENTION_DAYS_MIN,
+        ceiling=EPISODE_LOG_RETENTION_DAYS_MAX,
+        settings=settings)
+    episode_log_level = _setting_value(
+        settings, 'episode_log_level', registry_default('episode_log_level'))
     feed_auth_enabled = coerce_bool_setting(
         _setting_value(settings, 'feed_auth_enabled',
                        registry_default('feed_auth_enabled')))
@@ -520,6 +535,10 @@ def get_settings():
             'artwork_watermark_enabled', artwork_watermark_enabled),
         'artworkBadgePosition': _sv(
             'artwork_badge_position', artwork_badge_position),
+        'lowAdYieldAction': _sv('low_ad_yield_action', low_ad_yield_action),
+        'episodeLogRetentionDays': _sv(
+            'episode_log_retention_days', episode_log_retention_days),
+        'episodeLogLevel': _sv('episode_log_level', episode_log_level),
         'feedAuthEnabled': _sv('feed_auth_enabled', feed_auth_enabled),
         'feedAuthKey': feed_auth_key,
         'opmlModifiedUrl': opml_modified_url,
@@ -709,8 +728,12 @@ def _apply_review_fields(db, data):
         logger.info(f"Updated enable_ad_review to: {value}")
 
     if 'reviewModel' in data:
-        db.set_setting('review_model', data['reviewModel'], is_default=False)
-        logger.info(f"Updated review_model to: {data['reviewModel']}")
+        old_model = db.get_setting('review_model')
+        new_model = data['reviewModel']
+        db.set_setting('review_model', new_model, is_default=False)
+        logger.info(f"Updated review_model to: {new_model}")
+        # Fire-and-forget calibration self-test; never blocks this write.
+        maybe_trigger_reviewer_calibration(db, old_model, new_model)
 
     if 'reviewMaxBoundaryShift' in data:
         try:
@@ -725,8 +748,14 @@ def _apply_review_fields(db, data):
 def _apply_model_fields(db, data):
     """Persist primary model selections; whisper change marks model for reload."""
     if 'claudeModel' in data:
+        old_claude = db.get_setting('claude_model')
         db.set_setting('claude_model', data['claudeModel'], is_default=False)
         logger.info(f"Updated Claude model to: {data['claudeModel']}")
+        # review_model defaults to same_as_pass, so the detection model IS the
+        # reviewer model until an explicit reviewer model is set.
+        review_model = db.get_setting('review_model')
+        if not review_model or review_model == 'same_as_pass':
+            maybe_trigger_reviewer_calibration(db, old_claude, data['claudeModel'])
 
     if 'verificationModel' in data:
         db.set_setting('verification_model', data['verificationModel'], is_default=False)
@@ -825,6 +854,34 @@ def _apply_processing_flags(db, data):
                        is_default=False)
         db.clear_all_podcast_etags()
         logger.info(f"Updated artwork badge position to: {data['artworkBadgePosition']}")
+
+    if 'lowAdYieldAction' in data:
+        if data['lowAdYieldAction'] not in LOW_AD_YIELD_ACTIONS:
+            return error_response(
+                f'lowAdYieldAction must be one of: {", ".join(LOW_AD_YIELD_ACTIONS)}', 400)
+        db.set_setting('low_ad_yield_action', data['lowAdYieldAction'],
+                       is_default=False)
+        logger.info(f"Updated low-ad-yield action to: {data['lowAdYieldAction']}")
+
+    if 'episodeLogRetentionDays' in data:
+        days = data['episodeLogRetentionDays']
+        if (not isinstance(days, int) or isinstance(days, bool)
+                or days < EPISODE_LOG_RETENTION_DAYS_MIN
+                or days > EPISODE_LOG_RETENTION_DAYS_MAX):
+            return error_response(
+                'episodeLogRetentionDays must be an integer between '
+                f'{EPISODE_LOG_RETENTION_DAYS_MIN} and '
+                f'{EPISODE_LOG_RETENTION_DAYS_MAX}', 400)
+        db.set_setting('episode_log_retention_days', str(days), is_default=False)
+        logger.info(f"Updated episode log retention to {days} days")
+
+    if 'episodeLogLevel' in data:
+        if data['episodeLogLevel'] not in EPISODE_LOG_LEVELS:
+            return error_response(
+                f'episodeLogLevel must be one of: {", ".join(EPISODE_LOG_LEVELS)}', 400)
+        db.set_setting('episode_log_level', data['episodeLogLevel'],
+                       is_default=False)
+        logger.info(f"Updated episode log level to: {data['episodeLogLevel']}")
 
     if 'feedAuthEnabled' in data:
         enabled = data['feedAuthEnabled']
@@ -2581,7 +2638,7 @@ def update_reviewer_settings():
 
 # ========== Community-pattern sync settings ==========
 
-def _community_category_breakdown(db) -> Dict[str, int]:
+def _community_category_breakdown(db) -> dict[str, int]:
     """Per-category counts of active community patterns, resolved the same way
     community_sync filters, so an unset category counts as sponsor there too."""
     breakdown = {cat: 0 for cat in SEGMENT_CATEGORIES}

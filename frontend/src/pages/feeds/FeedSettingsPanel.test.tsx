@@ -781,3 +781,92 @@ describe('FeedSettingsPanel re-render segments (#565)', () => {
     expect(await screen.findByText('Feed not found')).toBeDefined();
   });
 });
+
+describe('FeedSettingsPanel low ad yield action override', () => {
+  const LOW_YIELD_SELECT_NAME = 'Low ad yield action';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetSettings.mockResolvedValue({ lowAdYieldAction: { value: 'redetect' } });
+    mockUpdateFeed.mockResolvedValue(makeFeed());
+  });
+
+  it('falls back to the global option when the feed has no override', () => {
+    renderPanel(makeFeed());
+    const select = screen.getByRole('combobox', { name: LOW_YIELD_SELECT_NAME }) as HTMLSelectElement;
+    expect(select.value).toBe('');
+  });
+
+  it('names the current global action in the fallback option', async () => {
+    renderPanel(makeFeed());
+    await waitFor(() => {
+      const select = screen.getByRole('combobox', { name: LOW_YIELD_SELECT_NAME });
+      expect(within(select).getByRole('option', { name: 'Use global (Redetect ads)' })).toBeTruthy();
+    });
+  });
+
+  it('renders the feed override when set', () => {
+    renderPanel(makeFeed({ lowAdYieldAction: 'full' }));
+    const select = screen.getByRole('combobox', { name: LOW_YIELD_SELECT_NAME }) as HTMLSelectElement;
+    expect(select.value).toBe('full');
+  });
+
+  it('selecting an action fires updateFeed with that action', async () => {
+    renderPanel(makeFeed());
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: LOW_YIELD_SELECT_NAME }), 'reprocess');
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { lowAdYieldAction: 'reprocess' });
+  });
+
+  it('choosing the global option clears the override', async () => {
+    renderPanel(makeFeed({ lowAdYieldAction: 'full' }));
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: LOW_YIELD_SELECT_NAME }), '');
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { lowAdYieldAction: null });
+  });
+});
+
+describe('FeedSettingsPanel run log override', () => {
+  const RUN_LOG_SELECT_NAME = 'Run log storage';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetSettings.mockResolvedValue({ episodeLogRetentionDays: { value: 30 } });
+    mockUpdateFeed.mockResolvedValue(makeFeed());
+  });
+
+  it('falls back to the global option when the feed has no override', () => {
+    renderPanel(makeFeed());
+    const select = screen.getByRole('combobox', { name: RUN_LOG_SELECT_NAME }) as HTMLSelectElement;
+    expect(select.value).toBe('');
+  });
+
+  it('says the global is off when retention is zero', async () => {
+    mockGetSettings.mockResolvedValue({ episodeLogRetentionDays: { value: 0 } });
+    renderPanel(makeFeed());
+    await waitFor(() => {
+      const select = screen.getByRole('combobox', { name: RUN_LOG_SELECT_NAME });
+      expect(within(select).getByRole('option', { name: 'Use global (off)' })).toBeTruthy();
+    });
+  });
+
+  it('renders the feed override when set', () => {
+    renderPanel(makeFeed({ episodeLogs: 'off' }));
+    const select = screen.getByRole('combobox', { name: RUN_LOG_SELECT_NAME }) as HTMLSelectElement;
+    expect(select.value).toBe('off');
+  });
+
+  it('selecting a value fires updateFeed with it', async () => {
+    renderPanel(makeFeed());
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: RUN_LOG_SELECT_NAME }), 'on');
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { episodeLogs: 'on' });
+  });
+
+  it('choosing the global option clears the override', async () => {
+    renderPanel(makeFeed({ episodeLogs: 'on' }));
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: RUN_LOG_SELECT_NAME }), '');
+    expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { episodeLogs: null });
+  });
+});
