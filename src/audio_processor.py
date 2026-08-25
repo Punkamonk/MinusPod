@@ -240,13 +240,17 @@ class AudioProcessor:
                     pass
 
     def compute_applied_cuts(self, ad_segments: list[dict],
-                             total_duration: float) -> list[dict]:
+                             total_duration: float,
+                             cut_barriers: list[dict] | None = None
+                             ) -> list[dict]:
         """Compute the cuts remove_ads actually applies to the audio.
 
         Requested segments diverge from applied cuts: near-adjacent segments
         merge, short ones drop, and an end-of-episode cut extends to the end
-        of the file. Asset generation and verification timestamp mapping need
-        the applied list, not the requested one -- remove_ads returns it.
+        of the file. ``cut_barriers`` identifies content that must neither be
+        swallowed by a gap merge nor by that trailing extension. Asset
+        generation and verification timestamp mapping need the applied list,
+        not the requested one -- remove_ads returns it.
         """
         if not ad_segments or not total_duration:
             return []
@@ -270,6 +274,14 @@ class AudioProcessor:
 
         sorted_segments = sorted(clamped, key=lambda x: x['start'])
 
+        def crosses_barrier(start, end):
+            if end <= start:
+                return False
+            return any(
+                barrier['start'] < end and barrier['end'] > start
+                for barrier in cut_barriers or []
+            )
+
         # Merge segments with < 1 second gaps. Remove and beep spans render
         # differently below, so the gap check also requires matching 'beep' status.
         merged_ads = []
@@ -277,6 +289,7 @@ class AudioProcessor:
         for ad in sorted_segments:
             if (current_segment
                     and ad['start'] - current_segment['end'] < MERGE_GAP_SECONDS
+                    and not crosses_barrier(current_segment['end'], ad['start'])
                     and ad.get('beep', False) == current_segment.get('beep', False)):
                 # Extend current segment (use max to handle overlapping/contained ads)
                 current_segment['end'] = max(current_segment['end'], ad['end'])
@@ -288,11 +301,14 @@ class AudioProcessor:
                     current_segment['confidence'] = ad['confidence']
                 if ad.get('detection_stage') == 'fingerprint':
                     current_segment['detection_stage'] = 'fingerprint'
+                if ad.get('_trusted_split_fragment'):
+                    current_segment['_trusted_split_fragment'] = True
             else:
                 if current_segment:
                     merged_ads.append(current_segment)
                 current_segment = {'start': ad['start'], 'end': ad['end']}
-                for key in ('reason', 'confidence', 'detection_stage', 'beep'):
+                for key in ('reason', 'confidence', 'detection_stage', 'beep',
+                            '_trusted_split_fragment'):
                     if key in ad:
                         current_segment[key] = ad[key]
         if current_segment:
@@ -306,8 +322,10 @@ class AudioProcessor:
         skipped_count = 0
         for ad in merged_ads:
             duration = ad['end'] - ad['start']
+            trusted_split = bool(ad.get('_trusted_split_fragment'))
             trusted = (ad.get('detection_stage') == 'fingerprint'
-                       or ad.get('confidence', 0) >= SHORT_CUT_KEEP_CONFIDENCE)
+                       or ad.get('confidence', 0) >= SHORT_CUT_KEEP_CONFIDENCE
+                       or trusted_split)
             if duration >= MIN_AD_DURATION_FOR_REMOVAL:
                 ads.append(ad)
             elif trusted:
@@ -315,18 +333,28 @@ class AudioProcessor:
                 logger.info(
                     f"Keeping short ad ({duration:.1f}s < {MIN_AD_DURATION_FOR_REMOVAL}s): "
                     f"stage={ad.get('detection_stage', '?')} "
-                    f"confidence={ad.get('confidence', 'n/a')}")
+                    f"confidence={ad.get('confidence', 'n/a')} "
+                    f"trusted_split={trusted_split}")
             else:
                 skipped_count += 1
                 logger.info(f"Skipping short ad ({duration:.1f}s < {MIN_AD_DURATION_FOR_REMOVAL}s): {ad.get('reason', 'unknown')[:50]}")
         if skipped_count > 0:
             logger.info(f"Skipped {skipped_count} short ad detections (< {MIN_AD_DURATION_FOR_REMOVAL}s)")
+        for ad in ads:
+            ad.pop('_trusted_split_fragment', None)
 
         # End-of-episode cut: when less than 30s would remain after the last
         # cut, the episode ends at the beep, so the cut runs to the end.
         if ads:
             remaining = total_duration - ads[-1]['end']
-            if remaining < POST_ROLL_TRIM_THRESHOLD and ads[-1]['end'] != total_duration:
+            extension_blocked = crosses_barrier(
+                ads[-1]['end'], total_duration)
+            if extension_blocked:
+                logger.info(
+                    f"End-of-episode cut: preserving content after "
+                    f"{ads[-1]['end']:.1f}s because a keep barrier follows")
+            elif (remaining < POST_ROLL_TRIM_THRESHOLD
+                  and ads[-1]['end'] != total_duration):
                 logger.info(f"End-of-episode cut: extending {ads[-1]['end']:.1f}s -> "
                             f"{total_duration:.1f}s ({remaining:.1f}s would remain)")
                 ads[-1]['end'] = total_duration
@@ -351,7 +379,9 @@ class AudioProcessor:
         return ads
 
     def remove_ads(self, input_path: str, ad_segments: list[dict],
-                   output_path: str) -> list[dict] | None:
+                   output_path: str,
+                   cut_barriers: list[dict] | None = None
+                   ) -> list[dict] | None:
         """Remove ad segments from audio file.
 
         Returns the applied cut list (see compute_applied_cuts) on success --
@@ -378,7 +408,9 @@ class AudioProcessor:
 
             logger.info(f"Processing audio: {total_duration:.1f}s total, {len(ad_segments)} ad segments")
 
-            ads = self.compute_applied_cuts(ad_segments, total_duration)
+            ads = self.compute_applied_cuts(
+                ad_segments, total_duration,
+                cut_barriers=cut_barriers)
             logger.info(f"After merging and filtering: {len(ads)} ad segments")
             if not ads:
                 # Every requested cut merged/filtered away: nothing to cut,
@@ -566,8 +598,9 @@ class AudioProcessor:
             if chapters_meta_path and os.path.exists(chapters_meta_path):
                 os.unlink(chapters_meta_path)
 
-    def process_episode(self, input_path: str,
-                        ad_segments: list[dict]) -> tuple[str, list[dict]] | None:
+    def process_episode(self, input_path: str, ad_segments: list[dict],
+                        cut_barriers: list[dict] | None = None
+                        ) -> tuple[str, list[dict]] | None:
         """Process episode audio to remove ads.
 
         Returns (output_path, applied_cuts) on success, None on failure.
@@ -578,7 +611,9 @@ class AudioProcessor:
             temp_output = tmp.name
 
         try:
-            applied_cuts = self.remove_ads(input_path, ad_segments, temp_output)
+            applied_cuts = self.remove_ads(
+                input_path, ad_segments, temp_output,
+                cut_barriers=cut_barriers)
             if applied_cuts is not None:
                 return temp_output, applied_cuts
             # Clean up on failure
