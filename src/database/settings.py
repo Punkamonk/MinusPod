@@ -286,6 +286,32 @@ SETTINGS_REGISTRY: dict[str, SettingSpec] = {
     'detect_show_segments': SettingSpec(
         default='0', seeded=True, resettable=False,
         payload_key='detectShowSegments', payload_kind='bool'),
+    # Seed-sponsors toggles (issue: hushpod adoption). One per prompt that
+    # takes the dynamic sponsor block; off renders that prompt with an empty
+    # {sponsor_database}. All default on to preserve current behavior.
+    'seed_sponsors_detection': SettingSpec(
+        default='true', seeded=True, resettable=False,
+        payload_key='seedSponsorsDetection', payload_kind='bool'),
+    'seed_sponsors_verification': SettingSpec(
+        default='true', seeded=True, resettable=False,
+        payload_key='seedSponsorsVerification', payload_kind='bool'),
+    'seed_sponsors_reviewer': SettingSpec(
+        default='true', seeded=True, resettable=False,
+        payload_key='seedSponsorsReviewer', payload_kind='bool'),
+    'seed_sponsors_resurrect': SettingSpec(
+        default='true', seeded=True, resettable=False,
+        payload_key='seedSponsorsResurrect', payload_kind='bool'),
+    # Cross-episode text recurrence hint (off until benchmarked; see
+    # docs/superpowers/specs/2026-08-25-hushpod-adoption-design.md).
+    'text_recurrence_hints': SettingSpec(
+        default='false', seeded=True, resettable=False,
+        payload_key='textRecurrenceHints', payload_kind='bool'),
+    # Experimental: LLM addresses ads by transcript segment id instead of
+    # absolute timestamps. Default preserves current behavior; the benchmark
+    # A/B (F0.5) decides whether the default ever flips.
+    'ad_addressing_mode': SettingSpec(
+        default='timestamps', seeded=True, resettable=False,
+        payload_key='adAddressingMode'),
     # Whether the RSS-refresh enqueue path boosts episodes published within
     # FRESH_WINDOW_HOURS ahead of the rest of the auto-process queue.
     'process_new_episodes_first': SettingSpec(

@@ -39,6 +39,7 @@ import AudioSection from './settings/AudioSection';
 import CoverArtSection from './settings/CoverArtSection';
 import { refreshAllArtwork } from '../api/feeds';
 import AdDetectionSection from './settings/AdDetectionSection';
+import SeedSponsorsSection from './settings/SeedSponsorsSection';
 import GlobalDefaultsSection from './settings/GlobalDefaultsSection';
 import SegmentActionsSection from './settings/SegmentActionsSection';
 import Podcasting20Section from './settings/Podcasting20Section';
@@ -903,6 +904,8 @@ function Settings() {
         onEpisodeLogRetentionDaysChange={setEpisodeLogRetentionDays}
         episodeLogLevel={episodeLogLevel}
         onEpisodeLogLevelChange={setEpisodeLogLevel}
+        textRecurrenceHints={settings?.textRecurrenceHints?.value ?? settings?.defaults?.textRecurrenceHints ?? false}
+        onTextRecurrenceHintsChange={(v) => tunableMutation.mutate({ textRecurrenceHints: v })}
       />
 
       <SegmentActionsSection
@@ -1029,6 +1032,14 @@ function Settings() {
         onDifferentialHoldMinSecondsChange={setDifferentialHoldMinSeconds}
       />
 
+      <SeedSponsorsSection
+        detection={settings?.seedSponsorsDetection?.value ?? settings?.defaults?.seedSponsorsDetection ?? true}
+        verification={settings?.seedSponsorsVerification?.value ?? settings?.defaults?.seedSponsorsVerification ?? true}
+        reviewer={settings?.seedSponsorsReviewer?.value ?? settings?.defaults?.seedSponsorsReviewer ?? true}
+        resurrect={settings?.seedSponsorsResurrect?.value ?? settings?.defaults?.seedSponsorsResurrect ?? true}
+        onChange={(key, v) => tunableMutation.mutate({ [key]: v })}
+      />
+
       <PromptsSection
         systemPrompt={systemPrompt}
         verificationPrompt={verificationPrompt}
@@ -1066,6 +1077,8 @@ function Settings() {
         resurrectPromptIsDefault={settings?.resurrectPrompt.isDefault}
         onResetReviewPrompt={() => resetPromptMutation.mutate('review')}
         onResetResurrectPrompt={() => resetPromptMutation.mutate('resurrect')}
+        addressingMode={settings?.adAddressingMode?.value ?? settings?.defaults?.adAddressingMode ?? 'timestamps'}
+        onAddressingModeChange={(v) => tunableMutation.mutate({ adAddressingMode: v })}
       />
 
       <AudioCueDetectionSection audioCue={audioCue} onChange={setAudioCue} />

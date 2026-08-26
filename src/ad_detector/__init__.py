@@ -66,6 +66,7 @@ from config import (
     KEEP_CONTENT_MIN_AD_SECONDS,
     KEEP_CONTENT_MAX_SINGLE_AD_FRACTION,
     KEEP_CONTENT_MAX_SINGLE_AD_SECONDS,
+    coerce_bool_setting,
 )
 from ad_detector.cue_boundary_snap import _cue_role
 from ad_detector.cue_pair_ads import synthesize_ads_from_cue_pairs
@@ -73,6 +74,7 @@ from ad_detector.keep_content import CONTENT_SYSTEM_PROMPT, invert_content_to_ad
 from llm_capabilities import PASS_AD_DETECTION_1, PASS_AD_DETECTION_2, supports_json_schema
 from sponsor_service import SponsorService
 from text_pattern_matcher import is_defined_pattern
+from text_recurrence import format_recurrence_hint
 from utils.constants import (
     INVALID_SPONSOR_VALUES,
     KNOWN_SHORT_BRANDS, canonical_sponsor,
@@ -117,12 +119,15 @@ from .prompts import (
     format_window_prompt,
     get_static_system_prompt,
     parse_ads_from_response,
+    parse_id_ads_from_response,
+    resolve_segment_id_ads,
     extract_json_ads_array,
     CATEGORY_REPAIR_SYSTEM_PROMPT,
     CATEGORY_REPAIR_JSON_SCHEMA,
     CATEGORY_REPAIR_MAX_TOKENS,
     format_category_repair_prompt,
     parse_category_repair_response,
+    SEGMENT_ID_SYSTEM_SECTION,
 )
 # Source the JSON-array scanner directly from utils.llm_response instead of
 # laundering it through prompts.py; re-exported below for backward-compat
@@ -716,7 +721,7 @@ class AdDetector:
             from utils.constants import DEFAULT_SYSTEM_PROMPT
             prompt = DEFAULT_SYSTEM_PROMPT
         return self._apply_pass_override(
-            self._render_with_sponsors(prompt), 'system_prompt_override')
+            self._render_with_sponsors(prompt, 'seed_sponsors_detection'), 'system_prompt_override')
 
     def get_verification_prompt(self) -> str:
         """Get verification prompt from database or default, with dynamic sponsors substituted."""
@@ -730,7 +735,7 @@ class AdDetector:
             from database import DEFAULT_VERIFICATION_PROMPT
             prompt = DEFAULT_VERIFICATION_PROMPT
         return self._apply_pass_override(
-            self._render_with_sponsors(prompt), 'verification_prompt_override')
+            self._render_with_sponsors(prompt, 'seed_sponsors_verification'), 'verification_prompt_override')
 
     def _get_sponsor_list_safely(self) -> str:
         """Pull the dynamic sponsor list, returning empty string on any error."""
@@ -742,13 +747,30 @@ class AdDetector:
             logger.warning(f"Could not load dynamic sponsor list: {e}")
             return ""
 
-    def _render_with_sponsors(self, prompt: str) -> str:
-        """Substitute ``{sponsor_database}`` in a prompt with the dynamic sponsor block.
+    def _seed_sponsors_enabled(self, toggle_key: str) -> bool:
+        """Whether the given seed-sponsors toggle is on. Fails open (True):
+        a missing or unreadable setting must not silently strip the block."""
+        try:
+            value = self.db.get_setting(toggle_key)
+        except Exception as e:
+            logger.warning(f"Could not read {toggle_key}: {e}")
+            return True
+        if value is None:
+            return True
+        return coerce_bool_setting(value)
+
+    def _render_with_sponsors(self, prompt: str, toggle_key: str) -> str:
+        """Substitute ``{sponsor_database}`` in a prompt with the dynamic
+        sponsor block, or with an empty string when the pass's seed-sponsors
+        toggle is off.
 
         Prompts without the placeholder get no sponsor content (the user
         opted out by editing the placeholder away).
         """
-        sponsor_block = format_sponsor_block(self._get_sponsor_list_safely())
+        if self._seed_sponsors_enabled(toggle_key):
+            sponsor_block = format_sponsor_block(self._get_sponsor_list_safely())
+        else:
+            sponsor_block = ""
         return render_prompt(prompt, sponsor_database=sponsor_block)
 
     def _podcast_wants_show_segments(self, slug: str) -> bool:
@@ -782,16 +804,37 @@ class AdDetector:
             logger.warning(f"Could not resolve segment actions for {slug}: {e}")
             return None
 
-    def _build_detection_system_prompt(self, slug: str) -> str:
+    def _resolve_addressing_mode(self) -> str:
+        """'segment_ids' or 'timestamps'. Unknown values coerce to
+        'timestamps' (validated at point of use; env/DB can bypass the API)."""
+        try:
+            value = (self.db.get_setting('ad_addressing_mode') or '')
+        except Exception:
+            value = ''
+        return 'segment_ids' if value.strip().lower() == 'segment_ids' else 'timestamps'
+
+    @staticmethod
+    def _format_transcript_lines(window_segments, addressing_mode):
+        if addressing_mode == 'segment_ids':
+            return [f"[{seg['sid']}] {seg['text']}" for seg in window_segments]
+        return [f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}"
+                for seg in window_segments]
+
+    def _build_detection_system_prompt(self, slug: str, addressing_mode: str = 'timestamps') -> str:
         """Compose the system prompt for detection window calls.
 
         Appends SHOW_SEGMENTS_PROMPT_SECTION to get_system_prompt() when the
         podcast opted in, after override resolution, so a customized
-        system_prompt still gets the show-segments instructions.
+        system_prompt still gets the show-segments instructions. Appends
+        SEGMENT_ID_SYSTEM_SECTION when ``addressing_mode`` is 'segment_ids'
+        (issue: hushpod adoption), after the show-segments section so both
+        can layer independently.
         """
         prompt = self.get_system_prompt()
         if self._podcast_wants_show_segments(slug):
             prompt = f"{prompt}\n\n{SHOW_SEGMENTS_PROMPT_SECTION}"
+        if addressing_mode == 'segment_ids':
+            prompt = f"{prompt}{SEGMENT_ID_SYSTEM_SECTION}"
         return prompt
 
     _HINT_TIER1_CAP = 12
@@ -872,25 +915,36 @@ class AdDetector:
                                 audio_enforcer, audio_analysis,
                                 llm_timeout, max_retries,
                                 slug, episode_id, pass_name,
-                                window_label_prefix, validate_timestamps):
+                                window_label_prefix, validate_timestamps,
+                                recurrence_spans=None,
+                                addressing_mode='timestamps'):
         """Run one window through prompt-build + LLM call + parse + filter.
 
         Returns a ``WindowResult``. Thread-safe: writes nothing to shared
         instance state. The DB / token-accumulator side effects happen
         through ``_call_llm_for_window`` which uses lock-protected helpers
         downstream.
+
+        ``recurrence_spans``: optional pass-1-only text-recurrence spans
+        (issue: hushpod adoption); rendered into a hint appended after
+        ``audio_context`` when it overlaps this window.
+
+        ``addressing_mode``: 'timestamps' (default, unchanged rendering) or
+        'segment_ids' (issue: hushpod adoption) -- switches the transcript
+        line format and passes ``addressing_mode`` through to
+        ``format_window_prompt``, which swaps the window-context rules
+        instead of appending a second, conflicting set.
         """
         window_segments = window['segments']
         window_start = window['start']
         window_end = window['end']
 
-        transcript_lines = [
-            f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}"
-            for seg in window_segments
-        ]
+        transcript_lines = self._format_transcript_lines(window_segments, addressing_mode)
         audio_context = audio_enforcer.format_for_window(
             audio_analysis, window_start, window_end
         ) if audio_enforcer else ""
+        recurrence_context = format_recurrence_hint(
+            recurrence_spans or [], window_start, window_end)
 
         prompt = format_window_prompt(
             podcast_name=podcast_name,
@@ -901,7 +955,8 @@ class AdDetector:
             total_windows=total_windows,
             window_start=window_start,
             window_end=window_end,
-            audio_context=audio_context,
+            audio_context=audio_context + recurrence_context,
+            addressing_mode=addressing_mode,
         )
 
         window_label = f"{window_label_prefix} {window_idx + 1}"
@@ -944,14 +999,31 @@ class AdDetector:
             f"[{slug}:{episode_id}] {window_label} LLM response ({len(response_text)} chars): {preview}"
         )
 
-        window_ads = parse_ads_from_response(
-            response_text, slug, episode_id, sponsor_service=self.sponsor_service
-        )
-
-        if validate_timestamps:
-            window_ads = validate_ad_timestamps(
-                window_ads, window_segments, window_start, window_end
-            )
+        if addressing_mode == 'segment_ids':
+            id_ads, used_ids = parse_id_ads_from_response(
+                response_text, slug, episode_id,
+                sponsor_service=self.sponsor_service)
+            if used_ids:
+                window_ads = resolve_segment_id_ads(
+                    id_ads, window_segments, slug, episode_id,
+                    sponsor_service=self.sponsor_service)
+            else:
+                logger.warning(
+                    f"[{slug}:{episode_id}] {window_label}: model ignored "
+                    f"segment-id contract, falling back to timestamp parsing")
+                window_ads = parse_ads_from_response(
+                    response_text, slug, episode_id,
+                    sponsor_service=self.sponsor_service)
+                if validate_timestamps:
+                    window_ads = validate_ad_timestamps(
+                        window_ads, window_segments, window_start, window_end)
+        else:
+            window_ads = parse_ads_from_response(
+                response_text, slug, episode_id,
+                sponsor_service=self.sponsor_service)
+            if validate_timestamps:
+                window_ads = validate_ad_timestamps(
+                    window_ads, window_segments, window_start, window_end)
 
         valid_window_ads = []
         for ad in window_ads:
@@ -1073,7 +1145,8 @@ class AdDetector:
                             audio_analysis, progress_callback,
                             progress_base, progress_range, slug, episode_id,
                             pass_name, window_label_prefix, validate_timestamps,
-                            action_map=None, category_repair_enabled=False):
+                            action_map=None, category_repair_enabled=False,
+                            recurrence_spans=None, addressing_mode='timestamps'):
         """Shared window orchestration for the detection and verification passes.
 
         Runs every window through ``_run_windows``, merges results in window
@@ -1093,6 +1166,14 @@ class AdDetector:
         "category" gets one follow-up LLM call for just those categories (see
         ``_repair_window_categories``). False skips repair and makes no extra
         calls.
+
+        ``recurrence_spans``: optional pass-1-only text-recurrence spans,
+        forwarded to ``_process_single_window``. Callers other than pass 1
+        (e.g. verification) leave this None.
+
+        ``addressing_mode``: forwarded to ``_process_single_window`` (issue:
+        hushpod adoption). Defaults to 'timestamps', which reproduces
+        pre-change rendering byte-for-byte.
 
         Returns ``(final_ads, all_raw_responses, failed_windows,
         failure_response, category_missing, category_total,
@@ -1143,6 +1224,8 @@ class AdDetector:
             pass_name=pass_name,
             window_label_prefix=window_label_prefix,
             validate_timestamps=validate_timestamps,
+            recurrence_spans=recurrence_spans,
+            addressing_mode=addressing_mode,
         )
 
         category_repaired = 0
@@ -1271,7 +1354,8 @@ class AdDetector:
                    podcast_description: str = None,
                    progress_callback=None,
                    audio_analysis=None,
-                   positional_prior_hint: str = "") -> dict | None:
+                   positional_prior_hint: str = "",
+                   recurrence_spans: list | None = None) -> dict | None:
         """Detect ad segments using Claude API with sliding window approach.
 
         Processes transcript in overlapping windows to ensure ads at chunk
@@ -1282,6 +1366,8 @@ class AdDetector:
             progress_callback: Optional callback(stage, percent) to report progress
             positional_prior_hint: Pre-rendered learned ad-position scrutiny
                                    hint for the per-window prompt (issue #360)
+            recurrence_spans: Optional cross-episode text-recurrence spans
+                                   (hushpod adoption); rendered per-window.
         """
         if not self.api_key:
             logger.warning("Skipping ad detection - no API key")
@@ -1300,6 +1386,14 @@ class AdDetector:
                 logger.info(f"[{slug}:{episode_id}] Auto-detected {len(foreign_language_ads)} "
                            f"non-English segments as ads")
 
+            # Resolved once per run, before windowing: 'segment_ids' stamps a
+            # global index onto every segment so create_windows' per-window
+            # references keep it (issue: hushpod adoption).
+            addressing_mode = self._resolve_addressing_mode()
+            if addressing_mode == 'segment_ids':
+                for sid, seg in enumerate(segments):
+                    seg['sid'] = sid
+
             # Create overlapping windows from transcript
             windows = create_windows(segments)
             total_duration = segments[-1]['end']
@@ -1311,7 +1405,7 @@ class AdDetector:
                        f"for {total_duration/60:.1f}min episode")
 
             # Get prompts and model
-            system_prompt = self._build_detection_system_prompt(slug)
+            system_prompt = self._build_detection_system_prompt(slug, addressing_mode)
             model = self.get_model()
 
             logger.info(f"[{slug}:{episode_id}] Using model: {model}")
@@ -1376,6 +1470,8 @@ class AdDetector:
                 validate_timestamps=True,
                 action_map=action_map,
                 category_repair_enabled=segment_categories_configured,
+                recurrence_spans=recurrence_spans,
+                addressing_mode=addressing_mode,
             )
             if failure is not None:
                 return failure
@@ -1580,6 +1676,7 @@ class AdDetector:
                           *,
                           ctx=None,
                           positional_prior_hint: str = "",
+                          recurrence_spans: list | None = None,
                           keep_content: bool | None = None,
                           skip_llm: bool = False) -> dict:
         """Process transcript for ad detection using three-stage pipeline.
@@ -1611,6 +1708,9 @@ class AdDetector:
                  callers that do not run inside the pipeline.
             skip_llm: cue_only preset. When True, stage 3 never runs (no
                  keep-content, no blacklist Claude call).
+            recurrence_spans: Optional cross-episode text-recurrence spans
+                 (hushpod adoption), forwarded to the blacklist detect_ads()
+                 call only; keep-content mode does not receive it.
 
         Returns:
             Dict with ads, status, and detection metadata
@@ -1838,7 +1938,8 @@ class AdDetector:
                     podcast_description=podcast_description,
                     progress_callback=progress_callback,
                     audio_analysis=audio_analysis,
-                    positional_prior_hint=positional_prior_hint
+                    positional_prior_hint=positional_prior_hint,
+                    recurrence_spans=recurrence_spans,
                 )
 
         if result is None:
@@ -2676,6 +2777,14 @@ class AdDetector:
         try:
             self.initialize_client()
 
+            # Verification re-transcribes processed audio into a fresh
+            # segment list, so ids are stamped independently of pass 1's
+            # (issue: hushpod adoption); kept consistent with detect_ads.
+            addressing_mode = self._resolve_addressing_mode()
+            if addressing_mode == 'segment_ids':
+                for sid, seg in enumerate(segments):
+                    seg['sid'] = sid
+
             windows = create_windows(segments)
             total_duration = segments[-1]['end'] if segments else 0
 
@@ -2683,6 +2792,8 @@ class AdDetector:
                        f"for {total_duration/60:.1f}min processed audio")
 
             system_prompt = self.get_verification_prompt()
+            if addressing_mode == 'segment_ids':
+                system_prompt = f"{system_prompt}{SEGMENT_ID_SYSTEM_SECTION}"
             model = self.get_verification_model()
 
             logger.info(f"[{slug}:{episode_id}] Verification using model: {model}")
@@ -2735,6 +2846,7 @@ class AdDetector:
                 validate_timestamps=False,
                 action_map=action_map,
                 category_repair_enabled=segment_categories_configured,
+                addressing_mode=addressing_mode,
             )
             if failure is not None:
                 return failure
