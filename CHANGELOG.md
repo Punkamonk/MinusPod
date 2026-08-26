@@ -11,6 +11,35 @@ release notes.
 
 ## [Unreleased]
 
+## [2.91.1] - 2026-08-26
+
+### Added
+
+- Third addressing mode `random`: draws timestamps or segment IDs once per
+  detection run (and again, independently, for verification), so production
+  traffic accumulates an unbiased comparison between the two over time.
+- Per-addressing-mode LLM contract compliance stats: runs, windows judged,
+  and compliance percentage for each mode, recorded to a new
+  `addressing_log` table and exposed via `GET /api/v1/stats/addressing`.
+- Addressing modes section on the Stats page showing the above per mode.
+
+### Fixed
+
+- Reviewer prompts now fetch the known-sponsor list once per review pass
+  instead of once per prompt.
+- The addressing-mode setting persists in the same order as its sibling
+  settings during a settings update, instead of ahead of validation of
+  the rest of the payload.
+- Clearer settings copy for the text recurrence hints toggle.
+
+### Documentation
+
+- Retroactive attribution: the skip-FLAC toggle, ENV_BACKED_SETTINGS
+  registry, and parallel detection windows shipped in 2.5.23-2.5.25 were
+  first implemented in the leboff/MinusPod fork. The 2.5.23 and 2.5.25
+  entries now say so, and the README points at where credit lives.
+
+
 ## [2.91.0] - 2026-08-26
 
 ### Added
@@ -4221,12 +4250,12 @@ found by review, removes dead code, and adds the repo's first Python lint gate.
 
 ### Added
 
-- **"Skip FLAC compression" toggle for the Whisper API path.** A new boolean setting `skipFlacCompression` (DB key `skip_flac_compression`, env `SKIP_FLAC_COMPRESSION`, default false) lets operators running self-hosted Whisper servers that accept WAV directly skip the intermediate FFmpeg FLAC encode in `Transcriber._transcribe_via_api`. Default-off preserves the existing FLAC compression so public OpenAI / OpenRouter endpoints stay under their upload size limits. Exposed in Settings under Transcription -> Whisper API and via `/settings` GET / `/settings/ad-detection` PUT. Reset returns to false.
-- **Parallel ad-detection windows.** Replaces the sequential per-window LLM loop in `AdDetector.detect_ads()` and `run_verification_detection()` with a `ThreadPoolExecutor` so independent transcript windows run concurrently through the LLM. New `adDetectionParallelWindows` setting (DB key `ad_detection_parallel_windows`, env `AD_DETECTION_PARALLEL_WINDOWS`, default 4, validated range [1, 32]). 1 preserves the original sequential behavior; higher values cut wall-clock detection time at the cost of concurrent load on the LLM provider. Exposed in the Settings page under LLM Tunables in a new "Detection Concurrency" block and via `/settings` GET / `/settings/ad-detection` PUT. Window-position-indexed merge keeps the resulting ads in transcript order even when futures complete out of order. A per-call progress lock prevents two completed workers from racing on the progress callback.
+- **"Skip FLAC compression" toggle for the Whisper API path.** A new boolean setting `skipFlacCompression` (DB key `skip_flac_compression`, env `SKIP_FLAC_COMPRESSION`, default false) lets operators running self-hosted Whisper servers that accept WAV directly skip the intermediate FFmpeg FLAC encode in `Transcriber._transcribe_via_api`. Default-off preserves the existing FLAC compression so public OpenAI / OpenRouter endpoints stay under their upload size limits. Exposed in Settings under Transcription -> Whisper API and via `/settings` GET / `/settings/ad-detection` PUT. Reset returns to false. First implemented in the leboff/MinusPod fork; attribution added retroactively.
+- **Parallel ad-detection windows.** Replaces the sequential per-window LLM loop in `AdDetector.detect_ads()` and `run_verification_detection()` with a `ThreadPoolExecutor` so independent transcript windows run concurrently through the LLM. New `adDetectionParallelWindows` setting (DB key `ad_detection_parallel_windows`, env `AD_DETECTION_PARALLEL_WINDOWS`, default 4, validated range [1, 32]). 1 preserves the original sequential behavior; higher values cut wall-clock detection time at the cost of concurrent load on the LLM provider. Exposed in the Settings page under LLM Tunables in a new "Detection Concurrency" block and via `/settings` GET / `/settings/ad-detection` PUT. Window-position-indexed merge keeps the resulting ads in transcript order even when futures complete out of order. A per-call progress lock prevents two completed workers from racing on the progress callback. First implemented in the leboff/MinusPod fork; attribution added retroactively.
 
 ### Changed
 
-- **`ENV_BACKED_SETTINGS` registry with data-preserving migration.** Central registry in `src/config.py` describes every setting whose default comes from an environment variable: `(db_key, env_var, fallback, validator)`. First four entries: `llm_provider`, `audio_bitrate`, `skip_flac_compression`, `ad_detection_parallel_windows`. On every boot `_run_env_backed_settings_migration` in `src/database/schema/__init__.py` (a) ensures a `schema_migrations` table exists, (b) logs an audit line per registered key, (c) runs a one-shot corrective gate that flips `is_default` to 0 for any row where `is_default=1` but value diverges from env, **preserving the stored value** -- no deployer's DB loses data, (d) re-syncs `is_default=1` rows to the current env on every subsequent boot. Stops the recurrence pattern that caused issue #266 (env-backed settings ignored after first DB init) without overwriting customizations made via the UI.
+- **`ENV_BACKED_SETTINGS` registry with data-preserving migration.** Central registry in `src/config.py` describes every setting whose default comes from an environment variable: `(db_key, env_var, fallback, validator)`. First four entries: `llm_provider`, `audio_bitrate`, `skip_flac_compression`, `ad_detection_parallel_windows`. On every boot `_run_env_backed_settings_migration` in `src/database/schema/__init__.py` (a) ensures a `schema_migrations` table exists, (b) logs an audit line per registered key, (c) runs a one-shot corrective gate that flips `is_default` to 0 for any row where `is_default=1` but value diverges from env, **preserving the stored value** -- no deployer's DB loses data, (d) re-syncs `is_default=1` rows to the current env on every subsequent boot. Stops the recurrence pattern that caused issue #266 (env-backed settings ignored after first DB init) without overwriting customizations made via the UI. First implemented in the leboff/MinusPod fork; attribution added retroactively.
 - **Per-episode token accumulator is now lock-protected instead of thread-local.** `_episode_accumulator` in `src/llm_client.py` was a `threading.local()` so different gunicorn threads couldn't corrupt each other. With ad-detection windows now running on a `ThreadPoolExecutor`, worker threads need to contribute to the same totals as the main thread. The accumulator is now a single `_EpisodeAccumulator` object guarded by `threading.Lock`. Single-episode isolation is enforced upstream by the fcntl flock on `.processing_queue.lock`, so the global accumulator is correct in practice. The existing `start_episode_token_tracking()` / `get_episode_token_totals()` public API is unchanged.
 
 ## [2.5.22] - 2026-05-25
