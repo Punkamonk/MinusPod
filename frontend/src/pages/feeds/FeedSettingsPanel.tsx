@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getNetworks, updateFeed, UpdateFeedPayload, CUE_SCORE_MIN, CUE_SCORE_MAX, rerenderSegments, RerenderSegmentsResult } from '../../api/feeds';
 import { listCueTemplates } from '../../api/cueTemplates';
-import { getSettings } from '../../api/settings';
+import { getSettings, getAudioSettings } from '../../api/settings';
 import { getErrorMessage } from '../../api/client';
 import type { Feed, LowAdYieldAction, EpisodeLogsOverride } from '../../api/types';
 import CollapsibleSection, { useCollapsibleOpen } from '../../components/CollapsibleSection';
@@ -24,6 +24,11 @@ import { ConfirmModal } from '../../components/Modal';
 import DraftNumberInput, { parseOptionalNumber } from '../../components/DraftNumberInput';
 import { selectBase } from '../../components/fieldStyles';
 import { LOW_AD_YIELD_ACTION_LABELS } from '../../utils/lowAdYield';
+
+// Matches MAX_RETENTION_DAYS_OVERRIDE in src/api/feeds.py.
+const MAX_RETENTION_DAYS = 3650;
+
+type RetentionMode = 'global' | 'archive' | 'custom';
 import { focusRing } from '../../components/fieldStyles';
 
 interface Props {
@@ -182,6 +187,25 @@ function FeedSettingsPanel({ feed, slug }: Props) {
   const globalRetentionDays = settings?.episodeLogRetentionDays?.value ?? 30;
   const globalEpisodeLogsLabel = globalRetentionDays > 0 ? 'keep logs' : 'off';
 
+  // Storage retention is a separate setting from run log retention above.
+  const globalStorageRetentionDays = settings?.retentionDays ?? 30;
+  const globalStorageRetentionLabel = globalStorageRetentionDays > 0
+    ? `${globalStorageRetentionDays} days` : 'never delete';
+
+  // Keep-original lives on its own endpoint rather than the settings bundle.
+  // Same key Settings.tsx uses so its keep-original mutation invalidates
+  // this label too; a second key here would go stale on global toggles.
+  const { data: audioSettings } = useQuery({
+    queryKey: ['audio-settings'],
+    queryFn: getAudioSettings,
+  });
+  const globalKeepOriginalLabel = audioSettings?.keepOriginalAudio === false
+    ? 'discard' : 'keep';
+
+  const retentionMode: RetentionMode =
+    feed.retentionDaysOverride == null ? 'global'
+      : feed.retentionDaysOverride === 0 ? 'archive' : 'custom';
+
   const s = (v: number | null | undefined) => (v != null ? String(v) : '');
 
   // Per-field input state. useSyncFromQuery reseeds from the server value
@@ -197,12 +221,21 @@ function FeedSettingsPanel({ feed, slug }: Props) {
   const [snapLagInput, setSnapLagInput] = useState(s(feed.cueSnapLagOverride));
   const [maxAdDurInput, setMaxAdDurInput] = useState(s(feed.maxAdDurationOverride));
   const [maxAdDurRejectInput, setMaxAdDurRejectInput] = useState(s(feed.maxAdDurationRejectOverride));
+  // Retention days edits stay local until blur. Committing per keystroke
+  // would PATCH every intermediate digit (typing 365 sends 3, then 36) and
+  // retention is the one field where an intermediate value deletes audio.
+  const [retentionDaysInput, setRetentionDaysInput] = useState(
+    feed.retentionDaysOverride != null && feed.retentionDaysOverride > 0
+      ? String(feed.retentionDaysOverride) : '');
 
   // Reseed inputs from the server feed object when it changes (e.g. after a
   // successful mutation or a background refetch). This mirrors useSyncFromQuery
   // applied to each field individually so that a mutation response immediately
   // reflects the persisted value without waiting for a second refetch.
   useSyncFromQuery(feed, (f) => {
+    setRetentionDaysInput(
+      f.retentionDaysOverride != null && f.retentionDaysOverride > 0
+        ? String(f.retentionDaysOverride) : '');
     setCueScoreInput(f.cueTemplateScoreOverride != null ? String(f.cueTemplateScoreOverride) : '');
     setPairMinInput(s(f.cuePairMinBreakOverride));
     setPairMaxInput(s(f.cuePairMaxBreakOverride));
@@ -903,6 +936,104 @@ function FeedSettingsPanel({ feed, slug }: Props) {
               <p className="text-xs text-muted-foreground">
                 Keep each run's pipeline log for this feed, readable on the episode page.
                 Nothing is kept while the global retention is 0 days.
+              </p>
+            </div>
+          </div>
+
+          {/* Per-feed storage retention override. Three states share one
+              control: inherit, archive (0), and an explicit day count, so
+              the number field only appears once "Keep for" is chosen. */}
+          <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
+            <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-1.5">Retention:</span>
+            <div className="flex flex-col gap-1 flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <select
+                  value={retentionMode}
+                  onChange={(e) => {
+                    const mode = e.target.value as RetentionMode;
+                    if (mode === 'global') updateMutation.mutate({ retentionDaysOverride: null });
+                    else if (mode === 'archive') updateMutation.mutate({ retentionDaysOverride: 0 });
+                    // Seeding from the global window would send 0 (= archive,
+                    // silently) whenever global retention is disabled.
+                    else updateMutation.mutate({
+                      retentionDaysOverride: globalStorageRetentionDays > 0
+                        ? globalStorageRetentionDays : 30,
+                    });
+                  }}
+                  disabled={updateMutation.isPending}
+                  className={`self-start min-w-0 max-w-full disabled:opacity-50 ${selectBase}`}
+                  aria-label="Retention"
+                >
+                  <option value="global">Use global ({globalStorageRetentionLabel})</option>
+                  <option value="archive">Archive, never delete</option>
+                  <option value="custom">Keep for</option>
+                </select>
+                {retentionMode === 'custom' && (
+                  <>
+                    <DraftNumberInput
+                      value={feed.retentionDaysOverride != null && feed.retentionDaysOverride > 0
+                        ? feed.retentionDaysOverride : null}
+                      fallback={null}
+                      min={1}
+                      max={MAX_RETENTION_DAYS}
+                      step={1}
+                      parse={parseOptionalNumber}
+                      onChange={(v) => setRetentionDaysInput(v != null ? String(v) : '')}
+                      onBlur={() => commitFloat(
+                        retentionDaysInput, feed.retentionDaysOverride,
+                        'retentionDaysOverride', 1, MAX_RETENTION_DAYS,
+                        () => setRetentionDaysInput(
+                          feed.retentionDaysOverride != null && feed.retentionDaysOverride > 0
+                            ? String(feed.retentionDaysOverride) : ''))}
+                      className="w-24 px-2 py-1 rounded border border-input bg-background text-foreground text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                      ariaLabel="Retention days"
+                    />
+                    <span className="text-xs text-muted-foreground">days</span>
+                  </>
+                )}
+                {feed.retentionDaysOverride === 0 && (
+                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-c-blue/20 text-c-blue">
+                    Archived
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                How long processed audio for this feed stays on disk. Archive keeps every
+                episode indefinitely, and survives the &ldquo;Clear all processed audio&rdquo;
+                action in Settings.
+              </p>
+            </div>
+          </div>
+
+          {/* Per-feed pre-cut original audio override */}
+          <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3 text-sm">
+            <span className="text-muted-foreground whitespace-nowrap sm:w-32 shrink-0 sm:pt-1.5">Original audio:</span>
+            <div className="flex flex-col gap-1 flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <select
+                  value={feed.keepOriginalAudioOverride == null
+                    ? '' : feed.keepOriginalAudioOverride ? 'on' : 'off'}
+                  onChange={(e) => updateMutation.mutate({
+                    keepOriginalAudioOverride: e.target.value === ''
+                      ? null : e.target.value === 'on',
+                  })}
+                  disabled={updateMutation.isPending}
+                  className={`self-start min-w-0 max-w-full disabled:opacity-50 ${selectBase}`}
+                  aria-label="Keep original audio"
+                >
+                  <option value="">Use global ({globalKeepOriginalLabel})</option>
+                  <option value="on">Keep the uncut copy</option>
+                  <option value="off">Discard the uncut copy</option>
+                </select>
+                {feed.keepOriginalAudioOverride != null && (
+                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-c-blue/20 text-c-blue">
+                    Override: {feed.keepOriginalAudioOverride ? 'keeping' : 'discarding'}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Review mode in the ad editor plays the pre-cut audio. Discarding it roughly
+                halves what this feed stores, starting with the next episode processed.
               </p>
             </div>
           </div>

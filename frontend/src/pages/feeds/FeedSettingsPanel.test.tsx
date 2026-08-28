@@ -46,6 +46,7 @@ const mockGetSettings = vi.fn();
 
 vi.mock('../../api/settings', () => ({
   getSettings: (...args: unknown[]) => mockGetSettings(...args),
+  getAudioSettings: () => Promise.resolve({ keepOriginalAudio: true }),
 }));
 
 // FeedTagsEditor queries api/community internally; not under test here.
@@ -868,5 +869,104 @@ describe('FeedSettingsPanel run log override', () => {
     await userEvent.selectOptions(
       screen.getByRole('combobox', { name: RUN_LOG_SELECT_NAME }), '');
     expect(mockUpdateFeed).toHaveBeenCalledWith('test-feed', { episodeLogs: null });
+  });
+});
+
+describe('FeedSettingsPanel retention overrides', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetSettings.mockResolvedValue({ retentionDays: 30 });
+    mockUpdateFeed.mockResolvedValue(makeFeed());
+  });
+
+  it('shows the global window in the inherit option', async () => {
+    renderPanel(makeFeed());
+    expect(await screen.findByRole('option', { name: 'Use global (30 days)' })).toBeDefined();
+  });
+
+  it('archiving sends a zero override', async () => {
+    const user = userEvent.setup();
+    renderPanel(makeFeed());
+    const select = await screen.findByLabelText('Retention');
+    await user.selectOptions(select, 'archive');
+    await waitFor(() => expect(mockUpdateFeed).toHaveBeenCalledWith(
+      'test-feed', expect.objectContaining({ retentionDaysOverride: 0 })));
+  });
+
+  it('marks an archived feed and hides the day field', async () => {
+    renderPanel(makeFeed({ retentionDaysOverride: 0 }));
+    expect(await screen.findByText('Archived')).toBeDefined();
+    expect(screen.queryByLabelText('Retention days')).toBeNull();
+  });
+
+  it('shows the day field for a custom window', async () => {
+    renderPanel(makeFeed({ retentionDaysOverride: 7 }));
+    const days = await screen.findByLabelText('Retention days') as HTMLInputElement;
+    expect(days.value).toBe('7');
+  });
+
+  it('returning to global clears the override', async () => {
+    const user = userEvent.setup();
+    renderPanel(makeFeed({ retentionDaysOverride: 7 }));
+    const select = await screen.findByLabelText('Retention');
+    await user.selectOptions(select, 'global');
+    await waitFor(() => expect(mockUpdateFeed).toHaveBeenCalledWith(
+      'test-feed', expect.objectContaining({ retentionDaysOverride: null })));
+  });
+
+  it('discarding the original sends false', async () => {
+    const user = userEvent.setup();
+    renderPanel(makeFeed());
+    const select = await screen.findByLabelText('Keep original audio');
+    await user.selectOptions(select, 'off');
+    await waitFor(() => expect(mockUpdateFeed).toHaveBeenCalledWith(
+      'test-feed', expect.objectContaining({ keepOriginalAudioOverride: false })));
+  });
+
+  it('badges an explicit keep-original override', async () => {
+    renderPanel(makeFeed({ keepOriginalAudioOverride: false }));
+    expect(await screen.findByText('Override: discarding')).toBeDefined();
+  });
+
+  it('leaves the keep-original badge off while inheriting', async () => {
+    renderPanel(makeFeed());
+    await screen.findByLabelText('Keep original audio');
+    expect(screen.queryByText(/^Override: (keeping|discarding)$/)).toBeNull();
+  });
+});
+
+describe('FeedSettingsPanel retention field commit safety', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetSettings.mockResolvedValue({ retentionDays: 30 });
+    mockUpdateFeed.mockResolvedValue(makeFeed());
+  });
+
+  it('does not PATCH while typing; commits once on blur', async () => {
+    const user = userEvent.setup();
+    renderPanel(makeFeed({ retentionDaysOverride: 7 }));
+    const days = await screen.findByLabelText('Retention days');
+
+    await user.clear(days);
+    await user.type(days, '365');
+    // Retention is the one field where an intermediate value (3, 36)
+    // deletes audio if a cleanup tick lands on it.
+    expect(mockUpdateFeed).not.toHaveBeenCalled();
+
+    await user.tab();
+    await waitFor(() => expect(mockUpdateFeed).toHaveBeenCalledTimes(1));
+    expect(mockUpdateFeed).toHaveBeenCalledWith(
+      'test-feed', expect.objectContaining({ retentionDaysOverride: 365 }));
+  });
+
+  it('seeds Keep for with 30 days when the global window is disabled', async () => {
+    const user = userEvent.setup();
+    mockGetSettings.mockResolvedValue({ retentionDays: 0 });
+    renderPanel(makeFeed());
+    const select = await screen.findByLabelText('Retention');
+    await user.selectOptions(select, 'custom');
+    // Seeding from the global (0) would silently archive instead.
+    await waitFor(() => expect(mockUpdateFeed).toHaveBeenCalledWith(
+      'test-feed', expect.objectContaining({ retentionDaysOverride: 30 })));
   });
 });

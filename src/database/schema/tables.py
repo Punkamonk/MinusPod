@@ -87,6 +87,12 @@ TABLE_DDL['podcasts'] = """CREATE TABLE IF NOT EXISTS podcasts (
     -- Per-feed episode run log storage (#660): NULL = follow the global
     -- setting, 'on' = store, 'off' = never store.
     episode_logs TEXT,
+    -- Per-feed retention override: NULL = follow the global retention_days
+    -- setting, 0 = archive (never delete), N = keep for N days.
+    retention_days_override INTEGER,
+    -- Per-feed pre-cut original audio override: NULL = follow the global
+    -- keep_original_audio setting, 0 = never keep, 1 = always keep.
+    keep_original_audio_override INTEGER,
     max_episodes INTEGER,
     only_expose_processed_episodes INTEGER,
     tags TEXT NOT NULL DEFAULT '[]',
@@ -479,7 +485,18 @@ TABLE_DDL['addressing_log'] = """CREATE TABLE IF NOT EXISTS addressing_log (
     configured_mode TEXT NOT NULL,
     effective_mode TEXT NOT NULL,
     windows_judged INTEGER NOT NULL,
-    windows_compliant INTEGER NOT NULL
+    windows_compliant INTEGER NOT NULL,
+    -- Yield and waste per pass (nullable: NULL = row predates yield
+    -- recording, 0 = genuinely nothing). ads_proposed counts what the
+    -- model returned before filtering; ads_kept is what survived; the
+    -- three drop counters say why the rest were discarded.
+    -- ads_dropped_invalid_ref is segment_ids-only by construction: an
+    -- invented segment id is detectable, an invented timestamp is not.
+    ads_proposed INTEGER,
+    ads_kept INTEGER,
+    ads_dropped_invalid_ref INTEGER,
+    ads_dropped_out_of_window INTEGER,
+    ads_dropped_too_long INTEGER
 )"""
 
 SCHEMA_SQL = """

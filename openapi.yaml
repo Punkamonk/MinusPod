@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.90.1
+  version: 2.92.0
   contact:
     name: MinusPod
   license:
@@ -260,6 +260,18 @@ paths:
                     - boolean
                     - 'null'
                   description: Per-feed override. true hides non-processed episodes; false shows everything; null falls back to the global onlyExposeProcessedDefault setting.
+                retentionDaysOverride:
+                  type:
+                    - integer
+                    - 'null'
+                  minimum: 0
+                  maximum: 3650
+                  description: Per-feed retention override. Null falls back to the global retentionDays setting; 0 archives the feed so processed audio is never deleted, including by the force-all cleanup; 1-3650 keeps it for that many days.
+                keepOriginalAudioOverride:
+                  type:
+                    - boolean
+                    - 'null'
+                  description: Per-feed override for retaining the pre-cut original audio. Null falls back to the global keepOriginalAudio setting; true always keeps it; false never does. Applies from the next episode processed.
       responses:
         '201':
           description: Feed created successfully
@@ -751,6 +763,18 @@ paths:
                     - boolean
                     - 'null'
                   description: Per-feed override. true hides non-processed episodes; false shows everything; null falls back to the global onlyExposeProcessedDefault setting.
+                retentionDaysOverride:
+                  type:
+                    - integer
+                    - 'null'
+                  minimum: 0
+                  maximum: 3650
+                  description: Per-feed retention override. Null falls back to the global retentionDays setting; 0 archives the feed so processed audio is never deleted, including by the force-all cleanup; 1-3650 keeps it for that many days.
+                keepOriginalAudioOverride:
+                  type:
+                    - boolean
+                    - 'null'
+                  description: Per-feed override for retaining the pre-cut original audio. Null falls back to the global keepOriginalAudio setting; true always keeps it; false never does. Applies from the next episode processed.
                 segmentCategoryActions:
                   type:
                     - object
@@ -4000,6 +4024,21 @@ paths:
                   maximum: 1440
                   description: Minutes between background RSS refresh passes for every feed. A change applies after the wait already in progress finishes. Default 15.
                   example: 15
+                queueManualBoost:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                  description: Priority added when a user plays an unprocessed episode or reprocesses one by hand. Default 20.
+                queueFreshBoost:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                  description: Priority added to episodes published within the last 48 hours while processNewEpisodesFirst is on. Default 5.
+                queueBulkBoost:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                  description: Priority added to bulk work (Reprocess All, segment re-renders). Default 0 keeps backlog runs behind everything else. Default 0.
                 podpingEnabled:
                   type: boolean
                   description: Opt-in listener that polls public Hive API nodes for Podping publish notifications and refreshes a matching feed immediately. Off by default.
@@ -4320,6 +4359,21 @@ paths:
                     hold for review; shorter candidates are dropped. 0
                     disables the floor (default 10).
                   example: 10
+            queueManualBoost:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: Priority added when a user plays an unprocessed episode or reprocesses one by hand. Default 20.
+            queueFreshBoost:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: Priority added to episodes published within the last 48 hours while processNewEpisodesFirst is on. Default 5.
+            queueBulkBoost:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: Priority added to bulk work (Reprocess All, segment re-renders). Default 0 keeps backlog runs behind everything else. Default 0.
       responses:
         '200':
           description: Settings updated
@@ -7665,6 +7719,27 @@ components:
         compliancePct:
           type: number
           description: 100 * windowsCompliant / windowsJudged, rounded to 1 decimal. 0.0 when windowsJudged is 0.
+        yieldRuns:
+          type: integer
+          description: Passes that recorded yield data. Rows from before 2.92.0 carry none and are excluded from every yield number below, so this denominator can lag runs.
+        adsProposed:
+          type: integer
+          description: Ads the model returned across judged windows, before any filtering. Yield rows only.
+        adsKept:
+          type: integer
+          description: Proposed ads that survived reference resolution and the window/duration filter into the pipeline.
+        adsDroppedInvalidRef:
+          type: integer
+          description: Ads dropped for referencing a segment id that does not exist. Structurally zero for timestamps mode; an invented timestamp is not detectable at this stage.
+        adsDroppedOutOfWindow:
+          type: integer
+          description: Ads dropped for starting outside their detection window.
+        adsDroppedTooLong:
+          type: integer
+          description: Ads dropped for exceeding the per-window maximum ad duration.
+        keptPct:
+          type: number
+          description: 100 * adsKept / adsProposed over yield rows, 0.0 when nothing was proposed.
     ConnectionTestResult:
       type: object
       properties:
@@ -8297,6 +8372,18 @@ components:
             - boolean
             - 'null'
           description: Per-feed override for hiding upstream episodes whose status is not 'processed' from the served RSS feed. Null means use the global onlyExposeProcessedDefault setting. true/false override the global for this feed (issue #181).
+        retentionDaysOverride:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+          maximum: 3650
+          description: Per-feed retention override. Null falls back to the global retentionDays setting; 0 archives the feed so processed audio is never deleted, including by the force-all cleanup; 1-3650 keeps it for that many days.
+        keepOriginalAudioOverride:
+          type:
+            - boolean
+            - 'null'
+          description: Per-feed override for retaining the pre-cut original audio. Null falls back to the global keepOriginalAudio setting; true always keeps it; false never does. Applies from the next episode processed.
         segmentCategoryActions:
           type:
             - object
@@ -9513,6 +9600,36 @@ components:
               minimum: 5
               maximum: 1440
               description: Minutes between background RSS refresh passes for every feed. Default 15.
+            isDefault:
+              type: boolean
+        queueManualBoost:
+          type: object
+          properties:
+            value:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: Priority added when a user plays an unprocessed episode or reprocesses one by hand. Default 20.
+            isDefault:
+              type: boolean
+        queueFreshBoost:
+          type: object
+          properties:
+            value:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: Priority added to episodes published within the last 48 hours while processNewEpisodesFirst is on. Default 5.
+            isDefault:
+              type: boolean
+        queueBulkBoost:
+          type: object
+          properties:
+            value:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: Priority added to bulk work (Reprocess All, segment re-renders). Default 0 keeps backlog runs behind everything else. Default 0.
             isDefault:
               type: boolean
         podpingEnabled:

@@ -183,14 +183,19 @@ Changing an action map only affects episodes processed after the change. To appl
 
 Each feed has a **Queue priority**: High, Normal (default), or Low, set on the feed's settings page. High processes ahead of other queued episodes; Low runs only once nothing else is waiting.
 
-Two automatic boosts stack on top of a feed's base priority:
+Three automatic boosts stack on top of a feed's base priority, and the size of each is a setting under **Settings > Global Defaults > Queue priority**:
 
-| Boost | When it applies |
-|---|---|
-| Fresh episode | The episode's publish date is within 48 hours of now, and the global **Process new episodes first** setting (Settings > Global Defaults, on by default) is on. |
-| Manual reprocess | You reprocess an episode by hand (Reprocess, Full Analysis, or Re-detect Ads). Always applies, regardless of the global setting. |
+| Boost | Default | When it applies |
+|---|---|---|
+| Play or reprocess | 20 | You press play on an unprocessed episode, or reprocess one by hand (Reprocess, Full Analysis, or Re-detect Ads). Always applies. |
+| New episode | 5 | The episode's publish date is within 48 hours of now, and the global **Process new episodes first** toggle (on by default) is on. |
+| Reprocess All | 0 | Bulk work: Reprocess All on a feed, or segment re-renders. The default of 0 keeps a backlog run behind everything else. |
 
-Changing a feed's queue priority restamps every episode of that feed still pending in the queue with the new base priority. API: `queuePriority` on `PATCH /api/v1/feeds/{slug}` (`high`, `normal`, or `low`); the global toggle is `processNewEpisodesFirst` on `PUT /api/v1/settings`.
+The defaults encode one rule: a request you make right now beats backlog work, always. Before 2.92.1, Reprocess All stamped every episode with the full manual boost, so a 93-episode backfill could pin a just-published episode 94th in line for two days. Raise the Reprocess All boost only if you want backfills to compete with new releases.
+
+A queued episode's priority can rise but never fall: pressing play on an episode that is already sitting in the queue lifts it to the play boost, while background refreshes can never knock a boosted episode back down.
+
+Changing a feed's queue priority restamps every episode of that feed still pending in the queue with the new base priority. API: `queuePriority` on `PATCH /api/v1/feeds/{slug}` (`high`, `normal`, or `low`); the boost sizes are `queueManualBoost`, `queueFreshBoost`, and `queueBulkBoost` (0-100) and the toggle is `processNewEpisodesFirst`, all on `PUT /api/v1/settings`.
 
 ### Title blacklist
 
@@ -201,6 +206,22 @@ Matching is against the whole title, case-insensitive. `*` is a wildcard; a patt
 A per-feed **Skipped episodes** choice decides how a skipped episode is served: **Keep in feed with original audio** (default) serves it unmodified in the RSS feed, or **Hide from feed** drops it from the served feed entirely. Either way the episode is unaffected by the blacklist if you reprocess it manually: a manual reprocess always overrides the blacklist and processes the episode normally.
 
 API: `titleSkipPatterns` (array of strings, max 50 patterns, 200 characters each) and `titleSkipAction` (`serve_original` or `hide`) on `PATCH /api/v1/feeds/{slug}`.
+
+### Per-feed retention
+
+Global retention lives in Settings > Storage & Retention and applies to every feed. Any single feed can override it from its own settings page with the **Retention** control, which offers three choices:
+
+- **Use global** (default) follows the global window, so nothing changes for existing feeds.
+- **Keep for N days** sets a window for this feed alone. Use a short window on a daily news show you never revisit, or a long one on a show you catch up with slowly.
+- **Archive, never delete** keeps every processed episode indefinitely. This is the option for shows that have stopped publishing, where a swept episode is gone for good because the publisher's feed no longer carries it.
+
+An archived feed is also skipped by the **Clear all processed audio** action in Settings. That action is an explicit operator wipe and overrides the global retention window, but a per-feed archive is a deliberate "never delete this show", so it wins. A feed that inherits a globally disabled retention is still wiped by that action.
+
+Archive keeps the pre-cut original audio as well as the cut version. To archive a show without paying for the uncut copies, set **Original audio** to "Discard the uncut copy" on the same page.
+
+The **Original audio** control overrides the global "Keep original audio" toggle for one feed, with the same three choices: inherit, keep, or discard. The pre-cut audio is what Review mode in the ad editor plays, so discarding it disables that button for episodes processed afterwards. It roughly halves what the feed stores. The change applies to the next episode processed; it does not delete originals already on disk.
+
+API: `retentionDaysOverride` (integer, `null` to inherit, `0` to archive, 1 to 3650 for a day count) and `keepOriginalAudioOverride` (boolean or `null` to inherit) on `PATCH /api/v1/feeds/{slug}`.
 
 ### Blocked user agents for just-in-time processing
 
@@ -221,6 +242,19 @@ Settings > Experiments has an Ad addressing mode select, marked experimental. Ti
 How often each mode's LLM contract is actually honored shows up on the Stats page, under Addressing modes: runs, windows judged, and compliance percentage per mode. Random-mode runs count toward whichever mode was drawn for that pass.
 
 Default `timestamps`. API: `PUT /api/v1/settings/ad-detection` with `adAddressingMode` (`timestamps`, `segment_ids`, or `random`).
+
+The Stats page tracks two things per mode. Contract compliance says whether
+the model used the requested output shape; both modes hold near 100%
+and it exists mostly as a canary. Ad yield is the comparison that matters:
+how many ads each mode proposed, how many survived into the pipeline, and
+why the rest were dropped. The "invalid ref" drop count only exists for
+segment IDs, and that asymmetry is the point of the experiment: a made-up
+segment ID is caught and dropped, while a made-up timestamp sails through
+and has to be caught by later validation, if it is caught at all.
+
+Yield is recorded from 2.92.0 on. Older runs carry no yield data and are
+excluded from the yield numbers, so the yield sample starts empty and can
+lag the compliance sample.
 
 ### Ad Reviewer
 

@@ -411,6 +411,34 @@ class TestProviderChangeModelPruning:
         assert db.get_setting('claude_model') is None
         assert db.get_setting('chapters_model') == 'claude-haiku-4-5-20251001'
 
+    def test_model_typed_in_the_same_request_survives_the_prune(self, client):
+        """An off-catalog ID sent in the same PUT as the provider change is
+        operator intent (the typed-model-ID entry exists for proxies and
+        private deployments), not stale carryover, and must not be cleared.
+        A stale setting the request did not touch is still pruned."""
+        db = database.Database()
+        db.set_setting('llm_provider', 'anthropic', is_default=False)
+        db.set_setting('chapters_model', 'openai/gpt-stale', is_default=False)
+
+        fake_model = MagicMock(id='claude-haiku-4-5-20251001')
+        fake_client = MagicMock()
+        fake_client.list_models.return_value = [fake_model]
+        fake_client.probe_json_format_support.return_value = None
+        with patch('api.settings.get_llm_client', return_value=fake_client):
+            response = client.put(
+                '/api/v1/settings/ad-detection',
+                data=json.dumps({
+                    'llmProvider': 'openai-compatible',
+                    'claudeModel': 'my-proxy-model',
+                }),
+                content_type='application/json',
+            )
+        assert response.status_code == 200, response.data
+        # Typed in this request: survives despite being off-catalog.
+        assert db.get_setting('claude_model') == 'my-proxy-model'
+        # Untouched stale selection: still pruned.
+        assert db.get_setting('chapters_model') is None
+
 
 class TestAudioBitrateValidation:
     """audioBitrate round-trip + validation.
@@ -954,3 +982,41 @@ class TestEpisodeLogSettings:
         assert resp.status_code == 400
         assert 'episodeLogLevel' in json.loads(resp.data)['error']
         assert database.Database().get_setting('episode_log_level') == 'info'
+
+
+class TestQueueBoostSettings:
+    """Queue boost sizes round-trip through GET/PUT with range validation."""
+
+    def test_get_exposes_the_defaults(self, client):
+        resp = client.get('/api/v1/settings')
+        data = resp.get_json()
+        assert data['queueManualBoost']['value'] == 20
+        assert data['queueFreshBoost']['value'] == 5
+        assert data['queueBulkBoost']['value'] == 0
+
+    def test_put_round_trips(self, client):
+        resp = client.put(
+            '/api/v1/settings/ad-detection',
+            data=json.dumps({'queueManualBoost': 30, 'queueBulkBoost': 10}),
+            content_type='application/json',
+        )
+        assert resp.status_code == 200, resp.data
+        data = client.get('/api/v1/settings').get_json()
+        assert data['queueManualBoost']['value'] == 30
+        assert data['queueBulkBoost']['value'] == 10
+
+    def test_put_rejects_out_of_range(self, client):
+        resp = client.put(
+            '/api/v1/settings/ad-detection',
+            data=json.dumps({'queueFreshBoost': 101}),
+            content_type='application/json',
+        )
+        assert resp.status_code == 400
+
+    def test_put_rejects_non_integer(self, client):
+        resp = client.put(
+            '/api/v1/settings/ad-detection',
+            data=json.dumps({'queueManualBoost': 'lots'}),
+            content_type='application/json',
+        )
+        assert resp.status_code == 400

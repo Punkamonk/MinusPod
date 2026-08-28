@@ -104,6 +104,11 @@ export interface Feed {
   skipTranscription?: boolean | null;
   maxEpisodes?: number | null;
   onlyExposeProcessedEpisodes?: boolean | null;
+  // Per-feed retention: null inherits the global window, 0 archives the feed
+  // so nothing is ever deleted, a positive value is a day count.
+  retentionDaysOverride?: number | null;
+  // Per-feed pre-cut original audio: null inherits the global setting.
+  keepOriginalAudioOverride?: boolean | null;
   // Per-feed episode title blacklist: fnmatch glob patterns matched against
   // episode titles. A match is never queued or JIT-processed.
   titleSkipPatterns?: string[];
@@ -448,6 +453,9 @@ export interface Settings {
   maxFeedEpisodes: SettingValueNumber;
   podpingEnabled: SettingValueBoolean;
   rssRefreshIntervalMinutes: SettingValueNumber;
+  queueManualBoost: SettingValueNumber;
+  queueFreshBoost: SettingValueNumber;
+  queueBulkBoost: SettingValueNumber;
   segmentCategoryActions: { value: Record<SegmentCategory, SegmentAction>; isDefault: boolean };
   onlyExposeProcessedDefault: SettingValueBoolean;
   detectShowSegments: SettingValueBoolean;
@@ -647,6 +655,9 @@ export interface UpdateSettingsPayload {
   maxFeedEpisodes?: number;
   podpingEnabled?: boolean;
   rssRefreshIntervalMinutes?: number;
+  queueManualBoost?: number;
+  queueFreshBoost?: number;
+  queueBulkBoost?: number;
   // Partial map: only the categories being changed need to be present. The
   // backend merges this over the stored global map (unlike the per-feed
   // PATCH, which replaces the stored map outright).
@@ -1016,6 +1027,15 @@ export interface AddressingModeStats {
   windowsJudged: number;
   windowsCompliant: number;
   compliancePct: number;
+  // Yield sample. Recorded from 2.92.0 on; yieldRuns is its own
+  // denominator and lags runs until history ages out.
+  yieldRuns: number;
+  adsProposed: number;
+  adsKept: number;
+  adsDroppedInvalidRef: number;
+  adsDroppedOutOfWindow: number;
+  adsDroppedTooLong: number;
+  keptPct: number;
 }
 
 export interface AddressingStats {

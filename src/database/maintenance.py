@@ -10,6 +10,15 @@ from utils.time import ISO_FORMAT, utc_now
 
 logger = logging.getLogger(__name__)
 
+# SQLite caps bound variables per statement, so IN clauses are chunked.
+_SQL_VAR_CHUNK = 500
+
+
+def _chunked(items, size: int = _SQL_VAR_CHUNK):
+    """Yield successive slices small enough for one SQLite IN clause."""
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
 
 class MaintenanceMixin:
     """Database maintenance, cleanup, and deduplication methods."""
@@ -38,17 +47,45 @@ class MaintenanceMixin:
         pre-pass and the main processed-file pass below."""
         return (utc_now() - timedelta(days=days)).strftime(ISO_FORMAT)
 
+    def _retention_groups(self, conn) -> tuple[dict[int, list[str]], dict[str, bool]]:
+        """(resolved retention window -> slugs sharing it, slug -> retains
+        originals), from one query over podcasts.
+
+        Feeds cluster into a handful of distinct windows, so grouping keeps
+        the sweep to one query per window instead of one per feed. Precedence
+        is delegated to the same helpers the per-feed resolvers use so the
+        two paths cannot drift. The keep-original map rides along because
+        resolving it per slug would cost one podcast aggregate each, on
+        every cleanup tick.
+        """
+        from database.podcasts import (
+            effective_keep_original, effective_retention_days)
+        try:
+            global_days = int(self.get_setting('retention_days') or '30')
+        except (TypeError, ValueError):
+            global_days = 30
+        global_keep = (self.get_setting('keep_original_audio') or 'true').lower() != 'false'
+        groups: dict[int, list[str]] = {}
+        keep_by_slug: dict[str, bool] = {}
+        rows = conn.execute(
+            "SELECT slug, retention_days_override, keep_original_audio_override "
+            "FROM podcasts").fetchall()
+        for row in rows:
+            days = effective_retention_days(
+                row['retention_days_override'], global_days)
+            groups.setdefault(days, []).append(row['slug'])
+            keep_by_slug[row['slug']] = effective_keep_original(
+                row['keep_original_audio_override'], global_keep)
+        return groups, keep_by_slug
+
     def _resolve_original_retention(self, retention_days: int):
         """Return original_retention_days if the pre-pass should run, else None.
 
-        Reads `keep_original_audio` and `original_retention_days` once. The
-        pre-pass is meaningful only when keep_original is on AND a smaller
-        original window is set; every other shape collapses to the main
-        pass's existing behaviour.
+        The pre-pass is meaningful only when a smaller original window is
+        set; every other shape collapses to the main pass's existing
+        behaviour. Whether originals exist at all is per-feed now, so
+        callers filter slugs by resolve_keep_original_audio first.
         """
-        keep_raw = (self.get_setting('keep_original_audio') or 'true').lower()
-        if keep_raw == 'false':
-            return None
         raw = self.get_setting('original_retention_days')
         if not raw:
             return None
@@ -60,12 +97,18 @@ class MaintenanceMixin:
             return None
         return days
 
-    def _cleanup_originals_only(self, conn, retention_days: int, storage) -> tuple[int, float]:
+    def _cleanup_originals_only(self, conn, slugs: list[str],
+                                retention_days: int, storage) -> tuple[int, float]:
         """Drop the retained original for episodes past their original
         retention window but still within the main processed retention.
 
+        `slugs` are the feeds sharing this retention window that also retain
+        originals; feeds with keep-original off never had one to sweep.
+
         Returns (count dropped, MB freed) for log reporting.
         """
+        if not slugs:
+            return 0, 0.0
         original_days = self._resolve_original_retention(retention_days)
         if original_days is None:
             return 0, 0.0
@@ -77,16 +120,20 @@ class MaintenanceMixin:
         # processed file is still inside its window. processed_at >=
         # processed_cutoff keeps us from double-handling rows the main
         # pass is about to fully reset.
-        rows = conn.execute(
-            """SELECT e.id, e.episode_id, p.slug
-               FROM episodes e
-               JOIN podcasts p ON e.podcast_id = p.id
-               WHERE e.processed_file IS NOT NULL
-                 AND COALESCE(e.processed_at, e.updated_at) < ?
-                 AND COALESCE(e.processed_at, e.updated_at) >= ?
-                 AND e.status = 'processed'""",
-            (original_cutoff, processed_cutoff),
-        ).fetchall()
+        rows = []
+        for chunk in _chunked(slugs):
+            placeholders = ','.join('?' * len(chunk))
+            rows.extend(conn.execute(
+                f"""SELECT e.id, e.episode_id, p.slug
+                   FROM episodes e
+                   JOIN podcasts p ON e.podcast_id = p.id
+                   WHERE e.processed_file IS NOT NULL
+                     AND COALESCE(e.processed_at, e.updated_at) < ?
+                     AND COALESCE(e.processed_at, e.updated_at) >= ?
+                     AND e.status = 'processed'
+                     AND p.slug IN ({placeholders})""",  # noqa: S608
+                (original_cutoff, processed_cutoff, *chunk),
+            ).fetchall())
 
         # NOTE: no original_file IS NOT NULL predicate -- episodes processed
         # before that column existed can have an original on disk with a
@@ -147,38 +194,50 @@ class MaintenanceMixin:
         conn = self.get_connection()
 
         if not force_all:
-            retention_days = int(self.get_setting('retention_days') or '30')
-            if retention_days <= 0:
-                return 0, 0.0
+            episodes_to_reset = []
+            groups, keep_by_slug = self._retention_groups(conn)
+            for retention_days, slugs in groups.items():
+                # Archived feeds (explicit 0) and a globally disabled
+                # retention both land here and are simply never swept.
+                if retention_days <= 0:
+                    continue
 
-            # First pass: original-only deletion when the operator set a
-            # shorter retention for the pre-cut copy. Skipped entirely
-            # when keep_original_audio is off (no originals exist) or
-            # when the two retention windows match (the main pass below
-            # already covers it).
-            self._cleanup_originals_only(conn, retention_days, storage)
+                # First pass: original-only deletion when the operator set a
+                # shorter retention for the pre-cut copy. Gated up front: on
+                # the default install (original_retention_days unset) it is
+                # a no-op and the keep-original filter would be pure waste.
+                if self._resolve_original_retention(retention_days) is not None:
+                    self._cleanup_originals_only(
+                        conn, [s for s in slugs if keep_by_slug.get(s)],
+                        retention_days, storage)
 
-            cutoff_str = self._retention_cutoff_str(retention_days)
-
-            cursor = conn.execute(
-                """SELECT e.episode_id, p.slug
-                   FROM episodes e
-                   JOIN podcasts p ON e.podcast_id = p.id
-                   WHERE e.processed_file IS NOT NULL
-                     AND COALESCE(e.processed_at, e.updated_at) < ?
-                     AND e.status IN ('processed', 'failed', 'permanently_failed')""",
-                (cutoff_str,)
-            )
+                cutoff_str = self._retention_cutoff_str(retention_days)
+                for chunk in _chunked(slugs):
+                    placeholders = ','.join('?' * len(chunk))
+                    episodes_to_reset.extend(conn.execute(
+                        f"""SELECT e.episode_id, p.slug
+                           FROM episodes e
+                           JOIN podcasts p ON e.podcast_id = p.id
+                           WHERE e.processed_file IS NOT NULL
+                             AND COALESCE(e.processed_at, e.updated_at) < ?
+                             AND e.status IN ('processed', 'failed', 'permanently_failed')
+                             AND p.slug IN ({placeholders})""",  # noqa: S608
+                        (cutoff_str, *chunk),
+                    ).fetchall())
         else:
-            cursor = conn.execute(
+            # An explicit wipe still honours archive mode: retention_days_override
+            # of 0 is a deliberate "never delete this feed", not an inherited
+            # default, so it outranks the operator-triggered sweep.
+            episodes_to_reset = conn.execute(
                 """SELECT e.episode_id, p.slug
                    FROM episodes e
                    JOIN podcasts p ON e.podcast_id = p.id
                    WHERE e.processed_file IS NOT NULL
-                     AND e.status IN ('processed', 'failed', 'permanently_failed')"""
-            )
+                     AND e.status IN ('processed', 'failed', 'permanently_failed')
+                     AND (p.retention_days_override IS NULL
+                          OR p.retention_days_override > 0)"""
+            ).fetchall()
 
-        episodes_to_reset = cursor.fetchall()
         if not episodes_to_reset:
             return 0, 0.0
 

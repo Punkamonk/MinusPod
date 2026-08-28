@@ -376,6 +376,12 @@ class SchemaMixin:
             # Per-feed episode run log storage (#660); NULL = follow the
             # global setting, 'on' = store, 'off' = never store.
             ('episode_logs', 'TEXT'),
+            # Per-feed retention override; NULL = follow the global
+            # retention_days setting, 0 = archive (never delete), N = N days.
+            ('retention_days_override', 'INTEGER'),
+            # Per-feed pre-cut original audio override; NULL = follow the
+            # global keep_original_audio setting, 0 = off, 1 = on.
+            ('keep_original_audio_override', 'INTEGER'),
         ]
         for col, definition in podcasts_migrations:
             self._add_column_if_missing(conn, 'podcasts', col, definition, pod_cols)
@@ -456,6 +462,16 @@ class SchemaMixin:
                 logger.info(f"Migration: Normalized {fixed} RFC 2822 published_at dates to ISO 8601")
         except Exception as e:
             logger.warning(f"published_at normalization migration: {e}")
+
+        # -- Addressing log columns (per-mode yield and waste) --
+        # Nullable on purpose: NULL marks rows from before yield recording
+        # existed, so aggregates can exclude them from yield denominators.
+        if self._table_exists(conn, 'addressing_log'):
+            addr_cols = self._get_table_columns(conn, 'addressing_log')
+            for col in ('ads_proposed', 'ads_kept', 'ads_dropped_invalid_ref',
+                        'ads_dropped_out_of_window', 'ads_dropped_too_long'):
+                self._add_column_if_missing(
+                    conn, 'addressing_log', col, 'INTEGER', addr_cols)
 
         # -- Ad patterns table columns --
         ap_cols = self._get_table_columns(conn, 'ad_patterns')
