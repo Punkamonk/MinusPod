@@ -52,7 +52,21 @@ limiter = Limiter(
 
 
 def init_limiter(app):
-    """Initialize rate limiter with Flask app."""
+    """Initialize rate limiter with Flask app.
+
+    Deliberately NOT headers_enabled=True: flask-limiter's header
+    injection runs on every response for any route with an applicable
+    limit (default_limits apply app-wide, not just the api blueprint) and
+    unconditionally overwrites an existing Retry-After header with its own
+    computed reset time -- tried this, and it silently rewrote the
+    explicit Retry-After values routes.py's JIT 503 responses set (30/60/
+    Retry-After-computed-cooldown), which is a much bigger blast radius
+    than the one 429 path this was meant to help. apiRequest's retry
+    (frontend/src/api/client.ts) still reads Retry-After off a 429 when a
+    server happens to send one, and falls back to its fixed backoff
+    schedule when it doesn't -- so nothing downstream depends on this
+    being enabled.
+    """
     limiter.init_app(app)
     logger.debug("Rate limiter initialized: 200/min, 1000/hr default limits")
 
@@ -140,6 +154,21 @@ def check_auth():
         return error_response(csrf_err, 403)
 
     return None
+
+
+MAX_AUDIO_UPLOAD_BYTES = 1024 ** 3  # 1 GB per file
+
+
+@api.before_request
+def _widen_upload_cap():
+    # Audio uploads exceed the app-wide 10 MB cap; widen just these routes.
+    # Werkzeug spools multipart parts >500 KB to disk, so nothing buffers
+    # fully in memory.
+    p = request.path
+    if request.method == 'POST' and (
+            p.endswith('/import/upload')
+            or (p.startswith('/api/v1/feeds/') and p.endswith('/episodes'))):
+        request.max_content_length = MAX_AUDIO_UPLOAD_BYTES
 
 
 def get_storage():
@@ -421,4 +450,4 @@ def _find_similar_pattern(db, pattern_data: dict) -> dict | None:
 # Import all sub-modules to trigger route registration. `status` is aliased so
 # the submodule name does not shadow the `status` parameter of json_response /
 # error_response defined above.
-from api import feeds, episodes, history, settings, system, patterns, sponsors, status as _status_routes, auth, search, podcast_search, stats, providers, tags, cue_templates, cue_detections, detections, podping
+from api import feeds, episodes, local_episodes, history, settings, system, patterns, sponsors, status as _status_routes, auth, search, podcast_search, stats, providers, tags, cue_templates, cue_detections, detections, podping

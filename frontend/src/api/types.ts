@@ -25,8 +25,26 @@ export interface Feed {
   title: string;
   sourceUrl: string;
   feedUrl: string;
+  // Local (imported-archive) feeds have no upstream RSS: subscribed is the
+  // default for feeds pulled from a source URL. Absent on backends that
+  // predate local feeds, which read as 'subscribed'.
+  feedType?: 'subscribed' | 'local';
   description?: string;
   artworkUrl?: string;
+  // Explicit "do we hold an uploaded file" signal (artworkUrl is never
+  // falsy: it falls back to the artwork proxy path even with nothing
+  // uploaded, so it cannot answer this by itself).
+  hasArtwork?: boolean;
+  // Local-feed metadata (author/explicit/categories are also editable on
+  // subscribed feeds' upstream-derived values, but only local feeds accept
+  // them via PATCH).
+  author?: string;
+  explicit?: boolean | null;
+  categories?: string[];
+  // Podcasting 2.0 channel-level tags (funding/person/license/location/txt,
+  // medium, locked, locked_owner). Local feeds only; shape mirrors the
+  // backend's p20_channel_json.
+  p20?: Record<string, unknown>;
   episodeCount: number;
   processedCount?: number;
   statusCounts?: EpisodeStatusCounts;
@@ -159,6 +177,13 @@ export interface Episode {
   pendingReviewCount?: number;
   error?: string | null;
   artworkUrl?: string | null;
+  // Set once, on the first successful processing run, and left untouched
+  // by every reprocess after that (reset_episode_for_reprocess in
+  // reprocess_modes.py never clears it) -- unlike status, which cycles
+  // back through pending/processing on every reprocess, processedAt
+  // presence is the reliable "has this episode ever finished processing"
+  // signal. null/absent means never processed.
+  processedAt?: string | null;
 }
 
 export interface EpisodeNeighbor {
@@ -184,6 +209,12 @@ export interface DaiDifferential {
 
 export interface EpisodeDetail extends Episode {
   description?: string;
+  // Local feeds only; absent on a subscribed feed's episodes. The
+  // authoritative source for a local episode's season/episode -- an id
+  // like s01e01 is minted once at upload and never renamed, so it can go
+  // stale relative to these once season/episode is edited.
+  seasonNumber?: number;
+  episodeNumber?: number;
   originalUrl?: string;
   processedUrl?: string;
   hasOriginalAudio?: boolean;

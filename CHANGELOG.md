@@ -9,7 +9,109 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
-## [Unreleased]
+## [2.93.3] - 2026-08-28
+
+### Added
+
+- Unprocessed local episodes are playable in the admin UI: the episode page
+  gets a player for the retained original, captioned so you know ad removal
+  has not run yet.
+- When an import leaves errored or skipped entries behind, the bulk import
+  section offers "Rescan staged files" and "Add files to staged set", so a
+  bad sidecar can be fixed and rescanned without re-uploading the audio.
+
+### Fixed
+
+- Each new file selection in bulk import replaces the staged set instead of
+  piling on top of earlier attempts, so the preview always shows what you
+  just picked.
+- The post-commit staging sweep keeps files that belong to errored or
+  skipped entries instead of deleting them with the junk.
+- The upload response carries the episode's artwork URL instead of null.
+- Description fields start six rows tall instead of three.
+- Progress text in the import panel is announced to screen readers.
+
+## [2.93.2] - 2026-08-28
+
+### Fixed
+
+- Import status and the one-import-per-feed guard now work across gunicorn
+  workers: job state lives in a file with a per-feed lock, so polling no
+  longer flips to idle or returns another session's report, and two commits
+  can't race the same staging files. A worker crash mid-import surfaces as
+  "import interrupted" instead of running forever.
+- The original-audio route, the ad editor, and now the episode detail page
+  itself all reach a local episode's retained original (the original-file
+  marker was never set on import or upload). The detail page now plays it
+  directly for any local episode that hasn't finished a processing run,
+  instead of leaving the operator with nothing to preview.
+- One out-of-order date pair no longer stamps its error on every clean file
+  in a batch; the pair carries the error and the plan reports it once as a
+  batch-level problem that blocks the commit.
+- Overwrite re-imports of an episode first imported under a wide id (like
+  s01e0006) now replace that episode instead of creating a duplicate, and
+  the choice of which row to reset is deterministic.
+- Import commits consume sidecar files along with the audio, from the
+  import directory as well as staging. A finished staging import now sweeps
+  only what it committed or rejected outright; a skipped or errored entry's
+  own audio and sidecars stay staged, so fixing the problem (usually a bad
+  sidecar) doesn't mean re-uploading a good mp3. Directory-source commits
+  never touch staging, uploads are refused while an import is running, and
+  deleting the feed clears its import state files.
+- Single uploads: untitled episodes get an "Episode N" title instead of an
+  empty tag, embedded cover art is extracted like the import path does, and
+  episode artwork shows up in the episode JSON.
+- Episode edits reject unknown fields instead of silently ignoring typos;
+  the overwrite-mismatch error names the actual cause; enclosures carry a
+  length attribute; the import panel's Cancel no longer deletes staged
+  files. Staging is now cleared automatically at the start of each new
+  file selection instead, so one pick of files never piles onto another.
+
+## [2.93.1] - 2026-08-28
+
+### Added
+
+- Local episodes play immediately: an episode that has not been processed
+  yet serves its retained original right away, with range support, while
+  ad removal waits its turn in the queue. Before this, podcast apps got
+  a 503 until the queue freed up, which made a fresh archive unlistenable
+  behind a long backlog.
+- Bulk import UI: per-file upload progress ("Uploading 3 of 12"), an
+  overwrite toggle ("Replace episodes that already exist") wired to the
+  scan and commit, an accurate replace count on the commit button, and a
+  dismissible import report. The panel now also names the server import
+  directory path, and the docs cover docker-compose mounts for it,
+  including one parent folder holding a subfolder per feed.
+- Podcasting 2.0 editors for funding, person, license, location, txt,
+  and podroll in the feed panel, so everything the API accepts is
+  editable in the UI.
+
+### Fixed
+
+- Episode buttons say "Process" instead of "Reprocess" when an episode
+  has never been processed.
+- A reprocess window no longer serves the ad-laden original for an
+  episode that already has a processed file on disk.
+- Bulk uploads no longer trip the global API rate limit, and a rejected
+  file list survives a failed scan.
+
+## [2.93.0] - 2026-08-28
+
+### Added
+
+- Local feeds: build a podcast feed from your own audio files, with no
+  upstream RSS behind it. `POST /api/v1/feeds` with `feedType: "local"`
+  creates one; episodes go in via single upload or bulk archive import
+  (a strict `sNNeNN` naming scheme, optional JSON sidecar metadata, a
+  dry-run preview before anything is written, and synthesized publish
+  dates when none is given). Every episode runs through the same
+  ad-removal, transcript, and chapter pipeline as a subscribed feed's.
+  Podcasting 2.0 channel and episode metadata (funding, person, license,
+  location, txt, podroll, medium, locked, locked owner) is editable per
+  feed, through the API or the feed's panel in the UI. Local feeds are
+  fully exempt from retention and cleanup, since their audio is the only
+  copy.
+  See [docs/local-feeds.md](docs/local-feeds.md).
 
 ## [2.92.1] - 2026-08-27
 

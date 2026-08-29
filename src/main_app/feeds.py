@@ -12,8 +12,9 @@ from config import (
 )
 
 from database.episodes import normalize_published_at
-from database.podcasts import podping_declaration_columns
+from database.podcasts import is_local_feed, podping_declaration_columns
 from database.queue import compute_queue_priority
+from local_feed_builder import rebuild_local_feed
 from utils.http import safe_url_for_log
 from utils.time import parse_iso_utc, utc_now_iso
 
@@ -139,6 +140,10 @@ def refresh_rss_feed(slug: str, feed_url: str, force: bool = False):
                Use this when the RSS cache was deleted and needs regeneration.
                Also bypasses the refresh-attempt throttle.
     """
+    podcast = db.get_podcast_by_slug(slug)
+    if is_local_feed(podcast):
+        return rebuild_local_feed(slug, podcast)
+
     if not force and _refresh_coalesce.get(slug) is not None:
         refresh_logger.debug(f"[{slug}] Skipping refresh (recent attempt within coalesce window)")
         return None
@@ -459,10 +464,11 @@ def refresh_all_feeds(force: bool = False):
 
         # Parallelize feed refresh with ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {
-                executor.submit(refresh_rss_feed, slug, feed_info['in'], force): slug
-                for slug, feed_info in feed_map.items()
-            }
+            futures = {}
+            for slug, feed_info in feed_map.items():
+                if is_local_feed(db.get_podcast_by_slug(slug)):
+                    continue
+                futures[executor.submit(refresh_rss_feed, slug, feed_info['in'], force)] = slug
             for future in as_completed(futures):
                 slug = futures[future]
                 try:
@@ -485,6 +491,8 @@ def refresh_single_feed(slug: str) -> bool:
     15-minute scheduler keeps using refresh_all_feeds."""
     podcast = db.get_podcast_by_slug(slug)
     if not podcast or not podcast.get('source_url'):
+        return False
+    if is_local_feed(podcast):
         return False
     try:
         refresh_rss_feed(slug, podcast['source_url'])
@@ -545,6 +553,8 @@ def rebuild_served_rss(slug, podcast=None):
     trigger processing or touch episode rows/stats. Returns True on success.
     """
     podcast = podcast or db.get_podcast_by_slug(slug)
+    if is_local_feed(podcast):
+        return rebuild_local_feed(slug, podcast)
     if not podcast or not podcast.get('source_url'):
         return False
     try:
@@ -566,6 +576,9 @@ def refresh_feed_artwork(slug, podcast=None):
     """
     podcast = podcast or db.get_podcast_by_slug(slug)
     if not podcast or not podcast.get('source_url'):
+        return False
+    if is_local_feed(podcast):
+        # Local artwork is uploaded by the operator, never fetched upstream.
         return False
     try:
         # force, because the guard reads the same URL back off the row and

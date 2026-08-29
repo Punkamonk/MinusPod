@@ -71,6 +71,8 @@ vi.mock('../utils/confidence', () => ({
 const mockSubmitCorrection = vi.fn();
 const mockReprocessEpisode = vi.fn();
 const mockRegenerateChapters = vi.fn();
+const mockUpdateLocalEpisode = vi.fn();
+const mockUploadLocalEpisodeArtwork = vi.fn();
 
 vi.mock('../api/feeds', () => ({
   getEpisode: vi.fn(),
@@ -80,6 +82,8 @@ vi.mock('../api/feeds', () => ({
   regenerateChapters: (...args: unknown[]) => mockRegenerateChapters(...args),
   episodeOriginalUrl: (slug: string, episodeId: string) =>
     `/api/v1/feeds/${slug}/episodes/${episodeId}/original.mp3`,
+  updateLocalEpisode: (...args: unknown[]) => mockUpdateLocalEpisode(...args),
+  uploadLocalEpisodeArtwork: (...args: unknown[]) => mockUploadLocalEpisodeArtwork(...args),
 }));
 
 vi.mock('../api/patterns', () => ({
@@ -112,6 +116,10 @@ function makeEpisode(overrides: Partial<EpisodeDetailType> = {}): EpisodeDetailT
     title: 'Test Episode',
     published: '2026-01-01T00:00:00Z',
     status: 'completed',
+    // Matches the default 'completed' status: a completed episode has, by
+    // construction, finished at least one processing run. Tests exercising
+    // "never processed" override this to null explicitly.
+    processedAt: '2026-01-01T00:00:00Z',
     hasOriginalAudio: true,
     corrections: [],
     pendingReviewMarkers: [heldMarker],
@@ -1036,5 +1044,191 @@ describe('Regenerate Chapters: progress and result feedback', () => {
     expect(menuItem).toHaveProperty('disabled', true);
 
     resolveRegenerate();
+  });
+});
+
+// ---- Local feed episode metadata: season/episode seed from the API
+// payload, not from parsing the episode id (#625 Task 13 review finding 1)
+// ----
+
+// Local-feed episode edit is only rendered when the parent feed is local;
+// renderDetail's shared getFeed stub omits feedType, so this describe block
+// needs its own render helper that supplies one.
+function renderLocalDetail(ep: EpisodeDetailType) {
+  const client = makeClient();
+  (getEpisode as ReturnType<typeof vi.fn>).mockResolvedValue(ep);
+  (getFeed as ReturnType<typeof vi.fn>).mockResolvedValue({
+    slug: 'test-feed', title: 'Feed', artworkUrl: null, feedType: 'local',
+  });
+  return render(
+    <QueryClientProvider client={client}>
+      <EpisodeDetail />
+    </QueryClientProvider>,
+  );
+}
+
+describe('Local feed episode metadata: season/episode seed from the API payload', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('seeds Season/Episode from seasonNumber/episodeNumber (not the id), and a title-only save posts those seeded values', async () => {
+    const user = userEvent.setup();
+    // id parses to season=1/episode=1; the payload says season=2/episode=7.
+    // Before the fix, get_episode never echoed seasonNumber/episodeNumber,
+    // so the form fell back to parsing the id and would show 1/1 here.
+    const ep = makeEpisode({
+      id: 's01e01',
+      seasonNumber: 2,
+      episodeNumber: 7,
+      pendingReviewMarkers: [],
+    });
+    mockUpdateLocalEpisode.mockResolvedValue(ep);
+    renderLocalDetail(ep);
+
+    await screen.findByText('Edit metadata');
+
+    const seasonInput = await screen.findByLabelText('Season') as HTMLInputElement;
+    const episodeInput = screen.getByLabelText('Episode') as HTMLInputElement;
+    expect(seasonInput.value).toBe('2');
+    expect(episodeInput.value).toBe('7');
+
+    // Title-only edit: season/episode inputs are left untouched.
+    const titleInput = screen.getByLabelText('Title') as HTMLInputElement;
+    await user.clear(titleInput);
+    await user.type(titleInput, 'Renamed Episode');
+
+    await user.click(screen.getByRole('button', { name: /Save metadata/ }));
+
+    await waitFor(() => expect(mockUpdateLocalEpisode).toHaveBeenCalledTimes(1));
+    const [, , payload] = mockUpdateLocalEpisode.mock.calls[0] as [string, string, { season?: number; episode?: number; title?: string }];
+    // Must echo the payload-seeded values (2/7), not the id-parsed ones (1/1).
+    expect(payload.season).toBe(2);
+    expect(payload.episode).toBe(7);
+    expect(payload.title).toBe('Renamed Episode');
+  });
+});
+
+// ---- Original-audio player for unprocessed local episodes: the admin
+// route (original.mp3) works since 2.93.2, but the detail page showed no
+// player until a run completed. ----
+describe('Original audio player for unprocessed local episodes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('renders a player sourced from the original-audio route for a discovered local episode', async () => {
+    const ep = makeEpisode({
+      status: 'discovered', processedAt: null, hasOriginalAudio: true, pendingReviewMarkers: [],
+    });
+    renderLocalDetail(ep);
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+
+    const players = document.querySelectorAll('audio');
+    const originalPlayer = Array.from(players).find(
+      (el) => el.getAttribute('src') === '/api/v1/feeds/test-feed/episodes/ep-1/original.mp3',
+    );
+    expect(originalPlayer).toBeDefined();
+    expect(screen.getByText(/ad removal hasn't run yet/i)).toBeDefined();
+  });
+
+  it('renders no player for a discovered episode on a subscribed (non-local) feed', async () => {
+    const ep = makeEpisode({
+      status: 'discovered', processedAt: null, hasOriginalAudio: true, pendingReviewMarkers: [],
+    });
+    renderDetail(ep);
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+
+    expect(document.querySelector('audio[src*="original.mp3"]')).toBeNull();
+    expect(screen.queryByText(/ad removal hasn't run yet/i)).toBeNull();
+  });
+
+  it('renders no player for a once-processed local episode that is mid-reprocess (status back to pending, processedAt still set)', async () => {
+    // Regression case: status alone cycles back through pending/processing
+    // on a reprocess, but processedAt is set on the first completed run and
+    // never cleared afterward, so !processedAt is required to keep this
+    // player from misleadingly claiming ad removal "hasn't run yet" on an
+    // episode that already has a real (if stale) processed copy.
+    const ep = makeEpisode({
+      status: 'pending', processedAt: '2025-06-01T00:00:00Z', hasOriginalAudio: true, pendingReviewMarkers: [],
+    });
+    renderLocalDetail(ep);
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+
+    expect(document.querySelector('audio[src*="original.mp3"]')).toBeNull();
+    expect(screen.queryByText(/ad removal hasn't run yet/i)).toBeNull();
+  });
+
+  it('renders no player for a once-processed local episode that failed reprocessing', async () => {
+    const ep = makeEpisode({
+      status: 'failed', processedAt: '2025-06-01T00:00:00Z', hasOriginalAudio: true, pendingReviewMarkers: [],
+    });
+    renderLocalDetail(ep);
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+
+    expect(document.querySelector('audio[src*="original.mp3"]')).toBeNull();
+    expect(screen.queryByText(/ad removal hasn't run yet/i)).toBeNull();
+  });
+});
+
+describe('Process vs Reprocess label (single episode)', () => {
+  beforeEach(() => {
+    mockSubmitCorrection.mockReset();
+    mockReprocessEpisode.mockReset();
+  });
+
+  it('labels the action button "Process" for a never-processed (discovered) episode', async () => {
+    renderDetail(makeEpisode({ status: 'discovered', processedAt: null, pendingReviewMarkers: [] }));
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+    expect(screen.getByRole('button', { name: 'Process' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Reprocess' })).toBeNull();
+  });
+
+  it('labels the action button "Process" for a never-processed (pending) episode', async () => {
+    renderDetail(makeEpisode({ status: 'pending', processedAt: null, pendingReviewMarkers: [] }));
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+    expect(screen.getByRole('button', { name: 'Process' })).toBeDefined();
+  });
+
+  it('labels the action button "Process" for a never-processed episode deferred to the offline queue', async () => {
+    // Regression case: 'deferred' can happen before an episode's first
+    // run too, so status alone can't distinguish this from a
+    // reprocess-queued episode -- only processedAt can.
+    renderDetail(makeEpisode({ status: 'deferred', processedAt: null, pendingReviewMarkers: [] }));
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+    expect(screen.getByRole('button', { name: 'Process' })).toBeDefined();
+  });
+
+  it('labels the action button "Reprocess" for an already-processed (completed) episode', async () => {
+    renderDetail(makeEpisode({ status: 'completed', pendingReviewMarkers: [] }));
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+    expect(screen.getByRole('button', { name: 'Reprocess' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Process' })).toBeNull();
+  });
+
+  it('labels the action button "Reprocess" for a failed episode (it was processed once)', async () => {
+    renderDetail(makeEpisode({ status: 'failed', pendingReviewMarkers: [] }));
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+    expect(screen.getByRole('button', { name: 'Reprocess' })).toBeDefined();
+  });
+
+  it('labels the action button "Reprocess" for a reprocess-queued episode (status back to pending, processedAt still set)', async () => {
+    // Regression case (round-2 review finding): a reprocess request flips
+    // status back to pending/processing but reset_episode_for_reprocess
+    // never clears processedAt, so the episode has been processed before
+    // and must keep reading "Reprocess" throughout that window, not
+    // regress to "Process".
+    renderDetail(makeEpisode({ status: 'pending', processedAt: '2025-06-01T00:00:00Z', pendingReviewMarkers: [] }));
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+    expect(screen.getByRole('button', { name: 'Reprocess' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Process' })).toBeNull();
+  });
+
+  it('carries the "Process" label into the dropdown menu\'s first entry for a never-processed episode', async () => {
+    const user = userEvent.setup();
+    renderDetail(makeEpisode({ status: 'discovered', processedAt: null, pendingReviewMarkers: [] }));
+    await waitFor(() => expect(screen.getByText('Test Episode')).toBeDefined());
+    await user.click(screen.getByRole('button', { name: 'Process' }));
+    expect(screen.getAllByText('Process').length).toBeGreaterThanOrEqual(2);
   });
 });

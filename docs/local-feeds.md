@@ -1,0 +1,239 @@
+# Local Feeds
+
+[< Docs index](README.md) | [Project README](../README.md)
+
+---
+
+A local feed is a podcast feed MinusPod builds and serves from your own audio files instead of an upstream RSS feed. Use it to turn an archive of MP3s into a real, subscribable Podcasting 2.0 feed: upload or import episodes, MinusPod runs them through the same ad-removal pipeline as any subscribed feed (if there's anything to remove), and generates transcripts and chapters for them.
+
+There is no upstream for a local feed. MinusPod is the publisher, not a proxy. That changes a few things covered below: how episodes get added, what happens to your original files, and what parts of a normal feed's settings don't apply.
+
+## Creating a local feed
+
+`POST /api/v1/feeds` with `feedType: "local"` instead of a `sourceUrl`:
+
+```json
+{
+  "feedType": "local",
+  "title": "My Archive Show",
+  "slug": "my-archive-show",
+  "description": "Everything I recorded before I had an RSS feed",
+  "author": "Jane Host",
+  "explicit": false,
+  "categories": ["Comedy", "Arts"]
+}
+```
+
+`title` is required; `slug` is derived from the title if you don't supply one. Pick the slug carefully: it's immutable after creation, same as for subscribed feeds, and it's also the name of the feed's import directory on disk (see below). Everything else is optional at creation time and editable afterward with `PATCH /api/v1/feeds/{slug}`.
+
+A local feed has no artwork until you upload one. The feed still works without it, but most podcast apps and directories expect cover art, so upload one as soon as you can:
+
+```
+POST /api/v1/feeds/{slug}/artwork
+```
+
+Multipart, field `file`, JPEG or PNG. If the image is under 1400x1400 the response carries a `warning` (podcast directories generally want at least that) but the upload still succeeds.
+
+## Editing feed metadata
+
+`PATCH /api/v1/feeds/{slug}` accepts `title`, `author`, `explicit`, `categories`, and `p20` on local feeds; these 400 on a subscribed feed, since a refresh would just overwrite them from the upstream RSS. `description` is a plain per-feed field editable on any feed, local or subscribed. See [Podcasting 2.0 fields](#podcasting-20-fields) below for `p20`.
+
+## Adding episodes
+
+There are two ways to get episodes into a local feed: upload one at a time, or hand MinusPod a batch and let it work out the naming.
+
+### Single-episode upload
+
+```
+POST /api/v1/feeds/{slug}/episodes
+```
+
+Multipart form: `audio` (required, `.mp3` only, up to 1 GB), plus optional `title`, `season`, `episode`, `publishedAt`, `description`, and `artwork`. Season defaults to 1; episode defaults to one past the highest existing episode number in that season. The pair mints an episode id of the form `s01e05`, and MinusPod refuses to overwrite an id that already exists (409); use the bulk import path with `overwrite: true` for that.
+
+Once uploaded, edit an episode with `PATCH /api/v1/feeds/{slug}/episodes/{episodeId}` (title, description, season, episode, publishedAt, `p20`), several at once with `PATCH /api/v1/feeds/{slug}/episodes` (a JSON array of `{episodeId, ...}` edits, up to 500 per request, validated as a batch: one bad entry fails the whole request before anything is written), or delete one with `DELETE /api/v1/feeds/{slug}/episodes/{episodeId}`. Deleting removes the row and its files outright; there's no upstream feed to rediscover it from later, unlike deleting an episode on a subscribed feed. An episode currently processing can't be deleted (409) until it finishes or you cancel it.
+
+### Bulk import
+
+For archives, drop files into the import directory or upload a batch, then run a dry-run scan before committing.
+
+For a worked example of producing an import-ready archive, see [snarchiver](https://github.com/ttlequals0/snarchiver), which downloads the Security Now back catalog into this layout: one mp3, description, JSON sidecar, and artwork file per episode, all sharing a stem, with the real air date in each sidecar.
+
+**Where files come from**: two places, and you can use either or both in the same import.
+
+- **Staging area** (`<data>/import-staging/<slug>/`): files you `POST` to `/api/v1/feeds/{slug}/import/upload` (multipart, repeated `files` field, 409 while an import is already running). A finished commit sweeps this directory, but not indiscriminately. A committed entry's audio is already moved and its sidecars already deleted by that point, and a file the plan rejected outright (bad naming, empty, a stray `.part`) is removed too, but a skipped or errored entry's audio and sidecars (typically a bad sidecar sitting next to an otherwise-good mp3) are left in place, so you can fix the problem without re-uploading the audio. The directory itself is only removed once nothing preserved is left in it. That sweep only runs when the commit's `source` was `staging` or `both`: a `directory`-only commit never scanned staging, and never touches it. `DELETE /api/v1/feeds/{slug}/import/staging` empties it on demand (409 while an import is running); the UI's own "Choose files" button calls this automatically before every new selection, so each pick of files stands on its own instead of piling onto whatever was staged before. The UI's Cancel button only drops the reviewed plan on your screen; it doesn't touch staging. When the last scan or finished run left a skipped or errored entry behind, the UI also offers "Add files to staged set" (upload more files into staging without clearing it, e.g. a corrected sidecar) and "Rescan staged files" (re-read what's staged without uploading or clearing anything). Both skip the pre-clear "Choose files" does, since the point is building on what survived, not replacing it.
+- **Import directory** (`<data>/import/<slug>/`): files you place there yourself, outside MinusPod. This is for archives already sitting on the same host or a mounted volume. MinusPod moves the audio file out of it on a successful commit and deletes that file's sidecars (`.txt`, `.json`, artwork) along with it; a rejected or errored file's sidecars are left in place so you can fix and re-scan them. Point this at the same filesystem as your data directory if you can: the commit is then a same-volume move rather than a copy, which matters for a large archive.
+
+Deleting the feed itself (`DELETE /api/v1/feeds/{slug}`) removes both of these directories along with everything still in them, sidecars included, since neither belongs anywhere once the feed is gone.
+
+With the standard docker-compose setup (`- ./data:/app/data`), the import directory for a feed with slug `my-archive` is `./data/import/my-archive/` on the host, next to the compose file. No extra volume is needed. Copy an archive in and scan:
+
+```bash
+mkdir -p ./data/import/my-archive
+cp ~/archives/my-show/*.mp3 ./data/import/my-archive/
+# then in the UI: feed page > Local feed > Bulk import > Scan server directory
+```
+
+If the archive lives on another disk, either mount it into the container as its own volume and copy server-side, or add a bind mount directly at the import path so no copy is needed at all:
+
+```yaml
+services:
+  minuspod:
+    volumes:
+      - ./data:/app/data
+      - /mnt/archives/my-show:/app/data/import/my-archive
+```
+
+A bind mount from a different filesystem does make the commit a copy rather than a rename, so a very large archive imports faster if you copy it into `./data/import/<slug>/` first.
+
+You can also mount one parent folder holding a subfolder per feed, and every local feed finds its own directory:
+
+```yaml
+services:
+  minuspod:
+    volumes:
+      - ./data:/app/data
+      - /mnt/data/import:/app/data/import
+```
+
+Here `/mnt/data/import/slug1/` serves the feed with slug `slug1`, `/mnt/data/import/slug2/` serves `slug2`, and so on. Folder names must match feed slugs exactly. Remember that a committed import moves the audio out of these folders: after the import, the mp3s live in MinusPod's storage, not your archive folder. Keep a separate copy if the mounted folder is not meant to be consumed, and never mount it read-only.
+
+Either way, files must follow the naming scheme below before MinusPod will touch them.
+
+#### Naming scheme
+
+```
+s01e01 - The Beginning.mp3      audio (required)
+s01e01 - The Beginning.txt      description sidecar (optional)
+s01e01 - The Beginning.jpg      episode artwork sidecar (optional)
+s01e01 - The Beginning.json     metadata sidecar (optional)
+```
+
+- The season/episode token (`s01e01`) is case-insensitive and must be zero-padded to at least 2 digits, at the start of the filename.
+- A sidecar is matched to its audio file by exact basename, not just the token: `s01e01.mp3` pairs with `s01e01.txt`, not with `s01e01 - Title.txt`.
+- Everything after `" - "` becomes the episode title. No title, and no title sidecar override, falls back to `Episode {n}`.
+- Audio must be `.mp3`. Anything else with a recognized audio extension (`.m4a`, `.wav`, `.flac`, `.aac`, `.ogg`, `.wma`, `.opus`, `.aiff`, `.aif`) is rejected with a hint to convert it first:
+
+  ```
+  ffmpeg -i in.m4a -codec:a libmp3lame -q:a 2 out.mp3
+  ```
+
+- Artwork sidecars are `.jpg`, `.jpeg`, or `.png`. Description sidecars are `.txt`.
+- Files that don't match the scheme at all are listed in the dry-run report with a reason and never imported.
+
+#### JSON sidecar
+
+The optional `.json` sidecar overrides everything else derived from the filename, including the season/episode token. All fields are optional; any key that isn't one of the five below fails the whole sidecar (fail closed: the episode is skipped, not imported with partial metadata):
+
+```json
+{
+  "title": "The Beginning",
+  "description": "...",
+  "published_at": "2019-03-01T12:00:00Z",
+  "season": 1,
+  "episode": 1
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `title` | string, 1-500 chars | |
+| `description` | string | Plain text, or the HTML subset the app already renders elsewhere |
+| `published_at` | string | ISO 8601, timezone required |
+| `season` | integer >= 0 | |
+| `episode` | integer >= 1 | |
+
+A formal JSON Schema for this file is published at [`docs/schemas/episode-sidecar.schema.json`](schemas/episode-sidecar.schema.json), so you can validate a batch of sidecars before importing.
+
+#### Publish dates
+
+If you don't set `published_at` (sidecar or per-episode edit), MinusPod synthesizes one from episode order: sorted by (season, episode), the newest episode in the batch anchors at import time and each earlier one steps back a day. An explicit date anywhere in the batch also anchors the schedule, and MinusPod spaces the episodes between anchors evenly rather than always stepping by exactly a day.
+
+Explicit dates that land out of order relative to the (season, episode) sort are a hard error: the dry-run report's top-level `batchErrors` names the two conflicting episode ids, and only those two entries carry the error individually. The rest of the batch shows clean, but commit refuses the whole plan while `batchErrors` is non-empty. Fix the offending sidecar(s) and re-scan.
+
+#### Duplicates and existing episodes
+
+Two files landing on the same episode id within one batch is a per-file error on both. An id that already exists in the feed is also an error, unless you pass `overwrite: true`, in which case a re-import fully replaces that episode: new audio and metadata come in, and the prior transcript, chapters, and ad-detection results are discarded as the episode goes back to `discovered`. Its processing-history and token-usage rows are kept. Existing episodes are never silently overwritten without the flag.
+
+Episode ids always mint at minimal zero-padded width: `s01e0006 - Title.mp3` mints `s01e06`, not `s01e0006`, regardless of how many digits the filename itself uses. This also applies when comparing against what's already in the feed, so a rescan of an episode that was imported before this normalization existed (and is still sitting in the database under a wide id like `s01e0006`) still collides correctly with the id a fresh scan mints for it. If a feed already has both spellings for the same episode (a pre-normalization duplicate), an overwrite commit deterministically resets the canonical-id row and leaves the wide-id one untouched; deleting that leftover duplicate is a manual step.
+
+#### Scan, then commit
+
+```
+POST /api/v1/feeds/{slug}/import/scan       {"source": "staging" | "directory" | "both", "overwrite": false}
+```
+
+Returns a dry-run plan: every file MinusPod is about to import (with resolved season/episode/title and its dates marked `explicit` or `synthesized`), every rejected file with a reason, and a `planHash` covering the exact set of files and their sizes/mtimes. Nothing is written yet.
+
+```
+POST /api/v1/feeds/{slug}/import/commit     {"planHash": "...", "source": "both", "overwrite": false}
+```
+
+Echo back the `planHash` from the scan. MinusPod re-scans the same source(s) server-side and compares hashes; if anything on disk changed since the scan, commit 409s and asks you to re-scan rather than importing a plan that no longer matches reality. A second commit while one is already running for the same feed also 409s: only one import runs per feed at a time.
+
+Commit runs in the background; poll it with:
+
+```
+GET /api/v1/feeds/{slug}/import/status
+```
+
+## Processing behavior
+
+Whether an imported or uploaded episode gets queued for ad detection depends on one thing: was the feed empty before this batch landed.
+
+- **Into an empty feed** (the very first import, populating an archive from scratch): nothing is queued, no matter what auto-process is set to. A hundred-episode backfill isn't "new content" in the sense auto-process exists for.
+- **Into a feed that already has episodes** (a later single upload, or a later import): each newly added episode enters the normal auto-process gate, same as a newly discovered episode on a subscribed feed, except there's no publish-date recency check. A backdated archive episode you just added is still new content to MinusPod even though its synthesized date is old.
+
+Either way, with auto-process off (or an episode that didn't get queued), the episode still processes on first play, via manual reprocess, or through the bulk episode actions, exactly like a subscribed feed.
+
+Until an episode is processed, its enclosure URL is unversioned, which triggers just-in-time processing the first time a player requests it. Unlike a subscribed feed, where that wait (or a queue backlog, a retry cooldown, a permanent failure) returns a 503 or 410, a local feed serves the retained original right away instead, with range support, so a fresh archive isn't unlistenable behind a long queue. The episode page's own player does the same: while a local episode is unprocessed, it plays the retained original directly, labeled as such.
+
+## Served feed size
+
+Local feeds serve every episode by default: there's no upstream to page against, so the served RSS includes the whole archive. Set `maxEpisodes` (`PATCH /api/v1/feeds/{slug}`) to trim to the newest N instead; 0 or leaving it unset goes back to serving everything. There's no upper limit beyond a 10000-episode ceiling, well above what any archive needs (the same field stays clamped to 10-500 on subscribed feeds, which have an upstream to reconcile against).
+
+A 1000-episode archive runs roughly 1.5-2 MB of XML per request, and current podcast apps handle that fine. A handful of older or resource-constrained ones may not, so if a listener reports their app failing to load the feed, set a cap.
+
+## Episode artwork in the served feed
+
+An episode with its own uploaded or extracted cover gets an `<itunes:image>` in the served RSS item pointing at:
+
+```
+GET /episodes/{slug}/{episodeId}/artwork
+```
+
+This is a public, feed-key-gated route (same key as the RSS feed and audio enclosures when authenticated feeds is on), not part of the `/api/v1` management API. It serves the stored cover bytes and never fetches anything on demand; 404 if the episode has no cached cover. It's separate from the feed-level cover art, which is served at `/{slug}/cover-minuspod.jpg`. See [API & Webhooks](api-and-webhooks.md) for the rest of the public, non-API serving routes.
+
+## Podcasting 2.0 fields
+
+Local feeds carry a pragmatic subset of the Podcast Namespace, set through the `p20` object on the feed (`PATCH /api/v1/feeds/{slug}`) and on individual episodes (`PATCH /api/v1/feeds/{slug}/episodes/{episodeId}`).
+
+Feed level (`p20`): `funding` (list of `{text, url}`), `person` (list of `{text, role, group, img, href}`), `license` (list of `{text, url}`), `location` (list of `{text, geo, osm}`), `txt` (list of `{text, purpose}`), `podroll` (list of `{feedGuid, feedUrl, itemGuid, medium}`, recommending other shows; `feedGuid` is required and must be a UUID, the rest are optional), plus the scalars `medium` (one of `podcast`, `music`, `video`, `film`, `audiobook`, `newsletter`, `blog`), `locked` (`yes` or `no`), and `locked_owner` (an email address; blank clears it). `guid` is minted once at creation from the feed URL and can't be set or changed through this field. Sending `p20: null` clears the six list tags and any locked owner, but leaves `guid`, `medium`, and `locked` alone.
+
+Episode level (`p20`): `person` and `location`, both lists in the same shape as above.
+
+Out of scope for now: value-for-value splits, `liveItem`, and Podping announcements for local feeds (MinusPod's Podping support today only listens for upstream announcements on subscribed feeds; it doesn't publish its own).
+
+## What doesn't apply to local feeds
+
+Because there's no upstream feed, the following don't apply to a local feed: RSS refresh (`POST /api/v1/feeds/{slug}/refresh` returns 400, "Local feed has no upstream to refresh"), Podping, the cross-fetch differential, and the episode title skip list (there's no upstream original to redirect a blacklisted title to, so a local episode processes normally regardless of its title). The rest of the processing pipeline (detection mode, cue templates, chapters mode, segment actions, queue priority, retention overrides) works exactly as it does on a subscribed feed.
+
+## Retention, backups, and originals
+
+The pre-cut original audio is the *only* copy of a local episode; there's no upstream to re-download it from. Local feeds are fully exempt from retention and cleanup: neither the scheduled sweep (global or per-feed window, and the keep-original-audio setting) nor the operator-triggered "Clear all processed audio" action (`POST /api/v1/system/cleanup`) ever deletes a local feed's original or processed audio, regardless of the retention window.
+
+If you back up MinusPod, make sure your backup covers `<data>/podcasts/<slug>/` for local feeds. The database backup alone does not include audio.
+
+## OPML export
+
+Local feeds are skipped from OPML export in `mode=original` (there's no upstream URL to export; the internal `local://` placeholder would leak into the file). They're included as normal in `mode=modified`, which exports the MinusPod-served feed URLs.
+
+## Reference
+
+- [OpenAPI specification](../openapi.yaml) - full request/response shapes for every endpoint above
+- [Episode sidecar JSON Schema](schemas/episode-sidecar.schema.json)
+- [Glossary](glossary.md) - local feed, import directory, staging area, sidecar file, sNNeNN naming token, dry-run import plan, synthesized publish date
+- [Podcasting 2.0](podcasting-2.0.md) - how MinusPod's namespace support differs for feeds it publishes itself versus feeds it re-serves
+
+---
+
+[< Docs index](README.md) | [Project README](../README.md)

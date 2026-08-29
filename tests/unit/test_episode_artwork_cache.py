@@ -105,6 +105,27 @@ def test_eviction_drops_the_least_recently_served_covers(storage, monkeypatch):
     assert surviving == {ids[0], 'dddddddddddd'}
 
 
+def test_evict_false_preserves_older_covers_over_the_cap(storage, monkeypatch):
+    """Local-feed episode artwork (#625 Task 8) is the only copy of that
+    cover -- there is no upstream URL to re-download it from -- so
+    save_episode_artwork(..., evict=False) must skip the LRU trim
+    entirely, even when the directory is left far over the cap."""
+    blob = b'\xff\xd8\xff\xe0' + b'\x00' * 96  # 100 bytes each
+
+    monkeypatch.setattr(storage_module, 'EPISODE_ARTWORK_CACHE_BYTES', 10_000)
+    ids = ['aaaaaaaaaaaa', 'bbbbbbbbbbbb']
+    for ep in ids:
+        storage._save_episode_artwork(SLUG, ep, blob, 'image/jpeg')
+
+    art_dir = storage._episode_artwork_dir(SLUG)
+    monkeypatch.setattr(storage_module, 'EPISODE_ARTWORK_CACHE_BYTES', 50)
+    result = storage.save_episode_artwork(SLUG, 'cccccccccccc', blob, 'image/jpeg', evict=False)
+
+    assert result is True
+    surviving = {p.stem for p in art_dir.glob('*.jpg')}
+    assert surviving == {ids[0], ids[1], 'cccccccccccc'}
+
+
 def test_cache_stays_under_the_cap(storage, monkeypatch):
     monkeypatch.setattr(storage_module, 'EPISODE_ARTWORK_CACHE_BYTES', 250)
     blob = b'\xff\xd8\xff\xe0' + b'\x00' * 96
@@ -122,6 +143,35 @@ def test_traversal_episode_id_never_reaches_the_filesystem(storage):
     # somehow got past shape validation is stopped by path containment.
     storage._save_episode_artwork(SLUG, EP, JPEG, 'image/jpeg')
     assert storage.get_episode_artwork(SLUG, '../../secrets') is None
+
+
+def test_has_episode_artwork_reflects_existence(storage):
+    assert storage.has_episode_artwork(SLUG, EP) is False
+    storage._save_episode_artwork(SLUG, EP, JPEG, 'image/jpeg')
+    assert storage.has_episode_artwork(SLUG, EP) is True
+
+
+def test_has_episode_artwork_does_not_read_or_touch_mtime(storage):
+    # Existence-only check (task-5 review fix #4): must not read the file
+    # or bump its mtime the way get_episode_artwork's LRU touch does.
+    storage._save_episode_artwork(SLUG, EP, JPEG, 'image/jpeg')
+    art_dir = storage._episode_artwork_dir(SLUG)
+    path = art_dir / f'{EP}.jpg'
+    os.utime(path, (1_000, 1_000))
+
+    assert storage.has_episode_artwork(SLUG, EP) is True
+
+    assert path.stat().st_mtime == 1_000
+
+
+def test_has_episode_artwork_rejects_malformed_id(storage):
+    storage._save_episode_artwork(SLUG, EP, JPEG, 'image/jpeg')
+    assert storage.has_episode_artwork(SLUG, '../../secrets') is False
+
+
+def test_has_episode_artwork_on_unknown_feed_creates_no_directory(storage):
+    assert storage.has_episode_artwork('never-seen', EP) is False
+    assert not (storage.podcasts_dir / 'never-seen').exists()
 
 
 def test_cleanup_podcast_dir_refuses_traversal_slug(storage, tmp_path):

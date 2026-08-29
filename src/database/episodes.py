@@ -236,7 +236,8 @@ class EpisodeMixin:
                                'reprocess_mode', 'reprocess_requested_at', 'retry_count',
                                'published_at', 'episode_number',
                                'deferred_at', 'deferred_service', 'detection_degraded',
-                               'low_yield_rerun_at', 'reprocess_source'):
+                               'low_yield_rerun_at', 'reprocess_source',
+                               'season_number', 'p20_item_json'):
                         fields.append(f"{key} = ?")
                         values.append(value)
                     elif key == 'tags':
@@ -262,8 +263,9 @@ class EpisodeMixin:
                     new_duration, ads_removed, ads_removed_firstpass, ads_removed_secondpass,
                     error_message, ad_detection_status, artwork_url, episode_number,
                     retry_count, published_at, deferred_at, deferred_service,
-                    reprocess_requested_at, reprocess_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    reprocess_requested_at, reprocess_source,
+                    season_number, p20_item_json, original_file)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     podcast_id,
                     episode_id,
@@ -287,7 +289,10 @@ class EpisodeMixin:
                     kwargs.get('deferred_at'),
                     kwargs.get('deferred_service'),
                     kwargs.get('reprocess_requested_at'),
-                    kwargs.get('reprocess_source')
+                    kwargs.get('reprocess_source'),
+                    kwargs.get('season_number'),
+                    kwargs.get('p20_item_json'),
+                    kwargs.get('original_file'),
                 )
             )
             db_id = cursor.lastrowid
@@ -1140,10 +1145,14 @@ class EpisodeMixin:
         conn.commit()
         return cursor.rowcount
 
-    def delete_episodes(self, slug: str, episode_ids: list[str], storage) -> tuple[int, float]:
+    def delete_episodes(self, slug: str, episode_ids: list[str], storage,
+                         keep_original: bool = False) -> tuple[int, float]:
         """Delete audio files and reset episodes to 'discovered'.
 
         Does NOT delete DB rows. Does NOT touch processing_history.
+        keep_original=True preserves the retained pre-cut original (local
+        feeds: it is the only copy, no upstream to re-download) and only
+        removes the processed output.
         Returns (count reset, MB freed).
         """
         episodes = self.get_episodes_by_ids(slug, episode_ids)
@@ -1157,7 +1166,13 @@ class EpisodeMixin:
             if not episode or not episode.get('processed_file'):
                 continue
 
-            freed_bytes += storage.cleanup_episode_files(slug, episode_id)
+            if keep_original:
+                for path in storage.iter_episode_audio_paths(slug, episode_id, '.mp3'):
+                    if path.exists():
+                        freed_bytes += path.stat().st_size
+                storage.delete_processed_file(slug, episode_id, keep_original=True)
+            else:
+                freed_bytes += storage.cleanup_episode_files(slug, episode_id)
             ids_to_reset.append(episode_id)
 
         if ids_to_reset:
@@ -1166,3 +1181,40 @@ class EpisodeMixin:
 
         freed_mb = freed_bytes / (1024 * 1024)
         return len(ids_to_reset), freed_mb
+
+    def delete_episode_rows(self, slug: str, episode_ids: list[str], storage) -> int:
+        """Hard-delete episode rows (local feeds only; subscribed feeds only
+        reset to discovered via delete_episodes). Removes files first.
+
+        Unlike delete_episodes, this drops the row entirely -- appropriate
+        for local (imported-archive) feeds, which have no upstream RSS to
+        re-discover the episode from on a future refresh. Also drops any
+        auto_process_queue row for these ids: leaving one behind would let
+        the background queue processor resurrect a deleted episode (it
+        reads original_url/title/etc. off the queue row, not the episodes
+        table), and the queue table's UNIQUE(podcast_id, episode_id) +
+        ON CONFLICT DO NOTHING on enqueue would silently swallow a future
+        re-upload of the same id. Returns the number of episode rows
+        deleted.
+        """
+        conn = self.get_connection()
+        podcast = self.get_podcast_by_slug(slug)
+        if not podcast or not episode_ids:
+            return 0
+
+        for episode_id in episode_ids:
+            storage.cleanup_episode_files(slug, episode_id)
+            storage.remove_episode_artwork(slug, episode_id)
+
+        placeholders = ','.join('?' for _ in episode_ids)
+        params = [podcast['id']] + list(episode_ids)
+        conn.execute(
+            f"DELETE FROM auto_process_queue WHERE podcast_id = ? AND episode_id IN ({placeholders})",  # noqa: S608
+            params
+        )
+        cursor = conn.execute(
+            f"DELETE FROM episodes WHERE podcast_id = ? AND episode_id IN ({placeholders})",  # noqa: S608
+            params
+        )
+        conn.commit()
+        return cursor.rowcount

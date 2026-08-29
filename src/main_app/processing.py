@@ -86,6 +86,7 @@ from config import (
     ModelNotConfiguredError,
     coerce_bool_setting,
 )
+from database.podcasts import is_local_feed
 from database.settings import registry_get_default
 from embedded_chapters import embed_chapters, probe_chapters, MIN_CHAPTER_SECONDS
 from upstream_chapters import fetch_upstream_chapters
@@ -246,6 +247,10 @@ def is_transient_error(error: Exception) -> bool:
         'invalid audio', 'unsupported format', 'corrupt',
         'authentication', 'unauthorized', 'forbidden',
         '400 ', '401 ', '403 ',
+        # Local feeds have no upstream to retry against: a missing retained
+        # original never recovers on its own, so retrying just burns the
+        # full ladder before landing on permanently_failed anyway.
+        'original audio missing',
     ]
     if any(pattern in error_msg for pattern in permanent_patterns):
         return False
@@ -271,7 +276,9 @@ def _process_episode_background(slug, episode_id, original_url, title, podcast_n
         db.clear_leaked_transaction(audio_logger, 'episode processing (cancel)')
         audio_logger.info(f"[{slug}:{episode_id}] Cancelled - cleaning up partial files")
         try:
-            storage.delete_processed_file(slug, episode_id)
+            podcast_row = db.get_podcast_by_slug(slug)
+            storage.delete_processed_file(
+                slug, episode_id, keep_original=is_local_feed(podcast_row))
         except Exception as cleanup_err:
             audio_logger.warning(f"[{slug}:{episode_id}] Failed to clean up partial file: {cleanup_err}")
         # Reset DB status (before finally releases queue, preventing re-queue race)
@@ -457,11 +464,15 @@ def _next_processed_version(episode_data):
 
 
 def _download_and_transcribe(slug, episode_id, episode_url, podcast_name,
-                              skip_transcription=False):
+                              skip_transcription=False, podcast=None):
     """Pipeline stage: Download audio and get/create transcript segments.
 
     ``skip_transcription``: cue_only preset opt-out; goes straight to
     audio acquisition and returns (audio_path, []) without transcribing.
+
+    ``podcast``: the caller's already-fetched podcast row (avoids a
+    redundant db.get_podcast_by_slug here), matching the pattern used by
+    _run_differential_fetch. None is treated as non-local.
 
     Returns (audio_path, segments) or raises on failure.
     """
@@ -470,6 +481,8 @@ def _download_and_transcribe(slug, episode_id, episode_url, podcast_name,
         if original_path and os.path.exists(original_path):
             audio_path = _copy_retained_original_to_temp(original_path)
             audio_logger.info(f"[{slug}:{episode_id}] Reusing retained original audio (skipped download)")
+        elif is_local_feed(podcast):
+            raise Exception("original audio missing")
         else:
             audio_path = _download_episode_audio(episode_url)
         audio_logger.info(f"[{slug}:{episode_id}] Transcription skipped (per-feed setting)")
@@ -508,6 +521,8 @@ def _download_and_transcribe(slug, episode_id, episode_url, podcast_name,
         if original_path and os.path.exists(original_path):
             audio_path = _copy_retained_original_to_temp(original_path)
             audio_logger.info(f"[{slug}:{episode_id}] Reusing retained original audio (skipped download)")
+        elif is_local_feed(podcast):
+            raise Exception("original audio missing")
         else:
             audio_path = _download_episode_audio(episode_url)
         language_override = get_feed_language_override(db, slug)
@@ -522,8 +537,20 @@ def _download_and_transcribe(slug, episode_id, episode_url, podcast_name,
             storage.save_transcript(
                 slug, episode_id, transcriber.segments_to_text(segments))
     else:
-        audio_logger.info(f"[{slug}:{episode_id}] Downloading audio")
-        audio_path = _download_episode_audio(episode_url)
+        # Reuse the retained original when one exists (fresh episode, no
+        # transcript yet -- e.g. a first JIT play of a local episode).
+        # Local originals are never re-downloadable: original_url is the
+        # local://<episode_id> sentinel, not a real address, so a missing
+        # original here is a hard failure rather than a download attempt.
+        original_path = storage.get_original_path(slug, episode_id)
+        if original_path and os.path.exists(original_path):
+            audio_path = _copy_retained_original_to_temp(original_path)
+            audio_logger.info(f"[{slug}:{episode_id}] Reusing retained original audio (skipped download)")
+        elif is_local_feed(podcast):
+            raise Exception("original audio missing")
+        else:
+            audio_logger.info(f"[{slug}:{episode_id}] Downloading audio")
+            audio_path = _download_episode_audio(episode_url)
 
         status_service.update_job_stage("pass1:transcribing", 20)
         audio_logger.info(f"[{slug}:{episode_id}] Starting transcription")
@@ -645,7 +672,7 @@ def _template_cue_scan(matcher, path):
 
 
 def _run_differential_fetch(slug, episode_id, episode_url, audio_path, podcast_id,
-                            dai_platform=None):
+                            dai_platform=None, podcast=None):
     """Pipeline stage: cross-fetch differential (Layer 3).
 
     Runs when the per-feed flag is on, or -- when the flag is unset -- when
@@ -662,7 +689,15 @@ def _run_differential_fetch(slug, episode_id, episode_url, audio_path, podcast_i
     stamps pass1:differential from the main thread before starting the
     worker, so an abandoned worker (episode failed meanwhile) can never
     stamp a different job.
+
+    `podcast`: the caller's already-fetched podcast row (avoids a redundant
+    per-episode db.get_podcast_by_slug on this worker thread). None is
+    treated as non-local, matching the behavior when no row is available.
     """
+    if is_local_feed(podcast):
+        audio_logger.debug(
+            f"[{slug}:{episode_id}] Differential fetch skipped: local feed")
+        return None
     try:
         explicit = resolve_differential_fetch_setting(db, podcast_id)
         if not differential_fetch_effective(
@@ -4189,7 +4224,8 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
         # Stage 1: Download and transcribe
         audio_path, segments = _download_and_transcribe(
             slug, episode_id, episode_url, podcast_name,
-            skip_transcription=skip_transcription_active)
+            skip_transcription=skip_transcription_active,
+            podcast=podcast_settings)
         _check_cancel(cancel_event, slug, episode_id)
 
         # Stage 1b: Cross-fetch differential (Layer 3, per-feed opt-in).
@@ -4216,7 +4252,8 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                         slug, episode_id, episode_url, audio_path,
                         podcast_settings.get('id') if podcast_settings else None,
                         dai_platform=(podcast_settings.get('dai_platform')
-                                      if podcast_settings else None))
+                                      if podcast_settings else None),
+                        podcast=podcast_settings)
                 except BaseException as e:
                     diff_outcome['error'] = e
 

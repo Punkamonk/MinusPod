@@ -25,6 +25,7 @@ from config import (
     title_matches_skip_patterns,
     user_agent_is_jit_blocked,
 )
+from database.podcasts import is_local_feed
 from database.queue import compute_queue_priority
 from rss_parser import extract_cached_base_url, extract_cached_feed_auth_key
 from utils.constants import EpisodeStatus, REPROCESS_SOURCE_JIT
@@ -66,6 +67,7 @@ PUBLIC_FEED_ENDPOINTS = frozenset({
     'serve_episode',
     'serve_transcript_vtt',
     'serve_chapters_json',
+    'serve_episode_artwork',
     'serve_opml',
     'serve_minuspod_cover',
     'favicon',
@@ -152,7 +154,12 @@ def _lookup_episode(slug, episode_id, feed_map, episode_row=None):
     if cached is not None:
         return cached
 
-    original_feed = rss_parser.fetch_feed(feed_map[slug]['in'])
+    # Local feeds have no upstream to fetch (source_url is the
+    # local://<slug> sentinel, not a real address); go straight to the DB
+    # fallback below. Also avoids an SSRF-blocked fetch_feed call on every
+    # lookup.
+    podcast = db.get_podcast_by_slug(slug)
+    original_feed = None if is_local_feed(podcast) else rss_parser.fetch_feed(feed_map[slug]['in'])
     if original_feed:
         parsed_feed = rss_parser.parse_feed(original_feed, source=slug)
         podcast_name = parsed_feed.feed.get('title', 'Unknown') if parsed_feed else 'Unknown'
@@ -225,6 +232,69 @@ def _head_upstream(slug, episode_id, original_url):
             proxy_resp.content_length = int(resp.headers['Content-Length'])
         return proxy_resp
     abort(503)
+
+
+def _head_local(slug, episode_id):
+    """HEAD response for a not-yet-processed local-feed episode.
+
+    Local feeds have no upstream to proxy (original_url is the
+    local://<episode_id> sentinel), so report on whatever audio is already
+    held: the retained original, or a processed file left over from an
+    earlier version. 404 when neither exists.
+    """
+    for path in (storage.get_original_path(slug, episode_id),
+                 storage.get_episode_path(slug, episode_id)):
+        if path.exists():
+            proxy_resp = Response('', status=200)
+            proxy_resp.headers['Content-Type'] = 'audio/mpeg'
+            proxy_resp.content_length = path.stat().st_size
+            return proxy_resp
+    abort(404)
+
+
+def _local_original_response(slug, episode_id, requested_version=None):
+    """200 with the best available audio for a local-feed episode that
+    isn't PROCESSED right now, instead of the 503/410 that would otherwise
+    be returned.
+
+    Reprocess window: status can read pending/processing/failed while an
+    earlier version's cut is still sitting on disk (e.g. a second reprocess
+    was just requested; the first reprocess's output is untouched until
+    this run finishes). That already-cut file must be preferred over the
+    raw, ad-laden original -- serving the original here would hand
+    listeners an ad-laden episode for as long as every reprocess takes,
+    which is strictly worse than the 503 this function exists to avoid.
+    Tries the exact version the URL requested first (a client with a
+    stale versioned RSS URL), then whatever processed_version the DB
+    currently has, and only falls back to the retained original when
+    neither processed file exists. Returns None (caller falls back to its
+    normal response) when nothing at all is retained.
+    """
+    episode = db.get_episode(slug, episode_id)
+    current_version = (episode or {}).get('processed_version') or 0
+    candidate_versions = []
+    if requested_version is not None:
+        candidate_versions.append(requested_version)
+    if current_version not in candidate_versions:
+        candidate_versions.append(current_version)
+    for version in candidate_versions:
+        processed_path = storage.get_episode_path(slug, episode_id, version=version)
+        if processed_path.exists():
+            feed_logger.info(
+                f"[{slug}:{episode_id}] serving processed file (v={version}) "
+                f"during reprocess window")
+            response = send_file(processed_path, mimetype='audio/mpeg', conditional=True)
+            response.headers['Accept-Ranges'] = 'bytes'
+            return response
+
+    original_path = storage.get_original_path(slug, episode_id)
+    if not original_path.exists():
+        return None
+    feed_logger.info(
+        f"[{slug}:{episode_id}] serving retained original (episode not processed)")
+    response = send_file(original_path, mimetype='audio/mpeg', conditional=True)
+    response.headers['Accept-Ranges'] = 'bytes'
+    return response
 
 
 def register_routes(app):
@@ -436,13 +506,28 @@ def register_routes(app):
                 feed_logger.error(f"[{slug}:{episode_id}] Processed file missing")
                 status = None
 
-        elif status == EpisodeStatus.PERMANENTLY_FAILED:
+        # Fetched once and reused below (status branches, HEAD branch,
+        # title-blacklist guard) rather than re-querying per branch.
+        # Deliberately placed after the PROCESSED fast-return above: that
+        # branch is the hottest path in the app and must not pay for a
+        # podcast row it never uses.
+        podcast = db.get_podcast_by_slug(slug)
+        local_feed = is_local_feed(podcast)
+
+        if status == EpisodeStatus.PERMANENTLY_FAILED:
             ep_key = f"{slug}:{episode_id}"
             if ep_key not in _permanently_failed_warned:
                 _permanently_failed_warned.add(ep_key)
                 feed_logger.warning(f"[{ep_key}] Episode permanently failed, not retrying")
             else:
                 feed_logger.debug(f"[{ep_key}] Episode permanently failed (already warned)")
+            # A local feed always has its original mp3 on disk; a listener
+            # should never be blanked by a permanently-failed ad-removal
+            # pass when the untouched source audio is right there.
+            if local_feed:
+                original_response = _routes._local_original_response(slug, episode_id, requested_version)
+                if original_response is not None:
+                    return original_response
             return Response(
                 "Episode processing has permanently failed after multiple attempts",
                 status=410  # Gone - resource no longer available
@@ -454,6 +539,10 @@ def register_routes(app):
                 # Mark as permanently failed
                 feed_logger.warning(f"[{slug}:{episode_id}] Max retries ({MAX_EPISODE_RETRIES}) exceeded, marking permanently failed")
                 db.upsert_episode(slug, episode_id, status=EpisodeStatus.PERMANENTLY_FAILED.value)
+                if local_feed:
+                    original_response = _routes._local_original_response(slug, episode_id, requested_version)
+                    if original_response is not None:
+                        return original_response
                 return Response(
                     "Episode processing has permanently failed after multiple attempts",
                     status=410
@@ -468,6 +557,10 @@ def register_routes(app):
                 if elapsed < cooldown_seconds:
                     wait_remaining = int(cooldown_seconds - elapsed)
                     feed_logger.debug(f"[{slug}:{episode_id}] Failed {elapsed:.0f}s ago, cooldown {cooldown_seconds}s (retry {retry_count})")
+                    if local_feed:
+                        original_response = _routes._local_original_response(slug, episode_id, requested_version)
+                        if original_response is not None:
+                            return original_response
                     return Response(
                         "Episode processing failed recently, retrying soon",
                         status=503,
@@ -479,6 +572,10 @@ def register_routes(app):
 
         elif status == EpisodeStatus.PROCESSING:
             feed_logger.info(f"[{slug}:{episode_id}] Currently processing")
+            if local_feed:
+                original_response = _routes._local_original_response(slug, episode_id, requested_version)
+                if original_response is not None:
+                    return original_response
             return Response(
                 "Episode is being processed",
                 status=503,
@@ -489,6 +586,8 @@ def register_routes(app):
         if request.method == 'HEAD' and status != EpisodeStatus.PROCESSED:
             ep_data, _ = _routes._lookup_episode(slug, episode_id, feed_map, episode_row=episode)
             if ep_data:
+                if local_feed:
+                    return _routes._head_local(slug, episode_id)
                 return _routes._head_upstream(slug, episode_id, ep_data['url'])
             abort(404)
 
@@ -504,19 +603,28 @@ def register_routes(app):
         episode_artwork_url = ep_data.get('artwork_url')
 
         # Title blacklist: serve the upstream audio untouched, never process.
-        title_skip_patterns = db.get_podcast_title_skip_patterns(slug)
-        if title_matches_skip_patterns(episode_title, title_skip_patterns):
-            feed_logger.info(f"[{slug}:{episode_id}] Title-blacklisted, serving original: {episode_title}")
-            return redirect(original_url, code=302)
+        # Local feeds have no upstream to redirect to -- original_url is the
+        # unreachable local:// sentinel -- so the blacklist never applies to
+        # them; a matching title on a local episode just processes normally.
+        if not local_feed:
+            title_skip_patterns = db.get_podcast_title_skip_patterns(slug)
+            if title_matches_skip_patterns(episode_title, title_skip_patterns):
+                feed_logger.info(f"[{slug}:{episode_id}] Title-blacklisted, serving original: {episode_title}")
+                return redirect(original_url, code=302)
 
         # A crawler gets the origin audio rather than a processing run it will
         # never collect. Placed after the title blacklist so that rule wins.
-        blocked_agents = resolve_jit_blocked_user_agents(
-            db.get_setting('jit_blocked_user_agents'))
-        if user_agent_is_jit_blocked(request.headers.get('User-Agent'), blocked_agents):
-            feed_logger.info(
-                f"[{slug}:{episode_id}] JIT suppressed for blocked agent, serving original")
-            return redirect(original_url, code=302)
+        # Local feeds have no upstream to redirect to -- original_url is the
+        # unreachable local:// sentinel -- so this guard never applies to
+        # them; a blocked agent hitting a local episode falls through to
+        # normal JIT processing/serving like any other request.
+        if not local_feed:
+            blocked_agents = resolve_jit_blocked_user_agents(
+                db.get_setting('jit_blocked_user_agents'))
+            if user_agent_is_jit_blocked(request.headers.get('User-Agent'), blocked_agents):
+                feed_logger.info(
+                    f"[{slug}:{episode_id}] JIT suppressed for blocked agent, serving original")
+                return redirect(original_url, code=302)
 
         # Start background processing (non-blocking)
         started, reason = start_background_processing(
@@ -527,6 +635,10 @@ def register_routes(app):
 
         if started:
             feed_logger.info(f"[{slug}:{episode_id}] Started background processing")
+            if local_feed:
+                original_response = _routes._local_original_response(slug, episode_id, requested_version)
+                if original_response is not None:
+                    return original_response
             return Response(
                 "Episode processing started, please retry",
                 status=503,
@@ -534,6 +646,10 @@ def register_routes(app):
             )
         elif reason == "already_processing":
             feed_logger.info(f"[{slug}:{episode_id}] Already processing")
+            if local_feed:
+                original_response = _routes._local_original_response(slug, episode_id, requested_version)
+                if original_response is not None:
+                    return original_response
             return Response(
                 "Episode is being processed",
                 status=503,
@@ -559,6 +675,10 @@ def register_routes(app):
             status_service.queue_episode(slug, episode_id, episode_title, podcast_name)
             queue_position = status_service.get_queue_position(slug, episode_id)
             feed_logger.info(f"[{slug}:{episode_id}] Queue busy ({reason}), queued at position {queue_position}")
+            if local_feed:
+                original_response = _routes._local_original_response(slug, episode_id, requested_version)
+                if original_response is not None:
+                    return original_response
             return Response(
                 json.dumps({
                     'status': 'queued',
@@ -610,6 +730,27 @@ def register_routes(app):
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response
 
+    @app.route('/episodes/<slug>/<episode_id>/artwork')
+    @validate_slug_and_episode_params
+    @require_feed_key
+    @log_request_detailed
+    def serve_episode_artwork(slug, episode_id):
+        """Serve a cached per-episode cover art (local feeds; issue #617).
+
+        Never fetches on demand -- the cache is populated out of band. 404
+        when nothing is cached, same as the transcript/chapters routes.
+        """
+        result = storage.get_episode_artwork(slug, episode_id)
+        if not result:
+            feed_logger.info(f"[{slug}:{episode_id}] Episode artwork not found")
+            abort(404)
+        image_data, content_type = result
+        response = Response(image_data, mimetype=content_type)
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['Content-Security-Policy'] = "default-src 'none'"
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
+
     @app.route('/opml/<mode>.opml')
     @log_request_detailed
     def serve_opml(mode):
@@ -658,8 +799,21 @@ def register_routes(app):
         keeping the URL ending in .jpg (podcast apps reject a query-string token);
         it is ignored for serving, since the current variant always matches the
         current token. The token-less and /episodes/ paths stay as back-compat
-        aliases for apps that cached a previous URL."""
-        result = storage.get_watermarked_artwork(slug)
+        aliases for apps that cached a previous URL.
+
+        Falls back to the plain (unbadged) source cover -- via
+        storage.get_artwork -- when the watermark setting is off or when
+        compositing the badge failed, so a local feed with the setting off
+        serves its real cover here (its channel <image> always points at
+        this route, unlike a subscribed feed which can fall back to the
+        upstream URL instead), and a compositing failure never 404s a feed
+        that does have artwork cached.
+        """
+        result = None
+        if db.get_setting_bool('artwork_watermark_enabled', False):
+            result = storage.get_watermarked_artwork(slug)
+        if not result:
+            result = storage.get_artwork(slug)
         if not result:
             abort(404)
         image_data, content_type = result

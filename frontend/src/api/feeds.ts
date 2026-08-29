@@ -139,6 +139,47 @@ export async function addFeed(sourceUrl: string, slug?: string, autoProcessOverr
   });
 }
 
+export interface AddLocalFeedPayload {
+  title: string;
+  slug?: string;
+  description?: string;
+  author?: string;
+  explicit?: boolean;
+  categories?: string[];
+}
+
+export interface AddLocalFeedResult {
+  slug: string;
+  feedType: 'local';
+  feedUrl: string;
+  message: string;
+}
+
+export async function addLocalFeed(payload: AddLocalFeedPayload): Promise<AddLocalFeedResult> {
+  return apiRequest<AddLocalFeedResult>('/feeds', {
+    method: 'POST',
+    body: { feedType: 'local', ...payload },
+  });
+}
+
+export interface UploadFeedArtworkResult {
+  message: string;
+  artworkUrl: string;
+  warning?: string;
+}
+
+export async function uploadFeedArtwork(slug: string, file: File): Promise<UploadFeedArtworkResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  // skipRetry: mirrors importOpml -- a retry after a timed-out first attempt
+  // could re-process the same upload twice.
+  return apiRequest<UploadFeedArtworkResult>(`/feeds/${slug}/artwork`, {
+    method: 'POST',
+    body: formData,
+    skipRetry: true,
+  });
+}
+
 export async function deleteFeed(slug: string): Promise<void> {
   await apiRequest(`/feeds/${slug}`, { method: 'DELETE' });
 }
@@ -219,6 +260,16 @@ export async function reprocessEpisode(
 
 export interface UpdateFeedPayload {
   sourceUrl?: string;
+  // Local feeds only: the backend rejects these on a subscribed feed.
+  title?: string;
+  description?: string;
+  // null clears the stored value (the backend distinguishes "clear" from
+  // "field omitted"; sending undefined here drops the key from the JSON
+  // body entirely and the old value survives untouched).
+  author?: string | null;
+  explicit?: boolean;
+  categories?: string[] | null;
+  p20?: Record<string, unknown>;
   networkId?: string;
   daiPlatform?: string;
   networkIdOverride?: string | null;
@@ -372,5 +423,209 @@ export async function bulkEpisodeAction(
   return apiRequest<BulkActionResult>(`/feeds/${slug}/episodes/bulk`, {
     method: 'POST',
     body: { episodeIds, action },
+  });
+}
+
+// ========== Local feed episode management (#625 Task 13) ==========
+
+export interface LocalEpisodeUploadResult extends Episode {
+  episodeNumber?: number;
+  seasonNumber?: number;
+  queued: boolean;
+}
+
+// form carries the multipart fields upload_local_episode expects: audio
+// (required file), title, season, episode, publishedAt, description, artwork.
+export async function uploadLocalEpisode(slug: string, form: FormData): Promise<LocalEpisodeUploadResult> {
+  return apiRequest<LocalEpisodeUploadResult>(`/feeds/${slug}/episodes`, {
+    method: 'POST',
+    body: form,
+    // Non-idempotent: a retried multipart upload after a timed-out first
+    // attempt could mint the episode twice under different ids.
+    skipRetry: true,
+  });
+}
+
+export interface LocalEpisodePatch {
+  title?: string | null;
+  description?: string | null;
+  season?: number;
+  episode?: number;
+  publishedAt?: string;
+  p20?: Record<string, unknown> | null;
+}
+
+export async function updateLocalEpisode(
+  slug: string, episodeId: string, payload: LocalEpisodePatch,
+): Promise<Episode> {
+  return apiRequest<Episode>(`/feeds/${slug}/episodes/${episodeId}`, {
+    method: 'PATCH',
+    body: payload,
+  });
+}
+
+export interface BulkLocalEpisodeEdit extends LocalEpisodePatch {
+  episodeId: string;
+}
+
+export async function bulkUpdateLocalEpisodes(
+  slug: string, entries: BulkLocalEpisodeEdit[],
+): Promise<{ updated: number }> {
+  return apiRequest<{ updated: number }>(`/feeds/${slug}/episodes`, {
+    method: 'PATCH',
+    body: entries,
+  });
+}
+
+export async function deleteLocalEpisode(
+  slug: string, episodeId: string,
+): Promise<{ deleted: number; episodeId: string }> {
+  return apiRequest(`/feeds/${slug}/episodes/${episodeId}`, { method: 'DELETE' });
+}
+
+export async function uploadLocalEpisodeArtwork(
+  slug: string, episodeId: string, file: File,
+): Promise<{ message: string; episodeId: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  return apiRequest(`/feeds/${slug}/episodes/${episodeId}/artwork`, {
+    method: 'POST',
+    body: formData,
+    skipRetry: true,
+  });
+}
+
+// ========== Local feed bulk archive import (#625 Task 13) ==========
+
+export interface ImportRejectedFile {
+  file: string;
+  reason: string;
+}
+
+export interface ImportUploadResult {
+  staged: string[];
+  rejected: ImportRejectedFile[];
+}
+
+export async function importUpload(slug: string, files: File[]): Promise<ImportUploadResult> {
+  const formData = new FormData();
+  for (const file of files) formData.append('files', file);
+  // Retries ARE wanted here (default apiRequest behavior, so no
+  // skipRetry): the UI calls this once per file, so a retry re-saves at
+  // most one file under its original basename -- harmless -- and a bounded
+  // retry is exactly what turns a transient 429 (e.g. a large batch
+  // briefly hitting a rate limit) into a silent success instead of a
+  // rejected row.
+  return apiRequest<ImportUploadResult>(`/feeds/${slug}/import/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+}
+
+export type ImportSource = 'staging' | 'directory' | 'both';
+
+export interface ImportPlanEntry {
+  episodeId: string;
+  season: number;
+  episode: number;
+  title: string;
+  audioFile: string;
+  descriptionFile: string | null;
+  artworkFile: string | null;
+  sidecarFile: string | null;
+  publishedAt: string | null;
+  publishedAtSource: 'explicit' | 'synthesized';
+  bytes: number;
+  mtimeNs: number;
+  warnings: string[];
+  errors: string[];
+  // True whenever this episodeId already exists in the feed, independent
+  // of overwrite -- a collision marker, not an outcome. It's only errors
+  // being empty that says whether this entry actually commits: with
+  // overwrite off the collision itself becomes an error; with overwrite on
+  // it doesn't, and this entry cleanly overwrites the existing episode.
+  replacesExisting: boolean;
+  // The actual existing row's episode id when replacesExisting is true,
+  // else null. Usually identical to episodeId; can differ for a row
+  // imported before episode ids were canonicalized to minimal
+  // zero-padded width (e.g. 's01e0006' for what this entry mints as
+  // 's01e06'). Server-only bookkeeping for commit -- not currently
+  // surfaced anywhere in this UI. Optional so existing fixtures/tests
+  // that predate this field keep compiling unchanged.
+  replacesExistingId?: string | null;
+}
+
+export interface ImportPlan {
+  slug: string;
+  overwrite: boolean;
+  planHash: string;
+  entries: ImportPlanEntry[];
+  rejected: ImportRejectedFile[];
+  // Batch-level errors (currently just an out-of-order explicit publish-date
+  // pair) that block commit even when individual entries show no errors of
+  // their own -- see local_import.build_import_plan's docstring.
+  batchErrors: string[];
+  totals: { importable: number; rejected: number; errors: number; bytes: number };
+}
+
+export async function importScan(
+  slug: string, opts: { source: ImportSource; overwrite?: boolean },
+): Promise<ImportPlan> {
+  return apiRequest<ImportPlan>(`/feeds/${slug}/import/scan`, {
+    method: 'POST',
+    body: opts,
+  });
+}
+
+export async function importCommit(
+  slug: string, payload: { planHash: string; source: ImportSource; overwrite?: boolean },
+): Promise<{ message: string }> {
+  // Non-idempotent: starts a background commit job; a retried request could
+  // start it twice (the server does guard concurrent runs with a 409, but a
+  // retry after a lost response would otherwise risk a duplicate start).
+  return apiRequest<{ message: string }>(`/feeds/${slug}/import/commit`, {
+    method: 'POST',
+    body: payload,
+    skipRetry: true,
+  });
+}
+
+export interface ImportReportEntry {
+  episodeId: string;
+  audioFile?: string;
+  warnings?: string[];
+  errors?: string[];
+  error?: string;
+}
+
+export interface ImportReport {
+  committed: ImportReportEntry[];
+  skipped: ImportReportEntry[];
+  failed: ImportReportEntry[];
+  // The commit engine only records the episodeId for a queued entry.
+  queued: string[];
+  error?: string;
+}
+
+export interface ImportStatus {
+  state: 'idle' | 'running' | 'done' | 'error';
+  processed: number;
+  total: number;
+  startedAt: string | null;
+  report?: ImportReport;
+}
+
+export async function importStatus(slug: string): Promise<ImportStatus> {
+  return apiRequest<ImportStatus>(`/feeds/${slug}/import/status`);
+}
+
+// Empties the feed's upload staging directory. Staging accumulates across
+// canceled/abandoned import attempts (every upload lands there and only
+// clears on a successful commit), so this is called both when the operator
+// cancels a reviewed plan and from the "staged earlier" note's own button --
+// 409s server-side while an import is running for this feed.
+export async function clearImportStaging(slug: string): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(`/feeds/${slug}/import/staging`, {
+    method: 'DELETE',
   });
 }

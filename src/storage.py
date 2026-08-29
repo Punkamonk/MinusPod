@@ -211,6 +211,51 @@ class Storage:
             raise PathContainmentError(f"refusing dangerous slug {slug!r}")
         return _safe_join_under(self.podcasts_dir, slug)
 
+    def import_staging_dir(self, slug: str, create: bool = False) -> Path:
+        """Per-feed staging directory for an in-progress archive-import
+        commit (``<data>/import-staging/<slug>/``, local-feeds #625 Task 10).
+
+        Browser-uploaded batch files land here ahead of the commit engine's
+        move into the podcast's episode storage. A commit whose scan/commit
+        request source included staging ('staging' or 'both') sweeps this
+        directory once it finishes, whether or not every entry actually
+        committed -- but not indiscriminately: a committed entry's audio is
+        already moved and its sidecars already deleted by that point, a
+        file the plan rejected outright (bad naming, empty, a stray .part)
+        is removed by the sweep, but a skipped or errored entry's audio and
+        sidecars (typically a bad sidecar next to an otherwise-good mp3)
+        are left in place so fixing the sidecar and rescanning doesn't also
+        mean re-uploading the audio. The directory itself is only removed
+        once nothing preserved remains in it. A commit scanned/run with
+        source='directory' never touches this directory at all, even if it
+        has stale content. Outside a commit, a stale staging dir just means
+        an upload/scan happened and nothing has committed yet; `DELETE
+        /feeds/{slug}/import/staging` (local_import.py) clears it on
+        demand, and the next "Choose files" selection clears it
+        automatically before uploading.
+        """
+        if is_dangerous_slug(slug):
+            raise PathContainmentError(f"refusing dangerous slug {slug!r}")
+        path = _safe_join_under(self.data_dir, 'import-staging', slug)
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def import_source_dir(self, slug: str) -> Path:
+        """The user-managed archive-import directory for a feed
+        (``<data>/import/<slug>/``, local-feeds #625 Task 10).
+
+        Never created here: an operator populates it directly on the shared
+        filesystem, so its absence just means nothing has been dropped in
+        yet. The commit engine moves each successfully committed entry's
+        audio out of it AND deletes that entry's sidecar files (json/txt/
+        artwork) with it -- a rejected or errored entry's files are left in
+        place untouched, for the operator to fix and re-scan.
+        """
+        if is_dangerous_slug(slug):
+            raise PathContainmentError(f"refusing dangerous slug {slug!r}")
+        return _safe_join_under(self.data_dir, 'import', slug)
+
     def load_data_json(self, slug: str) -> dict[str, Any]:
         """Load episode data for a podcast from SQLite."""
         # Ensure directory exists
@@ -571,6 +616,46 @@ class Storage:
             art_dir.mkdir(exist_ok=True)
         return art_dir
 
+    def has_episode_artwork(self, slug: str, episode_id: str) -> bool:
+        """True if a cached episode cover exists -- no read, no LRU touch.
+
+        Mirrors has_artwork's existence-only contract at episode scope.
+        Callers that only need a boolean (e.g. deciding whether to emit
+        itunes:image) should use this instead of get_episode_artwork, which
+        reads the full file and bumps its mtime for LRU eviction purposes.
+        """
+        if not is_valid_episode_id(episode_id):
+            return False
+        art_dir = self._episode_artwork_dir(slug)
+        if not art_dir or not art_dir.is_dir():
+            return False
+        return any(_safe_join_under(art_dir, f"{episode_id}{ext}").exists()
+                   for ext, _ in _ARTWORK_EXTENSIONS)
+
+    def remove_episode_artwork(self, slug: str, episode_id: str) -> bool:
+        """Delete a cached episode cover, if any.
+
+        Used when an episode row is hard-deleted (local feeds, #625 Task 8)
+        so no orphaned cover file survives the row it belonged to. Returns
+        True if a file was removed.
+        """
+        if not is_valid_episode_id(episode_id):
+            return False
+        art_dir = self._episode_artwork_dir(slug)
+        if not art_dir or not art_dir.is_dir():
+            return False
+        removed = False
+        for ext, _ in _ARTWORK_EXTENSIONS:
+            path = _safe_join_under(art_dir, f"{episode_id}{ext}")
+            if path.exists():
+                try:
+                    path.unlink()
+                    removed = True
+                except OSError as exc:
+                    logger.warning(
+                        f"[{slug}:{episode_id}] Failed to delete episode artwork: {exc}")
+        return removed
+
     def get_episode_artwork(self, slug: str,
                             episode_id: str) -> tuple[bytes, str] | None:
         """Cached episode cover. Returns (data, content_type) or None.
@@ -689,10 +774,29 @@ class Storage:
                 f"[{slug}:{episode_id}] Failed to download episode artwork: {e}")
             return False
 
+    def save_episode_artwork(self, slug: str, episode_id: str,
+                             image_data: bytes, content_type: str,
+                             evict: bool = True) -> bool:
+        """Public wrapper around ``_save_episode_artwork`` for API-driven
+        uploads (local feeds' single-episode artwork upload, #625 Task 8).
+        ``content_type`` must already be validated (e.g. via
+        ``_detect_image_mime``) -- this method does not re-check it.
+
+        ``evict=False`` skips the LRU cache trim. Local-feed episode
+        artwork is the only copy of that cover (there is no upstream URL
+        to re-download it from later), so it must never be evicted; a
+        subscribed feed's downloaded cover is a re-fetchable cache and is
+        safe to trim under the size cap (the default).
+        """
+        return self._save_episode_artwork(slug, episode_id, image_data,
+                                          content_type, evict=evict)
+
     def _save_episode_artwork(self, slug: str, episode_id: str,
-                              image_data: bytes, content_type: str) -> bool:
+                              image_data: bytes, content_type: str,
+                              evict: bool = True) -> bool:
         """Write one episode cover, replacing any stale extension, then trim
-        the feed's cache back under EPISODE_ARTWORK_CACHE_BYTES."""
+        the feed's cache back under EPISODE_ARTWORK_CACHE_BYTES (unless
+        ``evict=False`` -- see ``save_episode_artwork``)."""
         art_dir = self._episode_artwork_dir(slug, create=True)
         if art_dir is None:
             return False
@@ -711,7 +815,8 @@ class Storage:
             if old_path.exists() and old_path != artwork_path:
                 old_path.unlink()
 
-        self._evict_episode_artwork(art_dir)
+        if evict:
+            self._evict_episode_artwork(art_dir)
         return True
 
     def _evict_episode_artwork(self, art_dir: Path) -> int:
@@ -951,13 +1056,19 @@ class Storage:
 
     # ========== Cleanup Methods ==========
 
-    def delete_processed_file(self, slug: str, episode_id: str) -> bool:
-        """Delete the processed audio file(s) and any retained original."""
+    def delete_processed_file(self, slug: str, episode_id: str,
+                               keep_original: bool = False) -> bool:
+        """Delete the processed audio file(s) and any retained original.
+
+        keep_original=True skips the original: local feeds keep it as the
+        only copy (no upstream to re-download).
+        """
         deleted = False
         candidates = list(self.iter_episode_audio_paths(slug, episode_id, ".mp3"))
-        original = self.get_original_path(slug, episode_id, ".mp3")
-        if original and original.exists():
-            candidates.append(original)
+        if not keep_original:
+            original = self.get_original_path(slug, episode_id, ".mp3")
+            if original and original.exists():
+                candidates.append(original)
         for path in candidates:
             if path.exists():
                 path.unlink()

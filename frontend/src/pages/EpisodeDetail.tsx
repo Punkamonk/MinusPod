@@ -1,7 +1,11 @@
 import { useState, useRef, useMemo } from 'react';
 import { useParams, Link } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { episodeOriginalUrl, getEpisode, getFeed, getOriginalTranscript, reprocessEpisode, regenerateChapters } from '../api/feeds';
+import {
+  episodeOriginalUrl, getEpisode, getFeed, getOriginalTranscript, reprocessEpisode, regenerateChapters,
+  updateLocalEpisode, uploadLocalEpisodeArtwork,
+} from '../api/feeds';
+import type { LocalEpisodePatch } from '../api/feeds';
 import { submitCorrection } from '../api/patterns';
 import { getErrorMessage } from '../api/client';
 import { SegmentCategoryBadge, KeptBadge } from '../components/SegmentCategoryBadge';
@@ -15,7 +19,7 @@ import { CORROBORATION_CLASS, CORROBORATION_META } from '../utils/corroboration'
 import { formatConfidence } from '../utils/confidence';
 import AdEditor, { AdCorrection } from '../components/AdEditor';
 import AdReviewModal from '../components/AdReviewModal';
-import type { AdSegment, Feed } from '../api/types';
+import type { AdSegment, Feed, EpisodeDetail as EpisodeDetailApi } from '../api/types';
 import PatternLink from '../components/PatternLink';
 import ExpandableText from '../components/ExpandableText';
 import RichText from '../components/RichText';
@@ -23,8 +27,9 @@ import CollapsibleSection, { useCollapsibleOpen } from '../components/Collapsibl
 import CueDetectionsSection from '../components/CueDetectionsSection';
 import CueCandidatesSection from '../components/CueCandidatesSection';
 import { useLocalStorageState } from '../hooks/useLocalStorageState';
+import { useSyncFromQuery } from '../hooks/useSyncFromQuery';
 import { formatStorage, formatDuration } from './settings/settingsUtils';
-import { formatDate, formatTimestamp } from '../utils/format';
+import { formatDate, formatTimestamp, toDatetimeLocalInput, fromDatetimeLocalInput } from '../utils/format';
 import { useAuditionPlayer } from '../hooks/useAuditionPlayer';
 import { AuditionPlayButton } from '../components/AuditionPlayButton';
 import { StageBadge } from '../components/StageBadge';
@@ -94,6 +99,143 @@ function OpenEditorButton({ onClick, testId }: { onClick: () => void; testId: st
           d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
       </svg>
     </button>
+  );
+}
+
+// Local episode ids are minted as sNNeNN (2-3 digit season, 2-4 digit
+// episode), from upload_local_episode's `f's{season:02d}e{episode_number:02d}'`
+// (the same scheme local_import.py's _TOKEN_RE parses). The detail endpoint
+// now echoes seasonNumber/episodeNumber directly (they're the authoritative
+// values -- the id is minted once at upload and never renamed, so it can go
+// stale relative to them after an edit); parsing the id is only a fallback
+// for a backend response that omits those fields.
+const LOCAL_EPISODE_ID_RE = /^s(\d{2,3})e(\d{2,4})$/i;
+
+function parseLocalEpisodeId(id: string): { season: number; episode: number } | null {
+  const m = LOCAL_EPISODE_ID_RE.exec(id);
+  if (!m) return null;
+  return { season: parseInt(m[1], 10), episode: parseInt(m[2], 10) };
+}
+
+const editFieldCls = 'w-full px-4 py-2 rounded-lg border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring';
+
+// "Edit metadata" section shown only for episodes of a local feed (there's
+// no upstream RSS to derive title/description/dates from). Local feeds only:
+// callers gate rendering on feed.feedType === 'local'.
+function EpisodeMetadataEditSection({ slug, episode }: { slug: string; episode: EpisodeDetailApi }) {
+  const queryClient = useQueryClient();
+  const [title, setTitle] = useState(episode.title);
+  const [description, setDescription] = useState(episode.description ?? '');
+  const [season, setSeason] = useState(() =>
+    String(episode.seasonNumber ?? parseLocalEpisodeId(episode.id)?.season ?? ''));
+  const [episodeNum, setEpisodeNum] = useState(() =>
+    String(episode.episodeNumber ?? parseLocalEpisodeId(episode.id)?.episode ?? ''));
+  const [publishedAt, setPublishedAt] = useState(toDatetimeLocalInput(episode.published));
+  const [saved, setSaved] = useState(false);
+
+  // Reseed the form when the episode object identity changes: a successful
+  // save, a background refetch, or navigating to a different episode via
+  // prev/next (the component instance is reused, only props change), same
+  // idiom LocalFeedPanel uses for its feed metadata form.
+  useSyncFromQuery(episode, (ep) => {
+    const parsed = parseLocalEpisodeId(ep.id);
+    setTitle(ep.title);
+    setDescription(ep.description ?? '');
+    setSeason(String(ep.seasonNumber ?? parsed?.season ?? ''));
+    setEpisodeNum(String(ep.episodeNumber ?? parsed?.episode ?? ''));
+    setPublishedAt(toDatetimeLocalInput(ep.published));
+  });
+
+  const mutation = useMutation({
+    mutationFn: () => {
+      const payload: LocalEpisodePatch = {
+        title: title.trim() || null,
+        description: description.trim() || null,
+      };
+      const s = parseInt(season, 10);
+      const e = parseInt(episodeNum, 10);
+      if (!Number.isNaN(s)) payload.season = s;
+      if (!Number.isNaN(e)) payload.episode = e;
+      const iso = fromDatetimeLocalInput(publishedAt);
+      if (iso) payload.publishedAt = iso;
+      return updateLocalEpisode(slug, episode.id, payload);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['episode', slug, episode.id] });
+      queryClient.invalidateQueries({ queryKey: ['episodes', slug] });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    },
+  });
+
+  const artworkMutation = useMutation({
+    mutationFn: (file: File) => uploadLocalEpisodeArtwork(slug, episode.id, file),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['episode', slug, episode.id] }),
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    mutation.mutate();
+  };
+
+  return (
+    <div className="mb-6">
+      <CollapsibleSection title="Edit metadata" defaultOpen={false} storageKey="episode-edit-metadata">
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label htmlFor="ep-edit-title" className="block text-sm font-medium text-foreground mb-2">Title</label>
+            <input id="ep-edit-title" type="text" value={title} onChange={(e) => setTitle(e.target.value)} required className={editFieldCls} />
+          </div>
+          <div>
+            <label htmlFor="ep-edit-description" className="block text-sm font-medium text-foreground mb-2">Description</label>
+            <textarea id="ep-edit-description" value={description} onChange={(e) => setDescription(e.target.value)} rows={6} className={editFieldCls} />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="ep-edit-season" className="block text-sm font-medium text-foreground mb-2">Season</label>
+              <input id="ep-edit-season" type="number" min={1} value={season} onChange={(e) => setSeason(e.target.value)} className={editFieldCls} />
+            </div>
+            <div>
+              <label htmlFor="ep-edit-episode" className="block text-sm font-medium text-foreground mb-2">Episode</label>
+              <input id="ep-edit-episode" type="number" min={1} value={episodeNum} onChange={(e) => setEpisodeNum(e.target.value)} className={editFieldCls} />
+            </div>
+          </div>
+          <div>
+            <label htmlFor="ep-edit-published" className="block text-sm font-medium text-foreground mb-2">Published</label>
+            <input id="ep-edit-published" type="datetime-local" value={publishedAt} onChange={(e) => setPublishedAt(e.target.value)} className={editFieldCls} />
+          </div>
+          <div>
+            <label htmlFor="ep-edit-artwork" className="block text-sm font-medium text-foreground mb-2">Artwork</label>
+            <input
+              id="ep-edit-artwork"
+              type="file"
+              accept="image/jpeg,image/png"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (file) artworkMutation.mutate(file);
+              }}
+              className={`block w-full text-sm text-muted-foreground file:mr-3 file:px-3 file:py-1.5 file:rounded file:border-0 file:text-sm ${btnSecondary} file:transition-colors ${focusRing}`}
+            />
+            {artworkMutation.isPending && <p className="mt-1 text-sm text-muted-foreground">Uploading...</p>}
+            {artworkMutation.isSuccess && <p className="mt-1 text-sm text-success">Artwork updated.</p>}
+            {artworkMutation.isError && (
+              <p className="mt-1 text-sm text-destructive">{getErrorMessage(artworkMutation.error, 'Artwork upload failed')}</p>
+            )}
+          </div>
+          {mutation.isError && (
+            <p className="text-sm text-destructive">{getErrorMessage(mutation.error, 'Could not save')}</p>
+          )}
+          <button
+            type="submit"
+            disabled={mutation.isPending || !title.trim()}
+            className={`px-4 py-2 rounded-lg ${btnPrimary} disabled:opacity-50 transition-colors ${focusRing}`}
+          >
+            {mutation.isPending ? 'Saving...' : saved ? 'Saved' : 'Save metadata'}
+          </button>
+        </form>
+      </CollapsibleSection>
+    </div>
   );
 }
 
@@ -356,6 +498,17 @@ function EpisodeDetail() {
   const failureReason =
     isFailedStatus(episode.status) && episode.error ? episode.error : undefined;
 
+  // An episode that hasn't gone through the pipeline yet reads "Process",
+  // not "Reprocess". Keyed on processedAt presence, not status: status
+  // cycles back through pending/processing on every reprocess (a
+  // reprocess-queued or currently-reprocessing episode must still read
+  // "Reprocess"), while processedAt is set once on the first completed run
+  // and never cleared by a later reprocess (reset_episode_for_reprocess in
+  // reprocess_modes.py leaves it untouched), so it stays the reliable
+  // "has this ever finished processing" signal throughout that window.
+  const neverProcessed = !episode.processedAt;
+  const reprocessLabel = neverProcessed ? 'Process' : 'Reprocess';
+
   // Detected-Ads header row 2: pass counts and time saved.
   const showPassCounts = episode.adsRemovedFirstPass !== undefined
     && episode.adsRemovedVerification !== undefined
@@ -507,7 +660,9 @@ function EpisodeDetail() {
                   disabled={reprocessMutation.isPending || episode.status === 'processing'}
                   className={`px-2 py-0.5 text-xs sm:text-sm ${btnPrimary} rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 ${focusRing}`}
                 >
-                  {reprocessMutation.isPending ? 'Reprocessing...' : 'Reprocess'}
+                  {reprocessMutation.isPending
+                    ? (neverProcessed ? 'Processing...' : 'Reprocessing...')
+                    : reprocessLabel}
                   <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                   </svg>
@@ -519,7 +674,7 @@ function EpisodeDetail() {
                       className={`w-full px-3 py-2 text-left text-sm hover:bg-accent ${focusRing}`}
                       title="Use learned patterns + AI analysis"
                     >
-                      <div className="font-medium">Reprocess</div>
+                      <div className="font-medium">{reprocessLabel}</div>
                       <div className="text-xs text-muted-foreground">Use patterns + AI</div>
                     </button>
                     <button
@@ -655,6 +810,30 @@ function EpisodeDetail() {
           </div>
         )}
 
+        {/* Local feeds retain the uploaded original even before processing
+            runs (hasOriginalAudio since 2.93.2). Let the operator preview it
+            from the detail page instead of only via the ad editor. Gated to
+            local feeds and non-completed status so the processed-episode
+            player above stays the only player once a run has finished.
+            !processedAt additionally excludes a once-processed episode
+            that's mid-reprocess or failed: status alone cycles back through
+            pending/processing/failed on a reprocess, but processedAt is set
+            once on the first completed run and never cleared afterward (see
+            the neverProcessed comment below), so without this an episode
+            that's already been through the pipeline once would misleadingly
+            show "ad removal hasn't run yet" again. */}
+        {episode.status !== 'completed' && !episode.processedAt
+          && feed?.feedType === 'local' && episode.hasOriginalAudio && (
+          <div className="mt-4 pt-4 border-t border-border">
+            <audio controls className="w-full" src={markerAudioUrl}>
+              Your browser does not support the audio element.
+            </audio>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Original audio; ad removal hasn&apos;t run yet.
+            </p>
+          </div>
+        )}
+
         {episode.description && (
           <RichText
             html={episode.description}
@@ -662,6 +841,10 @@ function EpisodeDetail() {
           />
         )}
       </div>
+
+      {feed?.feedType === 'local' && slug && episodeId && (
+        <EpisodeMetadataEditSection slug={slug} episode={episode} />
+      )}
 
       {/* "Add new ad" entry when the LLM found nothing (or before edit). */}
       {episode.status === 'completed' && episode.transcript &&
