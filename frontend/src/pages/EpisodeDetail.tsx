@@ -32,6 +32,7 @@ import { formatStorage, formatDuration } from './settings/settingsUtils';
 import { formatDate, formatTimestamp, toDatetimeLocalInput, fromDatetimeLocalInput } from '../utils/format';
 import { useAuditionPlayer } from '../hooks/useAuditionPlayer';
 import { AuditionPlayButton } from '../components/AuditionPlayButton';
+import { rowActionBtn } from '../components/rowActionStyles';
 import { StageBadge } from '../components/StageBadge';
 import ProcessingRunsTable from '../components/ProcessingRunsTable';
 import EpisodeLogsCard from '../components/EpisodeLogsCard';
@@ -247,8 +248,8 @@ function EpisodeDetail() {
   const [showEditor, setShowEditor] = useState(false);
   const [createModeRequested, setCreateModeRequested] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
-  // Transient error toast for a rejected correction submit (e.g. a 409 on a
-  // keep-resolved marker); the backend's own message is shown verbatim.
+  // Transient banner for a rejected correction or reprocess; the backend's
+  // own message is shown verbatim.
   const [correctionError, setCorrectionError] = useState<string | null>(null);
   const [showReprocessMenu, setShowReprocessMenu] = useState(false);
   const [editorSelectedAdIndex, setEditorSelectedAdIndex] = useState(0);
@@ -299,11 +300,12 @@ function EpisodeDetail() {
       queryClient.invalidateQueries({ queryKey: ['episode', slug, episodeId] });
       setShowReprocessMenu(false);
     },
-    // A 409 (already processing) or transient failure must not vanish
-    // silently: refetch so status-driven guards reflect reality.
-    onError: () => {
+    // Processing is serialized by a lock, so a stale cached status leaves the
+    // button enabled and the click is refused; showing the 409 stops it just
+    // flickering with nothing to explain it (#707).
+    onError: (error) => {
       queryClient.invalidateQueries({ queryKey: ['episode', slug, episodeId] });
-      setSaveStatus('error');
+      setCorrectionError(getErrorMessage(error, 'Could not start reprocessing.'));
     },
   });
 
@@ -346,6 +348,7 @@ function EpisodeDetail() {
         adjusted_start: correction.adjustedStart,
         adjusted_end: correction.adjustedEnd,
         sponsor: correction.sponsor,
+        category: correction.category,
       });
     },
     onMutate: () => {
@@ -1255,6 +1258,7 @@ function EpisodeDetail() {
                     <div className="flex flex-wrap items-center gap-2">
                       {episode.hasOriginalAudio && (
                         <AuditionPlayButton
+                          size="row"
                           playing={heldPlaying}
                           onClick={() => markerAudition.toggle(heldKey, markerAudioUrl, segment.start, segment.end)}
                         />
@@ -1331,7 +1335,7 @@ function EpisodeDetail() {
                         }}
                         disabled={correctionMutation.isPending || reprocessMutation.isPending}
                         data-testid={`approve-recut-${index}`}
-                        className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, btnPrimary)} ${focusRing}`}
+                        className={`flex-1 sm:flex-none ${rowActionBtn} ${btnClass(rowStatus, btnPrimary)} ${focusRing}`}
                       >
                         {btnLabel(rowStatus, oneTapRecut ? 'Confirm & Recut' : 'Confirm ad')}
                       </button>
@@ -1351,7 +1355,7 @@ function EpisodeDetail() {
                           disabled={correctionMutation.isPending || reprocessMutation.isPending}
                           data-testid={`approve-trimmed-${index}`}
                           title="Approve only the span the reviewer identified as ad content; the rest of this marker stays in the episode"
-                          className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, btnSecondary)} ${focusRing}`}
+                          className={`flex-1 sm:flex-none ${rowActionBtn} ${btnClass(rowStatus, btnSecondary)} ${focusRing}`}
                         >
                           {btnLabel(rowStatus,
                             `Confirm trimmed (${formatTimestamp(segment.reviewer_proposed_start)} - ${formatTimestamp(segment.reviewer_proposed_end)})`)}
@@ -1366,7 +1370,7 @@ function EpisodeDetail() {
                         onClick={() => handleCorrection({ type: 'reject', originalAd })}
                         disabled={correctionMutation.isPending || reprocessMutation.isPending}
                         data-testid={`dismiss-${index}`}
-                        className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, `${btnDestructive} active:bg-destructive/80`)} ${focusRing}`}
+                        className={`flex-1 sm:flex-none ${rowActionBtn} ${btnClass(rowStatus, `${btnDestructive} active:bg-destructive/80`)} ${focusRing}`}
                       >
                         {btnLabel(rowStatus, 'Not an ad')}
                       </button>
@@ -1383,7 +1387,7 @@ function EpisodeDetail() {
                 disabled={correctionMutation.isPending || reprocessMutation.isPending
                   || episode.status === 'processing'}
                 data-testid="apply-approved-recut"
-                className={`w-full sm:w-auto px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded ${btnPrimary} disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${focusRing}`}
+                className={`w-full sm:w-auto ${rowActionBtn} ${btnPrimary} ${focusRing}`}
               >
                 {`Apply ${approvedHeldCount} confirmed & recut`}
               </button>
@@ -1463,6 +1467,7 @@ function EpisodeDetail() {
                         <div className="flex flex-wrap items-center gap-2">
                           {episode.hasOriginalAudio && (
                             <AuditionPlayButton
+                              size="row"
                               playing={rejectedPlaying}
                               onClick={() => markerAudition.toggle(rejectedKey, markerAudioUrl, segment.start, segment.end)}
                             />
@@ -1523,14 +1528,14 @@ function EpisodeDetail() {
                           <button
                             onClick={() => handleCorrection({ type: 'confirm', originalAd })}
                             disabled={correctionMutation.isPending}
-                            className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, btnPrimary)} ${focusRing}`}
+                            className={`flex-1 sm:flex-none ${rowActionBtn} ${btnClass(rowStatus, btnPrimary)} ${focusRing}`}
                           >
                             {btnLabel(rowStatus, 'Confirm ad')}
                           </button>
                           <button
                             onClick={() => handleCorrection({ type: 'reject', originalAd })}
                             disabled={correctionMutation.isPending}
-                            className={`flex-1 sm:flex-none px-3 py-2 sm:py-1.5 text-sm sm:text-xs rounded disabled:opacity-50 transition-colors touch-manipulation min-h-[40px] sm:min-h-0 ${btnClass(rowStatus, `${btnDestructive} active:bg-destructive/80`)} ${focusRing}`}
+                            className={`flex-1 sm:flex-none ${rowActionBtn} ${btnClass(rowStatus, `${btnDestructive} active:bg-destructive/80`)} ${focusRing}`}
                           >
                             {btnLabel(rowStatus, 'Not an ad')}
                           </button>

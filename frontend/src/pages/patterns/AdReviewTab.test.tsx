@@ -91,7 +91,8 @@ describe('AdReviewTab', () => {
     const row = link.closest('[data-testid="detection-row"]') as HTMLElement;
     expect(within(row).getByText('Feed A')).toBeTruthy();
     expect(within(row).getByText('Not cut')).toBeTruthy();
-    expect(within(row).getByText('Unresolved')).toBeTruthy();
+    // No chip for an undecided row; a recorded decision still gets one.
+    expect(within(row).queryByText('Not reviewed')).toBeNull();
     // The second meta line carries what the old table columns did.
     expect(within(row).getByText(/2026/)).toBeTruthy();
     expect(within(row).getByText(/\(30s\)/)).toBeTruthy();
@@ -156,14 +157,22 @@ describe('AdReviewTab', () => {
     const cards = screen.getByTestId('detections-cards');
     expect(within(cards).getByRole('link', { name: 'Episode One' })).toBeTruthy();
     expect(within(cards).getByText('Acme')).toBeTruthy();
-    // All actions share one line: play | Confirm ad | Not an ad | Edit.
-    // The decision buttons grow but never shrink below their nowrap labels,
-    // so neither can wrap into a taller button than its neighbor.
+    // Cards lay out in two deliberate rows rather than by wrap order: the
+    // verdict pair on top at equal width, adjustments below.
     const confirm = within(cards).getByRole('button', { name: 'Confirm ad' });
+    const notAnAd = within(cards).getByRole('button', { name: 'Not an ad' });
     const edit = within(cards).getByRole('button', { name: 'Edit' });
-    expect(edit.parentElement).toBe(confirm.parentElement);
-    expect(confirm.className).toContain('grow');
-    expect(confirm.className).toContain('whitespace-nowrap');
+    const category = within(cards).getByRole('combobox', { name: /^Category for/ });
+    expect(notAnAd.parentElement).toBe(confirm.parentElement);
+    expect(edit.parentElement).toBe(category.parentElement);
+    expect(edit.parentElement).not.toBe(confirm.parentElement);
+    for (const b of [confirm, notAnAd]) {
+      expect(b.className).toContain('grow');
+      expect(b.className).toContain('basis-0');
+      expect(b.className).toContain('whitespace-nowrap');
+      // The tap-target floor from the design guide.
+      expect(b.className).toContain('min-h-[44px]');
+    }
     expect(edit.className).not.toContain('grow');
   });
 
@@ -194,7 +203,7 @@ describe('AdReviewTab', () => {
 });
 
 describe('AdReviewTab row actions', () => {
-  it('approve submits a confirm correction and triggers recut', async () => {
+  it('approve submits a confirm correction without recutting on the spot', async () => {
     renderTab();
     const user = userEvent.setup();
     await user.click((await screen.findAllByRole('button', { name: 'Confirm ad' }))[0]);
@@ -205,19 +214,8 @@ describe('AdReviewTab row actions', () => {
       type: 'confirm',
       original_ad: { start: 100, end: 130 },
     });
-    await waitFor(() =>
-      expect(mockReprocess).toHaveBeenCalledWith('feed-a', 'ep-1', 'recut'));
-  });
-
-  it('approve without original audio skips the recut', async () => {
-    mockGetDetections.mockResolvedValue({
-      detections: [detection({ hasOriginalAudio: false })],
-      total: 1, page: 1, totalPages: 1, limit: 20, counts: COUNTS,
-    });
-    renderTab();
-    const user = userEvent.setup();
-    await user.click((await screen.findAllByRole('button', { name: 'Confirm ad' }))[0]);
-    await waitFor(() => expect(mockSubmitCorrection).toHaveBeenCalledOnce());
+    // Review is bulk work: the server stamps the episode and the Apply bar
+    // cuts it once, so a decision must not start its own recut.
     expect(mockReprocess).not.toHaveBeenCalled();
   });
 
@@ -265,22 +263,8 @@ describe('AdReviewTab row actions', () => {
     renderTab();
     const user = userEvent.setup();
     await user.click((await screen.findAllByRole('button', { name: 'Confirm ad' }))[0]);
-    expect(await screen.findByText('Failed to save correction. Try again.')).toBeTruthy();
+    expect(await screen.findByText('boom')).toBeTruthy();
     expect(mockReprocess).not.toHaveBeenCalled();
-    errSpy.mockRestore();
-  });
-
-  it('shows recut-failure banner when correction succeeds but reprocess fails', async () => {
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    mockReprocess.mockRejectedValueOnce(new Error('recut boom'));
-    renderTab();
-    const user = userEvent.setup();
-    await user.click((await screen.findAllByRole('button', { name: 'Confirm ad' }))[0]);
-    expect(
-      await screen.findByText(
-        'Saved, but the recut did not start. The change applies on the next reprocess.',
-      ),
-    ).toBeTruthy();
     errSpy.mockRestore();
   });
 });

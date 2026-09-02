@@ -53,6 +53,8 @@ Settings > Ad Detection has two grouped subsections for tuning how aggressively 
 | Autocut | off (0) | 0.5 - 1.0, or off | When enabled, cuts a standalone catch automatically once it reaches this confidence, instead of holding it for review. Off by default, so catches only ever hold or drop. |
 | Pattern-learning floor | 0.85 | 0.5 - 1.0 | Minimum confidence before a detection can teach the pattern matcher a new sponsor. Applies to ads up to 90 seconds. |
 | Pattern-learning floor, long ads | 0.92 | 0.5 - 1.0 | Same floor for ads longer than 90 seconds. Higher by default, since a long span is costlier to learn wrong. |
+| Learning minimum length | 15s | 1 - 600s | Below this, a detection is usually a fragment or a passing mention rather than an ad, so nothing is learned from it. |
+| Learning maximum length | 120s | 1 - 1800s | A longer detection is split at its ad transitions and each read is learned separately. Raise this for feeds whose ad blocks run long. |
 
 A held standalone catch carries a `verification_miss` hold reason and shows a "Verification catch" chip in the Held for Review section; it gets the same waveform editor and approve/dismiss flow as any other held ad. See [Held for Review](how-it-works.md#held-for-review) and [Verification Pass](how-it-works.md#verification-pass).
 
@@ -135,6 +137,12 @@ Two things have to be in place first:
 
 If the passphrase is missing, the key inputs collapse to a "Setup required" note, the API returns `409 provider_crypto_unavailable`, and env-var credentials keep working. GET responses never include key values, only booleans plus a `db`/`env`/`none` source marker.
 
+### JSON schema response format
+
+OpenAI-compatible endpoints only. When on, MinusPod asks the endpoint to enforce a JSON schema on detection, review, category repair, and trim-recovery responses instead of only asking for JSON, which cuts malformed replies. Off by default; the toggle is in **Settings > LLM Provider**.
+
+Support varies by model, not just by server. MinusPod probes each model the ad pipeline is configured to use, once, after the endpoint verifies, and stores one answer per model. Plain JSON mode is remembered the same way, so one model's rejection no longer speaks for the others on that endpoint. A model that rejects the schema falls back to plain JSON mode, and so does a model that passes the probe but rejects a real request. Check that your server implements `response_format` with `type: json_schema` before relying on it. Anthropic, OpenRouter, and Ollama call sites are unaffected by this toggle.
+
 ### Cover art badge
 
 Settings > Cover Art has an **Overlay MinusPod badge on cover art** toggle, off by default. When on, MinusPod adds a small badge to a corner of each served feed's cover art, so the filtered version is easy to tell apart from the original in your podcast app. **Badge position** picks the corner: bottom-right (default), bottom-left, top-right, or top-left, which helps when the show's own logo sits under the badge. `ARTWORK_BADGE_POSITION` seeds it on a fresh deploy. The badged image is served at `/<slug>/cover-minuspod.jpg`. A **Refresh all artwork** button in the same section re-renders every feed's cover art, which you run after toggling the setting or swapping the badge asset.
@@ -177,13 +185,15 @@ Resolution order: a per-feed override, if set, wins; otherwise the global defaul
 
 Show-segments detection (whether intro, outro, and recap markers get produced at all) has its own global default alongside the global action map on the **Segment actions** card, off by default, and saves immediately when toggled. A feed inherits that default until it sets its own value: the feed settings page exposes an explicit **Inherit / On / Off** choice (`detectShowSegments` on `PATCH /api/v1/feeds/{slug}`; `null` means inherit) and shows the effective value while inheriting. With detection off, the LLM never produces intro/outro/recap markers for that feed, so those rows of the action map have nothing to act on regardless of how they are set. With it on, intro/outro/recap detection is added to that feed's LLM detection windows; the other four categories are detected regardless of this setting.
 
+A single detection can also be recategorized from the Detected ad window, which changes that episode's marker without touching the linked pattern or the map. Use it when the detector filed a span under the wrong category, rather than changing the action for every span of that category.
+
 Changing an action map only affects episodes processed after the change. To apply a new map to an already-processed feed, use the **Re-render episodes with current segment actions** button on the feed settings page (`POST /api/v1/feeds/{slug}/rerender-segments`), which recuts every processed episode that still has a retained original, saved transcript, and ad detections. Episodes that do not meet those preconditions are skipped, not counted as queued.
 
 ### Queue priority
 
 Each feed has a **Queue priority**: High, Normal (default), or Low, set on the feed's settings page. High processes ahead of other queued episodes; Low runs only once nothing else is waiting.
 
-Three automatic boosts stack on top of a feed's base priority, and the size of each is a setting under **Settings > Global Defaults > Queue priority**:
+Three automatic boosts stack on top of a feed's base priority, and the size of each is a setting under **Settings > AI & Processing > Queue Control > Queue priority**:
 
 | Boost | Default | When it applies |
 |---|---|---|
@@ -193,7 +203,9 @@ Three automatic boosts stack on top of a feed's base priority, and the size of e
 
 The defaults encode one rule: a request you make right now beats backlog work, always. Before 2.92.1, Reprocess All stamped every episode with the full manual boost, so a 93-episode backfill could pin a just-published episode 94th in line for two days. Raise the Reprocess All boost only if you want backfills to compete with new releases.
 
-A queued episode's priority can rise but never fall: pressing play on an episode that is already sitting in the queue lifts it to the play boost, while background refreshes can never knock a boosted episode back down.
+Automatic changes only ever raise a queued episode's priority: pressing play on an episode already sitting in the queue lifts it to the play boost, and background refreshes can never knock a boosted episode back down.
+
+You can override that by hand. The **Processing Queue** panel's waiting list gives each row a priority field with -/+ buttons beside it, which writes the row's priority directly and can lower it as well as raise it (`POST /api/v1/feeds/{slug}/episodes/{episodeId}/queue-priority`). Re-enqueueing the episode with a higher computed priority still overwrites a hand-set value, and so does a change to the feed's own Queue priority.
 
 Changing a feed's queue priority restamps every episode of that feed still pending in the queue with the new base priority. API: `queuePriority` on `PATCH /api/v1/feeds/{slug}` (`high`, `normal`, or `low`); the boost sizes are `queueManualBoost`, `queueFreshBoost`, and `queueBulkBoost` (0-100) and the toggle is `processNewEpisodesFirst`, all on `PUT /api/v1/settings`.
 
@@ -350,7 +362,7 @@ See [`patterns/README.md`](../patterns/README.md) for the technical reference (s
 
 If your LLM or Whisper server only runs part of the day (a desktop PC that hosts Ollama, for example), episodes that arrive while it is off normally retry a few times, trip the circuit breaker, and end up permanently failed until you reprocess them by hand. The offline queue changes that: an episode that fails because the endpoint is unreachable is parked with a "queued (offline)" status instead. Every few minutes MinusPod probes the endpoint, and once it answers again the parked episodes go back into the processing queue on their own.
 
-The feature is off by default. Configure it in **Settings > Offline Queue**.
+The feature is off by default. Configure it in **Settings > AI & Processing > Queue Control**.
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -358,6 +370,21 @@ The feature is off by default. Configure it in **Settings > Offline Queue**.
 | Give up after | 48 hours | Episodes still waiting after this long are marked failed and logged. Range 1-720 hours. |
 
 Only connection-level failures qualify: connection refused, DNS errors, timeouts, and repeated 5xx responses. Auth errors, rate limits, and bad responses still fail normally, so a wrong API key does not sit in the queue looking healthy. Turning the toggle off stops new episodes from being parked, but anything already waiting keeps being probed and expired so nothing is stranded. You can also reprocess a parked episode by hand at any time.
+
+## Rate-Limit Hold
+
+Hosted LLM providers answer a 429 with the time their limit resets. Without this feature an episode that hits one burns its retries against a provider that will not answer for another hour, and every episode behind it does the same. The rate-limit hold parks the episode instead and stops the queue from claiming new work until the reset time passes, then carries on by itself.
+
+The feature is off by default. Configure it in **Settings > AI & Processing > Queue Control**.
+
+| Setting | Default | Notes |
+|---|---|---|
+| Enabled | off | Pause the queue when the provider reports a 429 with a reset time. |
+| Give up after | 48 hours | Episodes still held after this long are marked failed and logged. Range 1-720 hours. |
+
+Only a reset further out than five minutes triggers a hold. Shorter ones keep the existing in-process retry, so a single throttled window recovers without pausing the queue. The hold covers detection, review, and verification, so a throttle part-way through a run defers the whole episode rather than skipping that stage. Anything you ask for by hand carries the manual queue boost, so Play and Reprocess still run during a pause. Turning the toggle off lifts the pause and releases held episodes on the next maintenance pass, within about five minutes.
+
+Held episodes sit under their own service name, so the offline queue's endpoint probes and give-up window never touch them, and a held episode does not inherit the clock of an earlier offline deferral.
 
 ## Scheduled Database Backups
 

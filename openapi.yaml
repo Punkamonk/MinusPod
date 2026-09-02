@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.94.0
+  version: 2.94.6
   contact:
     name: MinusPod
   license:
@@ -2126,6 +2126,76 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /feeds/{slug}/episodes/{episode_id}/queue-priority:
+    post:
+      tags:
+        - Processing
+      summary: Change a queued episode's priority
+      description: >-
+        Direct per-row write on the pending auto_process_queue row (#696).
+        Send `priority` for an absolute value or `delta` to nudge the stored
+        one; a delta is applied in SQL so a stepper cannot lose a click to a
+        stale read. Exactly one of the two is required. Unlike the monotonic
+        MAX() rule on re-enqueue, either can raise or lower, and both clamp
+        to [-1000, 1000]. A later feed-level queuePriority change restamps
+        the row and overwrites this value.
+      operationId: setEpisodeQueuePriority
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: episode_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              maxProperties: 1
+              properties:
+                priority:
+                  type: integer
+                  minimum: -1000
+                  maximum: 1000
+                  description: New dequeue priority; higher processes sooner.
+                delta:
+                  type: integer
+                  minimum: -1000
+                  maximum: 1000
+                  description: >-
+                    Amount to add to the stored priority. Applied server-side,
+                    then clamped to the same bounds.
+      responses:
+        '200':
+          description: Priority updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  episodeId:
+                    type: string
+                  slug:
+                    type: string
+                  priority:
+                    type: integer
+                    description: The priority now stored, after clamping.
+        '400':
+          description: >-
+            Body is not a JSON object, neither or both of priority/delta were
+            given, or the value is not an integer within bounds
+        '404':
+          description: Feed not found, or the episode has no pending queue row
+
   /feeds/{slug}/episodes/{episode_id}/cancel:
     post:
       tags:
@@ -2167,6 +2237,102 @@ paths:
                 $ref: '#/components/schemas/Error'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /episodes/pending-recuts:
+    get:
+      tags:
+        - Episodes
+      summary: Episodes with review decisions not yet cut into the audio
+      description: >-
+        Review is bulk work, so a correction that changes the audio stamps its
+        episode instead of re-cutting it. An episode collecting several
+        decisions is listed once and cut once.
+      operationId: getPendingRecuts
+      parameters:
+        - name: slug
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Limit the list to one feed's episodes.
+      responses:
+        '200':
+          description: Pending episodes, oldest stamp first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  episodes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        slug:
+                          type: string
+                        episodeId:
+                          type: string
+                        title:
+                          type: string
+                        podcast:
+                          type: string
+                        pendingSince:
+                          type: string
+                          description: When the episode first went stale.
+                        recutReady:
+                          type: boolean
+                          description: >-
+                            An apply would queue this row now. False when the
+                            retained original audio, saved segments, or
+                            markers are missing (the decision then waits for
+                            a full reprocess) or while the episode's own run
+                            is queued or underway.
+                        inFlight:
+                          type: boolean
+                          description: >-
+                            The episode's own queued or running pass will
+                            apply the decisions itself.
+
+  /episodes/pending-recuts/apply:
+    post:
+      tags:
+        - Episodes
+      summary: Recut every episode holding unapplied review decisions
+      description: >-
+        Queues one recut per pending episode, using the same recut path and
+        preconditions as the per-feed segment re-render. An episode missing
+        its retained original audio, or whose own run is queued or underway
+        (that run applies the decisions), is skipped and keeps its stamp, so
+        its decisions are not lost.
+      operationId: applyPendingRecuts
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                slug:
+                  type: string
+                  description: >-
+                    Recut only this feed's pending episodes. Omit to cover
+                    every feed.
+      responses:
+        '200':
+          description: How many recuts were queued and how many were skipped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued:
+                    type: integer
+                  skipped:
+                    type: integer
+        '429':
+          description: Rate limited (5 per minute)
 
   /episodes/{slug}/{episode_id}/corrections:
     post:
@@ -2263,9 +2429,28 @@ paths:
       summary: List processing and queued episodes
       description: >-
         Returns the episodes currently processing across all feeds, followed by
-        the full pending queue in dequeue order (priority first, then age).
-        Queued entries carry stage=queued and a 1-based queuePosition.
+        the pending queue in dequeue order (priority first, then age). Queued
+        entries carry stage=queued and a 1-based offset-aware queuePosition.
+        The waiting list is paginated:
+        offset/limit page over the DB-backed rows, with display-only entries
+        trailing after them.
       operationId: listProcessingEpisodes
+      parameters:
+        - name: offset
+          in: query
+          description: Waiting-list rows to skip (0-based). Defaults to 0.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Maximum waiting-list rows to return. Defaults to 200, capped at 1000.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
       responses:
         '200':
           description: List of processing episodes
@@ -4556,6 +4741,13 @@ paths:
                     to reject it or anything learned at runtime from a prior rejection. Use
                     ahead of a newly-released model that rejects temperature, without waiting
                     for a failed call or a code change. Off by default.
+                llmJsonSchemaEnabled:
+                  type: boolean
+                  description: |
+                    Opt-in (#693): send response_format json_schema on detection, review,
+                    category-repair, and trim-recovery calls to OpenAI-compatible endpoints,
+                    for each model that passes the probe. Support is tracked per model, not
+                    per endpoint; unsupported models fall back to json_object. Off by default.
                 openaiBaseUrl:
                   type: string
                   description: Base URL for OpenAI-compatible API endpoint (only used when provider is not anthropic)
@@ -4723,6 +4915,24 @@ paths:
                     Same floor as learningMinConfidence for ads longer than
                     90 seconds (default 0.92).
                   example: 0.92
+                learningMinPatternDuration:
+                  type: integer
+                  minimum: 1
+                  maximum: 600
+                  description: >-
+                    Shortest span, in seconds, that can teach the pattern
+                    matcher. Below this a span is usually a fragment or a host
+                    mention rather than a read (default 15).
+                  example: 15
+                learningMaxPatternDuration:
+                  type: integer
+                  minimum: 1
+                  maximum: 1800
+                  description: >-
+                    Longest span, in seconds, learned as a single pattern.
+                    A longer span is split at its ad transitions and each piece
+                    is learned separately (default 120).
+                  example: 120
                 differentialMeasuredCorrMax:
                   type: number
                   format: float
@@ -5509,6 +5719,80 @@ paths:
                   ttlHours:
                     type: integer
                   deferredCount:
+                    type: integer
+
+  /settings/rate-limit-hold:
+    get:
+      tags:
+        - Settings
+      summary: Get rate-limit hold configuration
+      description: >-
+        Rate-limit queue hold (#696). When enabled, a provider 429 carrying a
+        reset time defers the episode and pauses new queue claims until the
+        reset instead of failing the job.
+      operationId: getRateLimitHoldSettings
+      responses:
+        '200':
+          description: Rate-limit hold settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  ttlHours:
+                    type: integer
+                    minimum: 1
+                    maximum: 720
+                    description: Hours a held episode waits before being marked permanently failed.
+                  holdUntil:
+                    type:
+                      - string
+                      - 'null'
+                    format: date-time
+                    description: Until when new queue claims pause; null when no hold is active.
+                  holdCount:
+                    type: integer
+                    description: Episodes currently held by the rate-limit hold.
+    put:
+      tags:
+        - Settings
+      summary: Update rate-limit hold configuration
+      operationId: updateRateLimitHoldSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  description: Pause the queue on a provider 429 with a reset time longer than five minutes. Off by default; setting false clears an active pause and releases held episodes.
+                ttlHours:
+                  type: integer
+                  minimum: 1
+                  maximum: 720
+                  description: Hours a held episode waits before being marked permanently failed.
+      responses:
+        '200':
+          description: Rate-limit hold settings updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  ttlHours:
+                    type: integer
+                  holdUntil:
+                    type:
+                      - string
+                      - 'null'
+                    format: date-time
+                  holdCount:
                     type: integer
 
   /settings/update-check:
@@ -10346,6 +10630,22 @@ components:
               format: float
             isDefault:
               type: boolean
+        learningMinPatternDuration:
+          type: object
+          description: Shortest span in seconds that can teach the pattern matcher (default 15).
+          properties:
+            value:
+              type: integer
+            isDefault:
+              type: boolean
+        learningMaxPatternDuration:
+          type: object
+          description: Longest span in seconds learned as one pattern; longer spans are split (default 120).
+          properties:
+            value:
+              type: integer
+            isDefault:
+              type: boolean
         differentialMeasuredCorrMax:
           type: object
           description: >-
@@ -10770,6 +11070,14 @@ components:
           properties:
             value:
               type: boolean
+        llmJsonSchemaEnabled:
+          type: object
+          description: |
+            Opt-in structured output (#693): json_schema response format for
+            OpenAI-compatible endpoints, per model that passes the probe. Off by default.
+          properties:
+            value:
+              type: boolean
             isDefault:
               type: boolean
         openaiBaseUrl:
@@ -10924,6 +11232,8 @@ components:
             podpingEnabled:
               type: boolean
             omitTemperature:
+              type: boolean
+            llmJsonSchemaEnabled:
               type: boolean
             segmentCategoryActions:
               type: object
@@ -11085,19 +11395,20 @@ components:
           description: When the episode was added to the queue (queued entries only)
         queuePosition:
           type: integer
-          description: 1-based position in the pending queue (queued entries only)
+          description: 1-based offset-aware position in the pending queue (queued entries only)
         queueTotal:
           type: integer
           description: >-
-            Total pending episodes, which can exceed the number of queued
-            entries returned (the row list is capped)
+            Total pending episodes across the whole backlog, not just the
+            requested page. Stamped on every entry, active ones included, so
+            a page whose queued rows all deduped away still reports it.
         priority:
           type:
             - integer
             - 'null'
           description: >-
             Dequeue priority of the queue row; null for a display-queue entry
-            with no auto-process queue row
+            with no auto-process queue row (its reorder control is disabled)
 
     Pattern:
       type: object
@@ -11199,7 +11510,7 @@ components:
       properties:
         type:
           type: string
-          enum: [confirm, reject, adjust, create, split]
+          enum: [confirm, reject, adjust, create, split, recategorize]
           description: |
             - confirm: Mark detection as correct (creates/updates pattern).
               Optionally pass adjusted_start/adjusted_end to approve a trimmed
@@ -11212,6 +11523,11 @@ components:
               start/end/sponsor/text_template, no original_ad)
             - split: Replace one marker with N single-sponsor markers (see the
               endpoint description)
+            - recategorize: Set this marker's segment category, which decides
+              whether the span is cut, beeped, or left in. Scoped to this
+              episode's marker; a linked pattern keeps its own category. The
+              only type accepted on a marker whose action resolved to keep,
+              since it is how that verdict is changed.
         original_ad:
           type: object
           description: >-

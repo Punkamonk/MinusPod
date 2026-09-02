@@ -11,6 +11,23 @@ release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- The community patterns contributed before segment categories existed now
+  declare `category: "sponsor"` (196 of 197 files). Installs read the category
+  to decide whether a match is cut, beeped, or kept, and to filter which
+  categories they accept on sync. The corpus no longer relies on the
+  unset-means-sponsor fallback.
+- `patterns/CONTRIBUTING.md` documents the `category` field and its vocabulary.
+
+### Fixed
+
+- A community pattern file whose name did not match its sponsor is renamed to
+  the convention the submission validator enforces.
+- The community pattern validation workflow installs the dependencies the
+  validator imports, so it validates submissions instead of crashing on a
+  missing module. A crash now says so rather than reporting a rejected file.
+
 ### Security
 
 - browserslist 4.28.2 to 4.28.8, with its data dependencies
@@ -18,7 +35,278 @@ release notes.
   version up to 4.28.6, and they were failing the CI audit gate. Lockfile
   only; browserslist is a build-time dependency of babel and workbox.
 
-## [2.94.0] - 2026-09-01
+## [2.94.6] - 2026-08-31
+
+### Fixed
+
+- Confirming an ad no longer mints a pattern the auto-learning path would
+  refuse. The correction path called `create_ad_pattern` directly, skipping
+  every gate: duration, char cap, transition count, sponsor sanitising and
+  brand placement. A confirmed 176s span whose first 87s were show content
+  therefore became a pattern keyed on that content, which then matched the
+  same overshoot on later episodes and invited another confirm. Single-segment
+  confirms now go through `create_pattern_from_ad`; a span that fails a gate
+  still records its correction for that episode, it just does not generalise.
+
+### Added
+
+- Add divider at playhead in the Split ad block window. The existing button
+  drops a divider in the middle of the longest piece, and dragging it from
+  there is unreachable on a zoomed phone waveform.
+
+### Changed
+
+- Only the extractor's first-choice sponsor field carries the alias
+  description now; the other six stay as bare slots. On the schema path the
+  model follows the schema, so seven identical descriptions only added
+  tokens and invited the multi-fill the sentence warns against. The
+  serialized schema drops from 432 tokens to 252. From review on #696.
+
+### Added
+
+- Set START and Set END buttons in the Detected ad window place a boundary
+  at the playhead. Dragging a pin was the only way to move one, and a
+  zoomed-in waveform puts the pins off screen with no wheel to zoom back
+  out on a phone, which left no way to set a marker there at all. Mirrors
+  the buttons the Mark cue window already had, now sharing one recipe, and
+  both meet the 44px tap-target floor. The shared recipe leaves the text
+  colour to the caller: built on the ghost-button base, its `text-foreground`
+  raced the caller's colour and the Mark cue window's END button had been
+  rendering grey instead of red.
+
+## [2.94.5] - 2026-08-31
+
+### Changed
+
+- The sponsor alias fields in the detection schema carry a shared
+  description saying what they hold and to fill at most one. The prompt
+  never mentions them (they exist so a key-stripping backend cannot
+  discard whichever alias a model volunteers), so for a schema-reading
+  model the description is their only context. From review on #696.
+- The detection and verification passes DEBUG-log the fully assembled
+  system prompt, not just its length (#708). Dynamic sections are appended
+  after the stored setting, so the settings UI cannot show what was
+  actually sent; the episode run log is where prompt debugging happens.
+
+## [2.94.4] - 2026-08-31
+
+### Changed
+
+- The detection window schema constrains `category` to the seven segment
+  categories the prompt mandates, the same way the category-repair schema
+  already does. Derived from `SEGMENT_CATEGORIES`, spelled as a plain
+  `enum` for backend portability, with everything else left optional so
+  both addressing modes still validate. From review on #696; the reviewed
+  proposal's four-value list would have forbidden intro, outro, and recap
+  labels on an enforcing backend.
+- anthropic 1.0.0 to 1.2.0 and openai 3.3.1 to 3.6.0 (#699, #706, taking
+  the current release rather than the one the bump was opened against).
+  No call-site changes needed; pip-audit is clean on the new pins.
+
+## [2.94.3] - 2026-08-31
+
+### Fixed
+
+- Pattern learning threw away most of what it saw on ad-heavy feeds. A span
+  over the duration ceiling was dropped whole, so the reads were cut but never
+  learned and every episode re-detected them from scratch. One feed lost 26
+  spans that way in eight hours, ranging 120 to 442 seconds. A span over the
+  ceiling is now split at its ad transitions, and each piece that names its own
+  advertiser is learned separately. A piece with no sponsor of its own is
+  skipped rather than labelled with the previous read's name. The ceiling and
+  floor are settings rather than literals buried in the function.
+- The most common ad opener in podcasting was rejected as contaminated.
+  "This episode is brought to you by" also contains "brought to you by", and
+  the contamination check counted phrase-list entries rather than positions,
+  so an ordinary single read scored two transitions and was dropped. It counts
+  positions now, which is what the existing helper already did for the manual
+  split path. The contaminated-patterns list had the same miscount, so it
+  flagged clean patterns and then refused the split it recommended.
+- Segment names reached pattern learning as sponsor names. "Outro", "Show" and
+  "Episode" are structure, not advertisers, but no blocklist knew that, so they
+  were stopped three checks later by an unrelated intro test that blamed
+  contamination. The validator written for this case is now called from both
+  learning paths and knows the segment categories.
+- A sponsor had to appear in the ad's opening sentences, matched as a raw
+  substring. Real advertisers stored under one spelling and spoken as another
+  failed it. The name must appear somewhere in the read, matched through the
+  same alias-aware check the next gate already used.
+- The reviewer's prose/number warning fired on context. Its regexes key on
+  boundary words rather than the sentence's subject, so "show content starts at
+  59.7s", given as the reason for an end trim, read as a claim about the ad's
+  start. Four of five warnings in a production sample were that shape. A figure
+  landing on any real boundary is treated as context now.
+- The episode page discarded the reason a reprocess was refused (#707).
+  Processing is serialized by a lock, so an episode is often mid-run and the
+  request returns 409, but the handler set an error state that reached no
+  visible surface. The button flickered and nothing appeared to happen. It
+  now shows what the server said, in the same banner corrections use.
+- The feed page silently swallowed failures from refresh, rename, reprocess-all
+  and bulk actions, none of which had an error handler at all.
+- Two selects in the feed page's episode filter could not wrap and ran off the
+  side of a 320px screen.
+- A correction whose bounds no longer matched a stored marker (a recut or
+  reprocess can shift markers past the 0.5s match tolerance while the list is
+  open) recorded the decision but never stamped the episode, so an adjust or
+  reject silently never reached the audio. An unmatched correction now stamps;
+  an unneeded recut is idempotent, a skipped one loses the edit.
+- A decision recorded while its episode was mid-run was cleared when the run
+  finished, though the run's cut list never saw it. Completion now clears only
+  stamps from before the run started, and a decision landing on a processing
+  episode stamps with a fresh time instead of keeping the old one.
+- The Detected Ads tab's editor never learned the marker's category or applied
+  action, so a kept segment's editor still offered "Not an ad" (a guaranteed
+  409) and showed the wrong category. The keep guard covered Ad Review only.
+- The C and R keyboard shortcuts skipped the kept-by-category guard: the
+  buttons were hidden but the keys still submitted the refused verdict.
+- Apply recuts overwrote the mode of an episode already queued for a full or
+  llm rerun, downgrading the requested rerun to a recut of stale detections.
+  Queued and processing episodes are skipped; their own run applies the
+  decisions and clears the stamp.
+- One user-requested episode lifted the rate-limit pause for the whole queue,
+  and claims go by priority, so every backlog row ahead of it burned one call
+  into the throttled provider. While paused, only user-requested rows are
+  claimed.
+- A full or reprocess retry re-ran Whisper on every attempt after a transient
+  failure. A retry now reuses the transcript an earlier attempt of the same
+  request saved, when the retained original guarantees the audio is the same
+  file the transcript came from.
+- The Apply recuts button read "Recutting" and stayed disabled when a new
+  decision arrived while a batch ran, and could stick that way. The server
+  now reports each row's state (`recutReady`, `inFlight` on
+  `GET /episodes/pending-recuts`) and the bar renders from that: rows being
+  rebuilt, rows a fresh apply would queue, and rows missing what a recut
+  needs, which wait for a full reprocess. An episode left 'pending' by a
+  cleared queue counts as applyable, since no run of its own is coming.
+- A category change the server refused kept showing the new category in the
+  list until an unrelated refetch put the truth back.
+- Learning could store a span whose opening read belonged to a different
+  advertiser: the labeled brand only had to appear twice anywhere. It must now
+  first appear in the front 60 percent of the read.
+- Two workers recording response-format probe answers in the same window could
+  drop one model's answer; the read-merge-write now runs in one immediate
+  transaction.
+
+### Added
+
+- Apply recuts on a feed's own page, covering that feed's episodes rather than
+  every waiting episode. `GET /episodes/pending-recuts` takes an optional
+  `slug`, and the apply endpoint takes one in its body. There is still one
+  recut queue and each episode is still rebuilt once.
+
+## [2.94.2] - 2026-08-31
+
+### Fixed
+
+- The Ad Review queue listed segments that no one could act on. A segment
+  left in by its category is settled by the feed's segment actions, and the
+  corrections endpoint refuses a verdict on one, so "Needs review" was
+  offering a decision nobody could make and the queue could never be emptied.
+  Those segments appear under their cut status instead, and the queue holds
+  what needs a decision.
+- Every row in the queue carried an "Unresolved" badge, which restated the
+  filter and said nothing. Only a recorded decision gets a badge now. The
+  state is called "not reviewed" where it still needs a name, and the badges
+  are explained in the web interface docs.
+- The Ad Patterns header pushed Export off screen on a phone: the row could
+  not wrap, and the sync stamp had grown wider. It wraps now, and the stamp
+  shows the date only where there is room for it.
+- Detection cards lay out in two deliberate rows rather than by wrap order:
+  the verdict pair on top at equal width, category and Edit below. Card
+  actions meet the 44px tap-target floor in both dimensions, up from 36.
+- Changing a category in the Detected ad window did nothing at all on the
+  Detected Ads tab, which ignored that kind of change. On Ad Review it saved
+  but the control snapped back to the old value, because it was bound to a
+  list row that had not refetched yet.
+- The Apply recuts button stayed lit after queueing, as if it had not been
+  pressed. It reports what it started and clears itself as episodes finish.
+- Apply recuts blamed missing original audio for every skipped episode. The
+  endpoint returns counts, not reasons, and a skip can equally mean the saved
+  transcript segments are gone. The message names what a recut needs without
+  inventing which piece is missing.
+
+## [2.94.1] - 2026-08-30
+
+### Fixed
+
+- Switches were squashed on phones. A control with a width class is still a
+  flex item, so a long label beside one steals its width once the row stops
+  fitting: at 360px a switch next to a two-line label lost a third of its
+  width. The row only overflows on narrow screens, which is why every desktop
+  review passed it. The switch now holds its size, and the design guide
+  records the rule for every fixed-size control in a flex row.
+- The queue pager wrapped onto two lines on a phone. It now stays on one,
+  showing first, current, and last below the small breakpoint.
+- Import, Export, and the community sync stamp on the Ad Patterns header were
+  three different sizes. They share one recipe now, and the stamp shows a date
+  instead of a full timestamp that wrapped to three lines.
+- The play button on a detection table row was 33px against 30px neighbours.
+  Both come from one shared recipe now, as the card and marker rows already
+  did.
+- Saving on a detection whose category resolves to keep returned a 409. The
+  modal offered Save and Not an ad on a marker the corrections endpoint will
+  always refuse; it now shows the category picker as the way through and says
+  so.
+
+### Added
+
+- Set a detection's category from the Ad Review and Detected Ads rows, and a
+  pattern's category from the Ad Patterns table, without opening the editor.
+  Review is bulk work, and the category is what decides whether a span is cut.
+
+## [2.94.0] - 2026-08-30
+
+### Added
+
+- Rate-limit queue hold. When the LLM provider answers 429 with a reset
+  more than five minutes out, the episode waits and the queue pauses until
+  the reset instead of burning retries on a throttled provider. Shorter
+  resets keep the existing in-process retry, so a lone throttled window
+  still recovers. Detection, review, and verification are all covered: a
+  throttle arriving mid-run defers the episode rather than skipping that
+  stage. Off by default, with a give-up window of 1-720 hours (default 48),
+  under Settings > AI & Processing > Queue Control. Play and Reprocess run
+  even mid-pause, and turning the toggle off lifts the pause and releases
+  held episodes. A held episode never inherits the clock of an earlier
+  offline deferral.
+- Per-episode priority control in the Processing Queue panel. Each waiting
+  row gets a priority field with -/+ buttons, backed by
+  `POST /feeds/{slug}/episodes/{episodeId}/queue-priority`. Send `priority`
+  for an exact value or `delta` to nudge the stored one; a delta is added
+  server-side, so a click made against a stale list value still lands.
+  Either can lower a priority, unlike re-enqueueing; a feed-level queue
+  priority change still restamps the row.
+- The Processing Queue waiting list is paginated at 25 rows per page, so
+  nothing hides behind a "+N further back in the queue" note.
+  `GET /episodes/processing` takes offset and limit (default 200, cap
+  1000), and positions stay correct across pages.
+- Queue Control, a new section in AI & Processing. It groups the queue
+  priority boosts (moved out of Global Defaults), the process-new-episodes
+  toggle, the offline queue (moved out of Data & Security), and the
+  rate-limit hold.
+- Transcript Normalization is now its own section in AI & Processing, with
+  help text explaining that the rules correct Whisper output for words,
+  phrases, numbers, sponsor names, and URLs. The Sponsors page drops its
+  Normalizations tab.
+- A detected ad's category can be changed from the Detected ad window. The
+  category decides whether a span is cut, beeped, or left in, so this is how
+  you cut one the feed is currently keeping. It changes that episode's marker
+  only; a linked pattern keeps its own category, edited in the pattern detail
+  modal.
+- Review decisions no longer re-cut an episode one at a time. Confirming,
+  rejecting, or recategorizing records the decision and marks the episode,
+  and an Apply recuts button on the Ad Review and Detected Ads pages cuts
+  every waiting episode once. An episode edited five times is rebuilt once
+  instead of five times. An episode that no longer has its original audio
+  keeps its decisions, and the button says how many it could not recut.
+- Opt-in JSON schema response format for OpenAI-compatible providers (#693,
+  #694). Detection, review, category repair, and trim recovery send a
+  json_schema response_format once the toggle in the LLM Provider section
+  is on. Support is probed and remembered per model rather than per
+  endpoint, because one URL can serve models that differ on it; a model
+  that does not support it falls back to json_object at request build or on
+  a runtime 400 instead of losing the format hint. Anthropic call sites are
+  unchanged.
 
 ### Changed
 
@@ -27,6 +315,47 @@ release notes.
   matching the detection prompt's merge rule. Report regenerated from the
   stored raw calls; per-model scores shift accordingly and are not
   comparable to pre-2.94.0 rows.
+
+### Fixed
+
+- A full or LLM-mode reprocess no longer wipes the episode's transcript and
+  ad markers up front (#692). The clear now happens in the transcribe
+  stage, immediately before the fresh transcript is saved, so an OOM kill
+  or container restart mid-run leaves the prior results intact instead of
+  emptying the episode.
+- The ad reviewer's system prompt examples now show the same shape the
+  reviewer actually sends (#695): candidate markers, and a [start-end]
+  stamp on every line including the 60 seconds of context on each side.
+  The model can now read a trim boundary off a context line instead of
+  interpolating one. Installs still on the shipped default get the
+  corrected examples on upgrade; customized prompts are left alone.
+- fpcalc fingerprinting survives recoverable decode hiccups (#690). All
+  three fingerprint call sites parse stdout before honoring the exit code,
+  so an episode with one bad frame no longer loses all cue scanning.
+- A detected ad whose category resolves to keep no longer shows Confirm and
+  Not-an-ad buttons that the API always refused with a 409. The row says the
+  span is left in because of its category and offers Edit, which is where
+  the category can now be changed.
+- Correction failures show what the server actually said instead of a fixed
+  "Try again", which sent you in circles on a refusal that would never
+  succeed.
+- The offline queue's "waiting" count included only LLM deferrals, so a
+  Whisper outage read as zero episodes waiting. It now counts every
+  deferral it owns.
+- A single model rejecting plain JSON mode no longer downgrades every other
+  model on the same OpenAI-compatible endpoint to prompt injection, across
+  restarts. Both response-format answers are now remembered per model.
+- The play button on ad review cards, detected-ads rows, and the episode
+  page's held and rejected marker rows matches the height of the buttons
+  beside it at every breakpoint, instead of sitting short on mobile.
+- The settings toggle is slimmer, matching the switch spec now written down
+  in the design guide.
+- 3- and 4-digit queue positions no longer paint over the episode title on
+  mobile. The position column is wider, and the row stacks its controls
+  below the title on narrow screens.
+- The cue-template create endpoint's docstring no longer claims to accept a
+  required `label` (#691); the display label comes from cueType, so the LLM
+  prompt always sees a fixed phrase.
 
 ## [2.93.3] - 2026-08-28
 

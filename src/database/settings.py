@@ -243,6 +243,13 @@ SETTINGS_REGISTRY: dict[str, SettingSpec] = {
         default='false', seeded=True, resettable=False),
     'offline_queue_ttl_hours': SettingSpec(
         default='48', seeded=True, resettable=False),
+    # Rate-limit queue hold (#696). hold_until is ephemeral runtime state
+    # written by the failure handler and cleared on release; not seeded and
+    # not exposed through the general settings payload.
+    'rate_limit_hold_enabled': SettingSpec(
+        default='false', seeded=True, resettable=False),
+    'rate_limit_hold_ttl_hours': SettingSpec(
+        default='48', seeded=True, resettable=False),
     'processing_soft_timeout_seconds': SettingSpec(
         default='3600', env='PROCESSING_SOFT_TIMEOUT', seeded=True,
         resettable=False),
@@ -433,6 +440,11 @@ SETTINGS_REGISTRY: dict[str, SettingSpec] = {
     'omit_temperature': SettingSpec(
         default='false', seeded=True, resettable=False,
         payload_key='omitTemperature', payload_kind='bool'),
+    # Operator opt-in (#693): send response_format json_schema to
+    # OpenAI-compatible endpoints after a passing provider-level probe.
+    'llm_json_schema_enabled': SettingSpec(
+        default='false', seeded=True, resettable=False,
+        payload_key='llmJsonSchemaEnabled', payload_kind='bool'),
     'llm_provider': SettingSpec(
         env_backed=True, seeded=True,
         in_ad_reset=True, payload_key='llmProvider',
@@ -587,6 +599,12 @@ SETTINGS_REGISTRY: dict[str, SettingSpec] = {
     'learning_min_confidence_long': SettingSpec(
         default='0.92', seeded=True, in_ad_reset=True,
         payload_key='learningMinConfidenceLong', payload_kind='float'),
+    'learning_min_pattern_duration': SettingSpec(
+        default='15', seeded=True, in_ad_reset=True,
+        payload_key='learningMinPatternDuration', payload_kind='int'),
+    'learning_max_pattern_duration': SettingSpec(
+        default='120', seeded=True, in_ad_reset=True,
+        payload_key='learningMaxPatternDuration', payload_kind='int'),
     'differential_measured_corr_max': SettingSpec(
         default='0.60', seeded=True, in_ad_reset=True,
         payload_key='differentialMeasuredCorrMax', payload_kind='float'),
@@ -726,6 +744,16 @@ class SettingsMixin:
         except (TypeError, ValueError):
             return default
 
+    def get_setting_int(self, key: str, default: int = 0) -> int:
+        """Get a setting as int, returning `default` on missing/invalid values."""
+        v = self.get_setting(key)
+        if v is None:
+            return default
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return default
+
     def get_all_settings(self) -> dict[str, Any]:
         """Get all settings as a dictionary."""
         conn = self.get_connection()
@@ -738,9 +766,8 @@ class SettingsMixin:
             }
         return settings
 
-    def set_setting(self, key: str, value: str, is_default: bool = False):
-        """Set a setting value."""
-        conn = self.get_connection()
+    @staticmethod
+    def _upsert_setting(conn, key: str, value: str, is_default: bool):
         conn.execute(
             """INSERT INTO settings (key, value, is_default, updated_at)
                VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -750,7 +777,26 @@ class SettingsMixin:
                  updated_at = excluded.updated_at""",
             (key, value, 1 if is_default else 0)
         )
+
+    def set_setting(self, key: str, value: str, is_default: bool = False):
+        """Set a setting value."""
+        conn = self.get_connection()
+        self._upsert_setting(conn, key, value, is_default)
         conn.commit()
+
+    def merge_setting(self, key: str, merge_fn) -> str:
+        """Rewrite a setting as merge_fn(stored_value_or_None) -> new value.
+
+        Read and write share one immediate transaction, so two workers
+        merging concurrently serialize instead of the second dropping the
+        first's change. Returns the stored value.
+        """
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            merged = merge_fn(row['value'] if row else None)
+            self._upsert_setting(conn, key, merged, is_default=False)
+        return merged
 
     def clear_setting(self, key: str):
         """Delete a setting row outright so it reads as unset."""

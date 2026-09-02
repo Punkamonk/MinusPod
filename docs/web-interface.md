@@ -17,7 +17,7 @@ The server includes a web-based management UI at `/ui/`:
 - Per-feed processing mode: one select with five presets: standard (detect and cut ads, the default), keep content only (experimental; marks show content and removes everything else, see [How It Works](how-it-works.md)), skip ad detection (still transcribes and builds chapters, but nothing is scanned or cut; for ad-free shows), pass-through (serves episodes exactly as published, with no transcription, detection, or cutting), or cue-only (experimental; cuts from cue pairs and previously learned ad patterns, no LLM call; needs one enabled ad-break-start and one enabled ad-break-end template, and exposes a per-feed safety policy and a skip-transcription toggle, see [Audio Cue Detection > Cue-only preset](audio-cues.md#cue-only-preset))
 - Feed detail page groups its controls into collapsible sections so the page stays scannable. Inside Feed Settings, everyday controls (network, source feed, auto-process, title blacklist, processing mode, queue priority, retention, original audio, language, hide unprocessed, tags) sit at the top; Segment actions, Cue tuning, and the rarely-changed Advanced controls each fold into their own card
 - Per-feed episode title blacklist: glob patterns under "Skip episodes by title" skip queuing and just-in-time processing for matching titles; a "Skipped episodes" select chooses whether a skipped episode is served with original audio (default) or hidden. Manual reprocess of a skipped episode overrides the blacklist. See [Configuration > Title blacklist](configuration.md#title-blacklist)
-- Per-feed queue priority (High / Normal / Low) on the feed settings page, with automatic boosts for fresh episodes (when the global "Process new episodes first" setting is on) and for plays and single reprocesses. Boost sizes are adjustable under Settings > Global Defaults > Queue priority; bulk work like Reprocess All gets no boost by default so backfills drain last. See [Configuration > Queue priority](configuration.md#queue-priority)
+- Per-feed queue priority (High / Normal / Low) on the feed settings page, with automatic boosts for fresh episodes (when the global "Process new episodes first" setting is on) and for plays and single reprocesses. Boost sizes are adjustable under Settings > AI & Processing > Queue Control; bulk work like Reprocess All gets no boost by default so backfills drain last. See [Configuration > Queue priority](configuration.md#queue-priority)
 - Segment actions card on the feed settings page: per-category remove/beep/keep overrides, an Inherit/On/Off show-segments choice, and a bulk re-render button. A matching global **Segment actions** card in Settings sets the defaults every feed inherits. See [How It Works > Segment Categories](how-it-works.md#segment-categories)
 - Per-feed retention override on the feed settings page: inherit the global window, keep the feed for a specific number of days, or archive it so nothing is ever deleted. An archived feed also survives the "Clear all processed audio" action in Settings. See [Configuration > Per-feed retention](configuration.md#per-feed-retention)
 - Per-feed original audio override on the same page: inherit the global "Keep original audio" setting, or force it on or off for one feed. Discarding the uncut copy roughly halves what the feed stores and takes effect on the next episode processed
@@ -29,16 +29,21 @@ The server includes a web-based management UI at `/ui/`:
 - Bulk actions: select multiple episodes to process, reprocess, run a full analysis, re-detect ads on the existing transcript, or delete (the per-episode Recut Audio mode is not a bulk action)
 - Sort by publish date, episode number, or creation date; paginated (25/50/100/500 per page)
 - Pattern management: view and manage cross-episode ad patterns with sponsor names; the detail modal edits a pattern's sponsor, text template, active state, and segment category; includes an Ad Review tab for triaging detections across all podcasts
-- Sponsor management: view, add, edit, and remove sponsors, each with its linked-pattern count, created and last-matched dates, and tags; plus a tab for name normalization rules
+- Review decisions are recorded as you make them, then applied together. The Ad Review and Detected Ads pages show an Apply recuts button that recuts each waiting episode once, however many decisions it collected. A feed's own page has the same button for just that feed's episodes
+- Segment category is editable in place: on an Ad Review or Detected Ads row, in the Detected ad window, and per pattern in the Ad Patterns table. It is what decides whether a span is cut, beeped, or left in
+- Sponsor management: view, add, edit, and remove sponsors, each with its linked-pattern count, created and last-matched dates, and tags
 - Processing history with stats, filtering by podcast, and CSV/JSON export; failed runs show their error reason under the episode title, with the full text on hover
 - Stats dashboard with charts: avg/min/max metrics, top podcasts by ads, episodes by day, token usage, sortable podcast table, and an addressing-modes card comparing contract compliance and ad yield per mode (see [Configuration > Ad Addressing Mode](configuration.md#ad-addressing-mode))
+- JSON schema response format (Settings > LLM Provider): opt-in for OpenAI-compatible endpoints, probed per model, falling back to plain JSON mode where it is not supported (see [Configuration](configuration.md#json-schema-response-format))
 - Settings for LLM provider, AI models, ad detection prompts, retention, system stats, token usage and cost. Each customizable prompt has its own Reset button next to its label (visible but disabled at default), alongside the section-wide reset-all button
 - Scheduled database backups (Settings > Data & Security): cron schedule, destination, keep count, and a Back up now button that works even with the schedule off
-- Offline queue (Settings): optionally hold episodes while a self-hosted LLM or Whisper endpoint is down and process them automatically when it returns, with a configurable give-up window
+- Offline queue (Settings > Queue Control): optionally hold episodes while a self-hosted LLM or Whisper endpoint is down and process them automatically when it returns, with a configurable give-up window
+- Rate-limit hold (Settings > Queue Control): optionally pause the queue while the LLM provider reports a 429 with a reset time, instead of failing episodes, with its own give-up window
+- Processing Queue panel (Settings): the waiting list is paginated, and each row has a priority field with -/+ buttons that can raise or lower its place in the queue
 - Real-time status bar showing processing progress across all pages
 - OPML export with original or ad-free (modified) feed URLs
 - Optional cover-art badge that marks the filtered feed (Settings > Cover Art), with a Refresh all artwork button
-- Global Defaults group in settings (Auto-Process, Max Feed Episodes, Only Expose Processed, Queue priority boosts) that every feed inherits, with per-feed overrides on each feed's settings page
+- Global Defaults group in settings (Auto-Process, Max Feed Episodes, Only Expose Processed) that every feed inherits, with per-feed overrides on each feed's settings page; Queue priority boosts live in the Queue Control group
 - Notifications for processed episodes, permanent failures, auth failures, exhausted spend limits, and structural rate-limit hits, delivered by webhooks or native email (Settings > Notifications)
 - Podcast search via PodcastIndex.org
 - Multiple dark themes (Tokyo Night, Dracula, Catppuccin, Nord, Gruvbox, Solarized, and more) with light/dark toggle
@@ -56,7 +61,7 @@ The Sponsors page lists known sponsors, each with its linked ad-pattern count, c
 
 Deleting a sponsor is permanent. Ad patterns linked to it are not deleted: their sponsor link is cleared (unlinked) so no pattern data is lost. The confirmation dialog shows how many patterns will be unlinked first.
 
-A second tab manages name normalizations: regex rules that rewrite messy or inconsistent sponsor names into one canonical form before matching (for example collapsing `ag 1`, `ag-1`, and `ag one` to `ag1`).
+Name normalizations moved to Settings > AI & Processing > Transcript Normalization: regex rules that rewrite messy or inconsistent sponsor names into one canonical form before matching (for example collapsing `ag 1`, `ag-1`, and `ag one` to `ag1`). The rules correct any misheard Whisper output, sponsor names included.
 
 #### Normalization regex format
 
@@ -118,18 +123,40 @@ The Patterns page has two tabs: Patterns and Ad Review. The Ad Review tab lists 
 
 Each row covers one detected segment: podcast name, episode title (linked to the episode page), publish date, start/end timestamps and duration, sponsor name, confidence score, detection stage, status, and resolution.
 
+#### What the badges mean
+
+A row carries up to three badges, and each answers a different question.
+
+| Badge | Question it answers | Meaning |
+|---|---|---|
+| Accepted | What did the audio do? | The span was cut out of the published file |
+| Not cut | What did the audio do? | The span is still in the file |
+| Pending | What did the audio do? | The episode is still processing |
+| Confirmed | What did you decide? | You said this is an ad |
+| Not an ad | What did you decide? | You said it is not |
+| Kept | Why was it left in? | Its category resolves to keep, so it was never a candidate to cut |
+
+A detection you have not decided on yet gets no second badge. Undecided is the normal state in this list, so a badge on every row would say nothing.
+
+"Not cut" and "Not an ad" read alike but are not the same. "Not cut" is what happened to the audio; a span can be left in because the validator rejected it, because you dismissed it, or because its category is set to keep. "Not an ad" is your recorded judgment.
+
 A Detection Statistics card above the filters shows totals by status and resolution across all podcasts. On phones the list renders as stacked cards instead of a table, with a sort control in the filter bar.
 
-The tab opens with "Needs review" selected. That filter shows detections that are held for review or rejected with no correction yet. Other options are Pending review, Rejected, Accepted, and All. A podcast dropdown narrows the list to one feed. The search box filters by sponsor name or detection reason. The list shows 20 rows per page. Click a column header (Podcast, Published, Confidence) to sort; click again to reverse.
+The tab opens with "Needs review" selected. That filter shows detections still waiting on a decision from you: held for review, or left uncut, with no correction recorded. Other options are Pending review, Rejected, Accepted, and All.
 
-Each row has up to four actions:
+Segments left in by their category are not in "Needs review". Their fate is already settled by the feed's segment actions, and the corrections endpoint refuses a verdict on one, so listing them would offer a decision nobody can make. Change the category to move one, or find them under Rejected and All.
+
+A podcast dropdown narrows the list to one feed. The search box filters by sponsor name or detection reason. The list shows 20 rows per page. Click a column header (Podcast, Published, Confidence) to sort; click again to reverse.
+
+Each row has up to five actions:
 
 - **Play** - auditions the pre-cut audio for that segment in the browser. Only appears when the original is retained (see Settings > Storage & Retention). Click again to pause.
-- **Approve** - records a confirm correction. Triggers an immediate recut if the original audio is present; otherwise the cut applies on the next reprocess.
-- **Dismiss** - records a rejection and leaves the audio unchanged.
+- **Confirm ad** - records a confirm correction and marks the episode for a recut.
+- **Not an ad** - records a rejection.
+- **Category** - sets the segment category, which is what decides whether the span is cut, beeped, or left in. This is the only action on a row left in by its category, and it is how you change that.
 - **Edit** - opens the waveform editor so you can adjust the ad boundaries before deciding.
 
-Approve and Dismiss only appear for unresolved detections; the resolution badge replaces them once a decision is recorded.
+Confirm ad and Not an ad only appear for a detection still awaiting a decision, and never on one left in by its category. Recording a decision does not re-cut the episode on the spot: it marks the episode, and an Apply recuts button above the list rebuilds every waiting episode once. An episode you edit five times is rebuilt once rather than five times. The same button appears on a feed page, where it covers only that feed's episodes.
 
 Corrections go through the same per-episode corrections endpoint used on the episode page, so approve and dismiss decisions feed pattern learning the same way.
 

@@ -22,6 +22,7 @@ import SplitMarkerModal from '../../components/SplitMarkerModal';
 import { DetectionRows } from './DetectionRows';
 import { DetectionFilterBar } from './DetectionFilterBar';
 import { useDetectionCorrections } from './useDetectionCorrections';
+import { PendingRecutsBar } from './PendingRecutsBar';
 
 function StatFigure({ label, value, lead = false }: {
   label: string;
@@ -113,7 +114,7 @@ export default function DetectedAdsTab() {
   }, [q]);
 
   const {
-    dismiss, adjust, triggerRecut, busy, actionError,
+    dismiss, recategorize, adjust, triggerRecut, busy, actionError,
   } = useDetectionCorrections({
     stopAudition: audition.stop,
     onSettled: () => setEditing(null),
@@ -172,6 +173,7 @@ export default function DetectedAdsTab() {
         onOrderChange={(v) => { setOrder(v); setPage(1); }}
       />
 
+      <PendingRecutsBar />
       {actionError && (
         <div className="text-destructive text-sm mb-3">{actionError}</div>
       )}
@@ -197,7 +199,8 @@ export default function DetectedAdsTab() {
             audition={audition}
             actions={{
               // These ads were cut, so rejecting one has to put the audio back.
-              onDismiss: (d) => { setNotice(null); dismiss(d, d.hasOriginalAudio); },
+              onDismiss: (d) => { setNotice(null); dismiss(d); },
+              onCategory: recategorize,
               onEdit: (d) => { setNotice(null); setEditing(d); },
               onSplit: (d) => { setNotice(null); setSplitting(d); },
               busy,
@@ -234,6 +237,8 @@ export default function DetectedAdsTab() {
             detectionStage: editing.detectionStage,
             patternId: editing.patternId,
             correctedBounds: null,
+            category: editing.category as AdReviewItem['category'],
+            actionApplied: editing.actionApplied,
           } satisfies AdReviewItem}
           episodeDuration={editing.episodeDuration ?? 0}
           hasOriginal={editing.hasOriginalAudio}
@@ -248,7 +253,9 @@ export default function DetectedAdsTab() {
             if (s.kind === 'adjust') {
               adjust(d, s.adjustedStart, s.adjustedEnd, s.sponsor);
             } else if (s.kind === 'reject') {
-              dismiss(d, d.hasOriginalAudio);
+              dismiss(d);
+            } else if (s.kind === 'recategorize') {
+              recategorize(d, s.category ?? null);
             }
           }}
         />
