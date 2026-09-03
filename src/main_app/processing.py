@@ -42,6 +42,7 @@ from utils.time import (
 )
 from verification_pass import _build_timestamp_map, _map_correction_to_processed, _map_to_original
 from config import (
+    log_download_query_enabled,
     MIN_CUT_CONFIDENCE, MAX_EPISODE_RETRIES,
     MIN_AD_DURATION_FOR_REMOVAL,
     MIN_CONTENT_BETWEEN_ADS_SECONDS,
@@ -84,6 +85,7 @@ from config import (
     resolve_differential_fetch_setting,
     TERMINAL_SNAP_WINDOW_SECONDS,
     VETO_MIN_CUT_SECONDS,
+    resolve_splice_veto_enabled,
     ModelNotConfiguredError,
     coerce_bool_setting,
 )
@@ -115,7 +117,8 @@ from reprocess_modes import (
     FORCE_TRANSCRIBE_MODES, clear_episode_for_mode,
 )
 from splice_calibration import compute_splice_calibration
-from transcriber import extract_audio_chunk
+from transcriber import CDN_REFUSED_PREFIX, extract_audio_chunk
+from user_agent import download_user_agent, feed_user_agent
 from utils.constants import (
     CANCELED_ERROR_MESSAGE, EpisodeStatus, PIPELINE_REPROCESS_SOURCES,
     REPROCESS_SOURCE_DEGRADED, REPROCESS_SOURCE_POLICY,
@@ -123,6 +126,7 @@ from utils.constants import (
 from utils.episode_paths import episode_relative_path
 from utils.errors import ServiceUnavailableError, AudioTooLargeError, AudioExtractionTimeout
 from utils.gpu import get_available_memory_gb, clear_gpu_memory
+from utils.http import safe_url_for_log
 from utils.language import get_feed_language_override
 from utils.text import (
     parse_transcript_segments,
@@ -245,9 +249,11 @@ def is_transient_error(error: Exception) -> bool:
     if any(pattern in error_msg for pattern in oom_patterns):
         return False
 
-    # CDN errors are transient
+    # CDN errors are transient. A refusal of one User-Agent is not, and is
+    # matched below; a 403 that ignores the identifier is a block that lifts.
     transient_patterns = [
         'cdn not ready', 'cdn timeout', 'cdn server error', 'cdn check failed',
+        'cdn blocked',
     ]
     if any(pattern in error_msg for pattern in transient_patterns):
         return True
@@ -259,6 +265,8 @@ def is_transient_error(error: Exception) -> bool:
         'invalid audio', 'unsupported format', 'corrupt',
         'authentication', 'unauthorized', 'forbidden',
         '400 ', '401 ', '403 ',
+        # A refusal answers the same way on every retry.
+        CDN_REFUSED_PREFIX.lower(),
         # Local feeds have no upstream to retry against: a missing retained
         # original never recovers on its own, so retrying just burns the
         # full ladder before landing on permanently_failed anyway.
@@ -450,13 +458,37 @@ def _retranscribe_tail_no_vad(slug, episode_id, audio_path, segments,
     return segments + tail_segments, True
 
 
+CDN_BLOCKED_MESSAGE = 'CDN blocked the request (403) with both User-Agents'
+
+
 def _download_episode_audio(episode_url):
     """Check CDN availability and download the enclosure. Returns the temp
     audio path; raises on either failure."""
+    url_for_log = safe_url_for_log(
+        episode_url, keep_path=True, keep_query=log_download_query_enabled())
+    user_agent = None
     available, cdn_error = transcriber.check_audio_availability(episode_url)
+    if not available and cdn_error.startswith(CDN_REFUSED_PREFIX):
+        # A 403 is either a User-Agent floor, which answers the same way on
+        # every retry, or a block that ignores the identifier and lifts on its
+        # own. One probe with the other configured string tells them apart.
+        alternate = feed_user_agent()
+        accepted, _ = transcriber.check_audio_availability(episode_url, user_agent=alternate)
+        if accepted:
+            audio_logger.warning(
+                f"Host at {url_for_log} refuses the download User-Agent "
+                f"'{download_user_agent()}' but accepts the feed User-Agent "
+                f"'{alternate}'. Downloading with the feed string. Update the "
+                f"download User-Agent in Settings > Outbound Requests.")
+            available, cdn_error, user_agent = True, None, alternate
+        else:
+            cdn_error = CDN_BLOCKED_MESSAGE
     if not available:
-        raise Exception(f"CDN not ready: {cdn_error}")
-    audio_path = transcriber.download_audio(episode_url)
+        # Without the host the failure is unattributable: the download log
+        # line below never runs on this path.
+        audio_logger.warning(f"Audio unavailable at {url_for_log}: {cdn_error}")
+        raise Exception(cdn_error)
+    audio_path = transcriber.download_audio(episode_url, user_agent=user_agent)
     if not audio_path:
         raise Exception("Failed to download audio")
     return audio_path
@@ -1088,13 +1120,16 @@ def _refine_boundaries(all_ads, segments, db=None, false_positive_corrections=No
                                                   barriers=all_ads + list(keep_ads or []))
     if all_ads:
         all_ads = snap_early_ads_to_zero(all_ads)
+    min_content = _setting_float(db, 'min_content_between_ads_seconds',
+                                 MIN_CONTENT_BETWEEN_ADS_SECONDS,
+                                 allow_zero=True) if db else MIN_CONTENT_BETWEEN_ADS_SECONDS
     if all_ads and segments:
+        # Same threshold as the filler-gap pass below: one operator setting
+        # decides how much speech makes a gap real show content.
         all_ads = merge_same_sponsor_ads(all_ads, segments,
-                                         podcast_name=podcast_name)
+                                         podcast_name=podcast_name,
+                                         min_content_seconds=min_content)
     if all_ads:
-        min_content = _setting_float(db, 'min_content_between_ads_seconds',
-                                     MIN_CONTENT_BETWEEN_ADS_SECONDS,
-                                     allow_zero=True) if db else MIN_CONTENT_BETWEEN_ADS_SECONDS
         all_ads = merge_ads_across_short_content_gaps(
             all_ads, segments or [],
             min_content_seconds=min_content,
@@ -1221,8 +1256,9 @@ def _build_validator(episode_duration, segments, episode_description, *,
     splice_kwargs = {}
     if splice_veto:
         splice_kwargs = {
-            'splice_veto_enabled': db.get_setting_bool('splice_veto_enabled',
-                                                       default=True),
+            'splice_veto_enabled': resolve_splice_veto_enabled(
+                db, podcast_id,
+                db.get_setting_bool('splice_veto_enabled', default=True)),
             'veto_min_cut_seconds': db.get_setting_float('veto_min_cut_seconds',
                                                          VETO_MIN_CUT_SECONDS),
         }
@@ -4171,7 +4207,7 @@ def _handle_processing_failure(slug, episode_id, episode_title, podcast_name,
     else:
         new_status = EpisodeStatus.PERMANENTLY_FAILED.value
         new_retry_count = current_retry
-        audio_logger.warning(f"[{slug}:{episode_id}] Permanent error, not retrying: {type(error).__name__}")
+        audio_logger.warning(f"[{slug}:{episode_id}] Permanent error, not retrying: {type(error).__name__}: {error}")
 
     db.upsert_episode(slug, episode_id, status=new_status,
         retry_count=new_retry_count, error_message=str(error))

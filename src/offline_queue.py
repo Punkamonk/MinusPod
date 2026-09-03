@@ -15,7 +15,9 @@ import llm_client
 import transcriber
 from config import (
     DEFER_SERVICE_LLM, DEFER_SERVICE_RATE_LIMIT, DEFER_SERVICE_WHISPER,
+    coerce_bool_setting,
 )
+from utils.time import utc_now_iso
 from webhook_service import fire_event, EVENT_EPISODE_FAILED
 
 logger = logging.getLogger('podcast.refresh')
@@ -92,6 +94,31 @@ def notify_expired_episodes(db, expired, label='Offline queue') -> None:
                 f"{episode['podcast_slug']}:{episode['episode_id']}: {wh_err}")
 
 
+def probe_state_keys(service: str) -> tuple[str, str]:
+    """Settings keys holding the last probe verdict and time for `service`."""
+    return f'offline_probe_{service}_reachable', f'offline_probe_{service}_at'
+
+
+def _record_probe_state(db, service: str, reachable: bool) -> None:
+    """Persist one probe verdict so the status API can say what is down
+    without re-probing on the read path."""
+    reachable_key, at_key = probe_state_keys(service)
+    try:
+        db.set_setting(reachable_key, 'true' if reachable else 'false',
+                       is_default=False)
+        db.set_setting(at_key, utc_now_iso(), is_default=False)
+    except Exception as e:
+        logger.debug(f"Could not record probe state for {service}: {e}")
+
+
+def get_probe_state(db, service: str) -> tuple[bool | None, str | None]:
+    """Last probe verdict and time for `service`. Reachability is None until
+    the tick has probed once, which means "not checked yet", not "up"."""
+    reachable_key, at_key = probe_state_keys(service)
+    raw = db.get_setting(reachable_key)
+    return (None if raw is None else coerce_bool_setting(raw)), db.get_setting(at_key)
+
+
 def offline_queue_tick(db) -> None:
     """One maintenance pass: expire by TTL, probe, re-queue."""
     deferred = db.get_deferred_episodes(exclude_service=DEFER_SERVICE_RATE_LIMIT)
@@ -109,10 +136,12 @@ def offline_queue_tick(db) -> None:
         (e.get('deferred_service') or DEFER_SERVICE_LLM)
         for e in deferred if e['id'] not in expired_ids
     }
-    reachable = {
-        service for service in waiting_services
-        if _SERVICE_PROBES.get(service, lambda: False)()
-    }
+    reachable = set()
+    for service in waiting_services:
+        verdict = _SERVICE_PROBES.get(service, lambda: False)()
+        _record_probe_state(db, service, verdict)
+        if verdict:
+            reachable.add(service)
     requeued = db.requeue_deferred_episodes(reachable) if reachable else 0
 
     if expired or requeued:

@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.94.6
+  version: 2.94.11
   contact:
     name: MinusPod
   license:
@@ -744,6 +744,14 @@ paths:
                     - boolean
                     - 'null'
                   description: Per-feed opt-in for snapping cut boundaries to content-transition cues. Simple flag, not tri-state; null and false both read as off.
+                spliceVetoEnabled:
+                  type:
+                    - boolean
+                    - 'null'
+                  description: >-
+                    Per-feed splice check. Tri-state: null inherits the global
+                    splice_veto_enabled setting, true forces the check on, false lets
+                    long cuts through without splice evidence.
                 maxAdDurationOverride:
                   type:
                     - number
@@ -3458,6 +3466,12 @@ paths:
                 category:
                   type: string
                   description: Sponsor category
+                segment_category:
+                  type:
+                    - string
+                    - 'null'
+                  enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap, null]
+                  description: Segment category applied to every read naming this sponsor
       responses:
         '201':
           description: Sponsor created
@@ -3520,6 +3534,12 @@ paths:
                     type: string
                 category:
                   type: string
+                segment_category:
+                  type:
+                    - string
+                    - 'null'
+                  enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap, null]
+                  description: Segment category applied to every read naming this sponsor; null clears it
                 tags:
                   type: array
                   items:
@@ -3759,12 +3779,9 @@ paths:
               schema:
                 type: string
                 description: |
-                  Authenticated stream: `data:` frames with JSON payload:
-                  - processing: boolean
-                  - episode: object with title, slug, episodeId
-                  - stage: current processing stage
-                  - progress: percentage (0-100)
-                  - queue_depth: number of pending episodes
+                  Authenticated stream: `data:` frames carrying the same
+                  JSON as `GET /status` (the `ProcessingStatus` schema),
+                  including the `hold` block.
 
                   Unauthenticated stream: single frame
                   `event: auth-failed\ndata: {}\n\n` then close.
@@ -4659,6 +4676,25 @@ paths:
                   type: string
                   enum: [debug, info]
                   description: Minimum level kept in a run log (issue 660). Defaults to debug.
+                downloadUserAgent:
+                  type: string
+                  maxLength: 512
+                  description: >-
+                    User-Agent sent when fetching audio, artwork, and chapters. Printable
+                    ASCII on a single line. Send an empty string to restore the default.
+                feedUserAgent:
+                  type: string
+                  maxLength: 512
+                  description: >-
+                    User-Agent sent when fetching RSS feeds. Printable ASCII on a single
+                    line. Send an empty string to restore the default.
+                logDownloadQuery:
+                  type: boolean
+                  description: >-
+                    Include URL query strings in download logs. Off by default: an
+                    enclosure query string regularly carries a signed CDN token or a
+                    listener tracking id, and logs outlive both. The path and redirect
+                    chain are logged either way.
                 feedAuthEnabled:
                   type: boolean
                   description: Require the global feed auth key on all public feed and episode URLs. Enabling generates the key if absent.
@@ -9337,6 +9373,13 @@ components:
             - boolean
             - 'null'
           description: Per-feed opt-in for snapping cut boundaries to content-transition cues. null and false both read as off.
+        spliceVetoEnabled:
+          type:
+            - boolean
+            - 'null'
+          description: >-
+            Per-feed splice check. null inherits the global setting, true forces the
+            check on, false lets long cuts through without splice evidence.
         maxAdDurationOverride:
           type:
             - number
@@ -10991,6 +11034,30 @@ components:
               description: Minimum level kept in a run log (issue 660).
             isDefault:
               type: boolean
+        downloadUserAgent:
+          type: object
+          properties:
+            value:
+              type: string
+              description: User-Agent sent when fetching audio, artwork, and chapters.
+            isDefault:
+              type: boolean
+        feedUserAgent:
+          type: object
+          properties:
+            value:
+              type: string
+              description: User-Agent sent when fetching RSS feeds.
+            isDefault:
+              type: boolean
+        logDownloadQuery:
+          type: object
+          properties:
+            value:
+              type: boolean
+              description: Whether download logs include URL query strings.
+            isDefault:
+              type: boolean
         feedAuthEnabled:
           type: object
           properties:
@@ -11258,6 +11325,12 @@ components:
             episodeLogLevel:
               type: string
               enum: [debug, info]
+            downloadUserAgent:
+              type: string
+            feedUserAgent:
+              type: string
+            logDownloadQuery:
+              type: boolean
             feedAuthEnabled:
               type: boolean
             minCutConfidence:
@@ -11585,34 +11658,118 @@ components:
     ProcessingStatus:
       type: object
       properties:
-        processing:
-          type: boolean
-          description: Whether an episode is currently being processed
-        episode:
+        currentJob:
           type:
             - object
             - 'null'
+          description: The episode being processed, or null when nothing is running
           properties:
-            title:
-              type: string
             slug:
               type: string
             episodeId:
               type: string
-          description: Currently processing episode details
-        stage:
+            title:
+              type: string
+            podcastName:
+              type: string
+            stage:
+              type: string
+              description: Current processing stage (e.g. pass1:transcribing)
+            progress:
+              type: number
+              description: Progress percentage (0-100)
+            startedAt:
+              type: number
+              description: Unix timestamp the job started
+            elapsed:
+              type: number
+              description: Seconds since the job started
+        queueLength:
+          type: integer
+          description: Number of episodes waiting to be processed
+        queuedEpisodes:
+          type: array
+          items:
+            type: object
+            properties:
+              slug:
+                type: string
+              episodeId:
+                type: string
+              title:
+                type: string
+              podcastName:
+                type: string
+              queuedAt:
+                type: number
+        feedRefreshes:
+          type: array
+          items:
+            type: object
+            properties:
+              slug:
+                type: string
+              podcastName:
+                type: string
+              newEpisodes:
+                type: integer
+              startedAt:
+                type: number
+        hold:
+          $ref: '#/components/schemas/QueueHold'
+        lastUpdated:
+          type: number
+          description: Unix timestamp of the last status change
+
+    QueueHold:
+      type: object
+      description: |
+        Why the queue is not moving. Reports what the maintenance tick last
+        observed; reading it never probes a service.
+      properties:
+        queuePaused:
+          type: boolean
+          description: |
+            True only while a rate-limit hold is stopping new claims. An
+            offline wait parks specific episodes and leaves the rest of the
+            queue running, so it never sets this.
+        holdUntil:
           type:
             - string
             - 'null'
-          description: Current processing stage (e.g., transcribing, detecting_ads)
-        progress:
-          type:
-            - number
-            - 'null'
-          description: Progress percentage (0-100)
-        queue_depth:
+          format: date-time
+          description: The provider's own rate-limit reset time, or null
+        rateLimitHeld:
           type: integer
-          description: Number of episodes waiting to be processed
+          description: Episodes held by the rate-limit hold
+        offlineHeld:
+          type: integer
+          description: |
+            Every episode deferred on a service other than the rate-limit
+            hold, including any service not broken out in offlineServices.
+        offlineServices:
+          type: array
+          description: Per-service breakdown of offline-queue waits
+          items:
+            type: object
+            properties:
+              service:
+                type: string
+                enum: [llm, whisper]
+              held:
+                type: integer
+              reachable:
+                type:
+                  - boolean
+                  - 'null'
+                description: |
+                  Verdict of the last probe. Null until the tick has probed
+                  once, meaning "not checked yet" rather than "up".
+              checkedAt:
+                type:
+                  - string
+                  - 'null'
+                format: date-time
 
     ProcessingHistoryEntry:
       type: object
@@ -11700,6 +11857,15 @@ components:
             - string
             - 'null'
           description: Sponsor category
+        segment_category:
+          type:
+            - string
+            - 'null'
+          enum: [sponsor, cross_promo, self_promo, interaction, intro, outro, recap, null]
+          description: >-
+            Segment category every read naming this sponsor is filed under,
+            in detection, the pass-1 prompt hint, and learned patterns.
+            Null leaves the detector's own category in place.
         common_ctas:
           type: array
           items:

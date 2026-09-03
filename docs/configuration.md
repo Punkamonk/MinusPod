@@ -358,6 +358,22 @@ You retain everything locally. Submission is a copy, not a move.
 
 See [`patterns/README.md`](../patterns/README.md) for the technical reference (sync mechanics, file formats, tag vocabulary) and [`patterns/CONTRIBUTING.md`](../patterns/CONTRIBUTING.md) for what happens when you submit a pattern.
 
+### Splice check
+
+A long cut is held for review unless the audio carries evidence of an insertion point near its edges. The idea is that a real ad break leaves a mark. That can be a transition pair, a break stinger, a volume step, a splice event, or a region that differs between two fetches. A multi-minute cut backed only by the model reading a transcript is worth a second look before it removes audio.
+
+The test is whether the ad was joined into the audio, not who reads it. An ad recorded separately and edited in leaves an edit point and passes the check like any other. One spoken straight through in a single take does not. Every long cut on such a feed is then held, however obvious the ad.
+
+The per-feed **Splice check** setting, under Advanced on the feed's settings page, is the way out. It overrides the global either way, so a feed that can never satisfy the check stops being held by it without changing anything for your other feeds.
+
+| Setting | Effect |
+|---|---|
+| Use global | Follows the global `splice_veto_enabled` setting, on unless an operator changed it |
+| Hold cuts without splice evidence | Forces the check on for this feed |
+| Cut without splice evidence | Turns it off for this feed, so long cuts are judged on the other validation rules alone |
+
+Turning it off gives up a safety net, so it suits a feed you have already watched cut correctly. Held ads are never lost either way: they stay in the audio and wait on the episode page.
+
 ## Offline Queue
 
 If your LLM or Whisper server only runs part of the day (a desktop PC that hosts Ollama, for example), episodes that arrive while it is off normally retry a few times, trip the circuit breaker, and end up permanently failed until you reprocess them by hand. The offline queue changes that: an episode that fails because the endpoint is unreachable is parked with a "queued (offline)" status instead. Every few minutes MinusPod probes the endpoint, and once it answers again the parked episodes go back into the processing queue on their own.
@@ -385,6 +401,29 @@ The feature is off by default. Configure it in **Settings > AI & Processing > Qu
 Only a reset further out than five minutes triggers a hold. Shorter ones keep the existing in-process retry, so a single throttled window recovers without pausing the queue. The hold covers detection, review, and verification, so a throttle part-way through a run defers the whole episode rather than skipping that stage. Anything you ask for by hand carries the manual queue boost, so Play and Reprocess still run during a pause. Turning the toggle off lifts the pause and releases held episodes on the next maintenance pass, within about five minutes.
 
 Held episodes sit under their own service name, so the offline queue's endpoint probes and give-up window never touch them, and a held episode does not inherit the clock of an earlier offline deferral.
+
+## Outbound Requests
+
+MinusPod identifies itself with two User-Agent strings, and hosts treat them differently. Bot mitigation on some CDNs refuses browser identifiers below a version floor that moves as new browsers ship. A string that worked last year starts drawing a 403 on download, even though the file is there. Other feed hosts do the reverse and answer only a declared podcast client. One string cannot satisfy both, so there are two.
+
+Both ship with working defaults and are editable in **Settings > Data & Security > Outbound Requests**. A host that starts refusing yours is fixed by pasting in a new string rather than by waiting for a release.
+
+| Setting | Default | Sent when |
+|---|---|---|
+| Audio, artwork, and chapters | a current Chrome string | Downloading media, feed artwork, and upstream chapter files. |
+| RSS feeds | `PodcastAdRemover/1.0` | Fetching and validating RSS. |
+
+A value must be printable ASCII on a single line, at most 512 characters. Carriage returns and line feeds are rejected, since the value goes straight into a request header. Reset returns a field to its default.
+
+### What the download logs record
+
+Every download and availability check logs the URL it requested, including the path, followed by each redirect hop with its status code and the final URL it landed on. That is usually enough to see which file was asked for and where the host sent it.
+
+Query strings are left out. On a podcast enclosure that is where a signed CDN token or a per-listener tracking id lives, and a log outlives both. The "Log query strings on downloads" toggle in the same settings section adds them when you are debugging a refusal that depends on one. Turn it back off afterwards.
+
+### Diagnosing a refusal
+
+When the availability probe draws a 403, MinusPod probes once more with the feed User-Agent. If that string is accepted, the host is gating on the browser identifier: the episode downloads with the feed string and a warning names both strings, so the download User-Agent is the one to change. Try the User-Agent your own browser sends. If both strings draw a 403, the host is blocking regardless of identifier, which is what bot mitigation and rate limits look like. The episode then retries on the normal ladder as `CDN blocked the request (403) with both User-Agents`. A 404 also retries, since a freshly published episode can 404 briefly while its host provisions the media URL.
 
 ## Scheduled Database Backups
 

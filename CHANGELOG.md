@@ -11,17 +11,153 @@ release notes.
 
 ## [Unreleased]
 
+## [2.94.11] - 2026-09-03
+
+### Added
+
+- A sponsor can carry a segment category (Sponsors page, and
+  `segment_category` on `POST`/`PUT /api/v1/sponsors`). When set, every read
+  naming that sponsor or one of its aliases is filed under it. Detection
+  stamps it on LLM markers before the action-aware merge in both passes.
+  Pattern and fingerprint rows read it in place of their stored category. The
+  pass-1 known-sponsor hint names the sponsor with it, and a learned pattern
+  stores it. Re-categorizing a learned pattern never reached the model,
+  because auto-learned patterns contribute only their name to the hint. The
+  existing sponsor `category` field is unchanged; it holds an industry label.
+- SQLite connections log a statement that waits five seconds or longer on the
+  lock, and a write transaction held open five seconds or longer, with the
+  thread name and the statement that opened it. Two "database is locked"
+  bursts failed a dozen RSS refreshes each after the full 30 s busy timeout,
+  which means one connection held the write lock for over 40 s, and nothing
+  in the logs said which.
+
+### Fixed
+
+- The auto-process poller no longer loses 30 s at every episode handoff. A
+  finished job writes its status before its finally block drops the queue
+  lock, so the next claim landed in that gap, tripped the same-process
+  acquire rejection, and backed off 30 s. The poller now waits for the lock
+  to drop, in half-second steps up to 30 s (the database busy timeout),
+  before claiming the next row.
+- A download 403 is probed once more with the feed User-Agent before it is
+  classified. If that string is accepted, the host is gating on the browser
+  identifier: the episode downloads with the feed string and a warning names
+  both strings, so the operator knows which setting to change. If both draw a
+  403, the block does not depend on the identifier and lifts on its own, so
+  the episode retries on the normal ladder instead of failing permanently on
+  the first attempt. The failure summary line now includes the message, not
+  only the exception class.
+- Same-sponsor merging now also rejoins two detections when the speech
+  between them reads as ad copy: URLs, codes, phone numbers, or offer phrases
+  in at least half of it. A single read the model split around its own call
+  to action stayed split when the middle named no sponsor. Conversation
+  between two name-drops still keeps them apart. The "not merging" decision
+  is logged at INFO so the frequency can be measured.
+- Same-sponsor merging treats a zero-length detection consistently: it is
+  never a merge partner in either direction, and one sitting between two
+  reads no longer stops those reads from being compared. Before, an empty
+  detection as the left-hand ad still merged forward across the gap.
+- Redirect logging on downloads reports where each hop went. A relative
+  `Location` header logged as `<url>` and a scheme-relative one gained a
+  made-up `http://`. The resolved next-hop URL is logged instead.
+- The queue hold block on `/status` no longer queues every status reader
+  behind one database read. While one thread rebuilds it, or when the read
+  fails, callers get the last good block. A locked database used to stall the
+  SSE stream for the busy timeout and then report an empty hold.
+- The active job row in Settings > Processing Queue keeps a gap between the
+  truncated title and its Cancel button. On phones the title ran into the
+  button.
+- The status bar's expanded panel lists rate-limited episodes after the pause
+  has lifted but before the requeue tick, instead of a heading over an empty
+  list.
+
+## [2.94.10] - 2026-09-03
+
+### Added
+
+- The two outbound User-Agent strings are now settings, editable in
+  Settings > Data & Security > Outbound Requests and seeded by
+  `DOWNLOAD_USER_AGENT` and `FEED_USER_AGENT`. One covers audio, artwork, and
+  chapters; the other covers RSS. They are separate because hosts disagree.
+  Bot mitigation on some CDNs refuses browser identifiers below a version
+  floor that moves as new browsers ship. Some feed hosts do the reverse and
+  answer only a declared podcast client. Working around a host that starts
+  refusing ours no longer takes a new image. A value must be printable ASCII
+  on a single line, at most 512 characters, so an operator-supplied string
+  cannot inject a header.
+- `GET /api/v1/status` and the SSE status stream carry a `hold` block. It
+  reports whether a rate-limit pause is stopping new claims, the provider's
+  reset time, and how many episodes each hold is keeping. Each offline-queue
+  service also carries the verdict of the last reachability probe.
+- The status bar now appears when the queue is holding work with nothing
+  running, which previously looked identical to an idle queue. It names the
+  provider reset time for a rate-limit pause, and the unreachable service for
+  an offline wait. The two stay distinct: a rate-limit hold pauses the whole
+  queue, while an offline wait parks only the episodes waiting on that
+  service.
+- Download and availability logs record the URL path and the full redirect
+  chain, each hop with its status code and the final URL. Previously they
+  logged the host alone, so ten consecutive failures left no record of what
+  was being fetched or where the host was sending it. Query strings stay out
+  unless `LOG_DOWNLOAD_QUERY` or the matching Settings toggle is on. An
+  enclosure query string regularly carries a signed CDN token or a
+  per-listener tracking id, and a log outlives both.
+- The offline queue now records each reachability probe it already performs.
+  The status API can then say which service is down and when it was last
+  checked, without probing on the read path.
+- Splice check is overridable per feed, under Advanced on the feed's settings
+  page and as `spliceVetoEnabled` on the feed API. Null inherits the global,
+  true forces the check on, false lets long cuts through without splice
+  evidence. A feed whose ads are spoken straight through rather than joined
+  into the audio has no edit point to find, so the check holds every long cut
+  on it however obvious the ad; turning the check off for that feed alone
+  leaves every other feed's behaviour untouched.
+
 ### Changed
 
+- The default download User-Agent moves off a Chrome 120 string that hosts
+  had begun refusing.
 - The community patterns contributed before segment categories existed now
   declare `category: "sponsor"` (196 of 197 files). Installs read the category
   to decide whether a match is cut, beeped, or kept, and to filter which
   categories they accept on sync. The corpus no longer relies on the
   unset-means-sponsor fallback.
 - `patterns/CONTRIBUTING.md` documents the `category` field and its vocabulary.
+- Feed and settings help text is shorter. Several fields explained the
+  mechanism, the tradeoff, and the background where a sentence on what the
+  setting does and when to change it was enough; the detail belongs in the
+  docs. Nine help texts ran past 45 words, now two. The no-password security
+  warning keeps its length on purpose, since spelling out what an unprotected
+  instance exposes is what makes the warning act.
 
 ### Fixed
 
+- Same-sponsor merging no longer swallows the show content between two
+  mentions. Two detections naming the same sponsor within two minutes merged
+  on that alone, without checking what sat between them. On shows where the
+  host name-drops a sponsor through the episode that absorbed the
+  conversation: across 45 merges in one sample, 26% of the merged span was
+  gap rather than ad, and a 1.9s and a 2.6s detection 83s apart became one
+  88s span that was 95% talk. The gap must now be filler, measured in speech
+  seconds by the same discriminator `merge_ads_across_short_content_gaps`
+  already used, unless the gap still mentions the sponsor. Both passes read
+  one `min_content_between_ads_seconds` setting.
+- The evidence check that allows merging across a gap read the ads' own
+  boundary segments along with the gap, because the shared transcript-range
+  helper is inclusive at both ends. When both ads named the sponsor, "does
+  the gap mention the sponsor" answered yes for every gap, so the check could
+  not refuse anything. It now reads only segments lying inside the gap.
+- A zero-duration detection is no longer a merge partner. It carries no ad
+  audio, so merging with it only pushed the span end out across the gap; five
+  such merges appear in the same sample.
+- A 403 on the audio availability check now fails the episode immediately
+  instead of being retried as a transient CDN error. The check reported every
+  refusal and every not-yet-ready file under the same "CDN not ready" text, so
+  the retry classifier could not tell them apart. A refused download worked
+  through the full retry ladder against a host that answers the same way every
+  time. A 403 is now reported as `CDN refused the request (403)` and treated
+  as permanent. A 404 stays transient, since a freshly published episode can
+  404 briefly while its host provisions the media URL.
 - Benchmark corpus: two episodes were missing truth spans. One lacked its
   pre-roll sponsor read (68 seconds); the other had its opening network
   promo (76 seconds) left rejected, although the same promo is accepted
@@ -38,6 +174,11 @@ release notes.
 
 ### Security
 
+- fast-uri 3.1.5 to 3.1.7 (GHSA-5jgf-p345-68v8, GHSA-f65p-4m7j-42xc,
+  GHSA-fph4-wmhf-6fwf, GHSA-jqff-g426-hqxp). Four advisories covering host
+  confusion and server-side request forgery, published after the last release
+  and failing the CI audit gate. Lockfile only; fast-uri is a build-time
+  transitive dependency of workbox through ajv and never reaches the browser.
 - browserslist 4.28.2 to 4.28.8, with its data dependencies
   (GHSA-c83g-rgw3-j3cx, GHSA-73wf-gq98-2v4g). Both advisories cover every
   version up to 4.28.6, and they were failing the CI audit gate. Lockfile

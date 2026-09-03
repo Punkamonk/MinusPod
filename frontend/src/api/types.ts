@@ -92,6 +92,7 @@ export interface Feed {
   cueSnapLeadOverride?: number | null;
   cueSnapLagOverride?: number | null;
   silenceSnapEnabled?: boolean | null;
+  spliceVetoEnabled?: boolean | null;
   transitionSnapEnabled?: boolean | null;
   maxAdDurationOverride?: number | null;
   maxAdDurationRejectOverride?: number | null;
@@ -502,6 +503,9 @@ export interface Settings {
   lowAdYieldAction: SettingValue;
   episodeLogRetentionDays: SettingValueNumber;
   episodeLogLevel: SettingValue;
+  downloadUserAgent: SettingValue;
+  feedUserAgent: SettingValue;
+  logDownloadQuery: SettingValueBoolean;
   feedAuthEnabled: SettingValueBoolean;
   feedAuthKey: string | null;
   // User agents served original audio instead of triggering JIT processing.
@@ -713,6 +717,9 @@ export interface UpdateSettingsPayload {
   lowAdYieldAction?: LowAdYieldAction;
   episodeLogRetentionDays?: number;
   episodeLogLevel?: EpisodeLogLevel;
+  downloadUserAgent?: string;
+  feedUserAgent?: string;
+  logDownloadQuery?: boolean;
   feedAuthEnabled?: boolean;
   jitBlockedUserAgents?: string[];
   audioBitrate?: string;
@@ -902,6 +909,7 @@ export interface Sponsor {
   name: string;
   aliases: string[];
   category: string | null;
+  segment_category: SegmentCategory | null;
   common_ctas: string[];
   tags: string[];
   is_active: boolean;

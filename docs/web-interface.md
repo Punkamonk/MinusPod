@@ -40,7 +40,8 @@ The server includes a web-based management UI at `/ui/`:
 - Offline queue (Settings > Queue Control): optionally hold episodes while a self-hosted LLM or Whisper endpoint is down and process them automatically when it returns, with a configurable give-up window
 - Rate-limit hold (Settings > Queue Control): optionally pause the queue while the LLM provider reports a 429 with a reset time, instead of failing episodes, with its own give-up window
 - Processing Queue panel (Settings): the waiting list is paginated, and each row has a priority field with -/+ buttons that can raise or lower its place in the queue
-- Real-time status bar showing processing progress across all pages
+- Real-time status bar showing processing progress across all pages. It also appears when the queue is holding work with nothing running, naming the provider reset time for a rate-limit pause, or the service that is down for an offline wait
+- Outbound Requests (Settings > Data & Security): the User-Agent MinusPod sends when it fetches feeds, audio, and artwork, editable per string with a Reset back to the default, plus a toggle for whether download logs include URL query strings
 - OPML export with original or ad-free (modified) feed URLs
 - Optional cover-art badge that marks the filtered feed (Settings > Cover Art), with a Refresh all artwork button
 - Global Defaults group in settings (Auto-Process, Max Feed Episodes, Only Expose Processed) that every feed inherits, with per-feed overrides on each feed's settings page; Queue priority boosts live in the Queue Control group
@@ -58,6 +59,8 @@ Titles are capped at 500 characters and collapsed to one line, so a rename or a 
 ### Sponsors and Normalizations
 
 The Sponsors page lists known sponsors, each with its linked ad-pattern count, created date, last-matched date, and tags. You can add and edit a sponsor's name, aliases, category, and tags, toggle it active or inactive, filter by tag, search by name, and reveal inactive sponsors.
+
+A sponsor can also carry a segment category. When set, every read that names the sponsor is filed under that category, whatever the detector called it. The marker takes it before the per-category action is applied, existing patterns for the sponsor show and match with it, the pass-1 prompt hint states it, and a pattern learned from a cut stores it. Use it for a host's own product that the model keeps labeling as a paid sponsor: set the sponsor to Self-promo once instead of re-categorizing each learned pattern.
 
 Deleting a sponsor is permanent. Ad patterns linked to it are not deleted: their sponsor link is cleared (unlinked) so no pattern data is lost. The confirmation dialog shows how many patterns will be unlinked first.
 
