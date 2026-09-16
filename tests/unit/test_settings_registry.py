@@ -190,6 +190,7 @@ EXPECTED_AD_RESET_KEYS = {
     'learning_min_pattern_duration', 'learning_max_pattern_duration',
     'differential_measured_corr_max', 'differential_hold_min_seconds',
     'dai_differential_overrides_keep',
+    'ad_detection_exclude_start_seconds',
 }
 
 # Keys reset_setting() must refuse (return False). Membership captured from
@@ -332,6 +333,7 @@ class TestResetSetting:
             'whisper_api_model': 'whisper-1',
             'vad_gap_mid_min_seconds': '8.0',
             'min_content_between_ads_seconds': '12.0',
+            'ad_detection_exclude_start_seconds': '0',
             'audio_cue_freq_min_hz': '1500',
             'audio_cue_pair_orient_window_seconds': '20.0',
             'silence_snap_noise_db': '-50.0',
@@ -405,6 +407,7 @@ class TestGetDefaults:
             'vadGapDetectionEnabled': True,
             'vadGapMidMinSeconds': 8.0,
             'minContentBetweenAdsSeconds': 12.0,
+            'adDetectionExcludeStartSeconds': 0.0,
             'audioCueFreqMinHz': 1500,
             'audioCueProminenceDb': 9.0,
             'silenceSnapNoiseDb': -50.0,
@@ -474,11 +477,12 @@ class TestGetDefaults:
         # whisperPoolMaxRequests + whisperPoolMaxEpisodes after that (106 -> 109),
         # then daiDifferentialOverridesKeep (109 -> 110),
         # then the seven adChapter* keys (110 -> 117).
+        # adDetectionExcludeStartSeconds added after that (117 -> 118).
         payload_keys = {
             spec.payload_key for spec in SETTINGS_REGISTRY.values()
             if spec.payload_key
         }
-        assert len(payload_keys) == 117
+        assert len(payload_keys) == 118
         assert 'audioCuePairOrientWindowSeconds' not in payload_keys
         assert 'audioCuePairMaxBreakFraction' in payload_keys
 
