@@ -1,11 +1,12 @@
 """Podcast CRUD mixin for MinusPod database."""
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 
 from config import (coerce_bool_setting, resolve_ad_chapter_categories_map,
                     resolve_segment_category_actions_map)
 from utils.constants import EpisodeStatus
-from utils.time import utc_now_iso
+from utils.time import ISO_FORMAT, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,56 @@ class PodcastMixin:
         ).fetchone()
         return row['last_checked_at'] if row else None
 
+    def get_due_feed_slugs(self, interval_seconds: float, limit: int) -> list[str]:
+        """Subscribed feeds not attempted within interval_seconds, oldest
+        attempt first, capped at limit. Keyed off last_refresh_attempt_at (not
+        last_checked_at) so a failing feed, which records no success, still
+        retries once per interval instead of monopolizing every tick. Never-
+        attempted feeds (NULL) sort first. Local and recents feeds are not
+        fetched from upstream, so they are excluded. The timestamp is a fixed-
+        width UTC ISO string, so the string compare is chronological."""
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(seconds=interval_seconds)).strftime(ISO_FORMAT)
+        rows = self.get_connection().execute(
+            """SELECT slug FROM podcasts
+               WHERE feed_type NOT IN ('local', 'recents')
+                 AND source_url IS NOT NULL AND source_url != ''
+                 AND (last_refresh_attempt_at IS NULL OR last_refresh_attempt_at < ?)
+               ORDER BY last_refresh_attempt_at ASC
+               LIMIT ?""",
+            (cutoff, limit),
+        ).fetchall()
+        return [row['slug'] for row in rows]
+
+    def count_subscribed_feeds(self) -> int:
+        """Number of upstream-fetched feeds, used to size the staggered refresh
+        batch so the whole set is covered within one interval."""
+        return self.get_connection().execute(
+            "SELECT COUNT(*) FROM podcasts "
+            "WHERE feed_type NOT IN ('local', 'recents') "
+            "AND source_url IS NOT NULL AND source_url != ''"
+        ).fetchone()[0]
+
+    def get_feeds_min_last_checked_at(self) -> str | None:
+        """Oldest successful refresh across subscribed feeds that have refreshed
+        at least once, or None when none have. Backs the dashboard's 'all feeds
+        fresh as of T' indicator. A feed that succeeded before but is now failing
+        keeps its old timestamp and holds this back (honest staleness); a feed
+        that never succeeded is ignored rather than pinning it to empty."""
+        return self.get_connection().execute(
+            "SELECT MIN(last_checked_at) FROM podcasts "
+            "WHERE feed_type NOT IN ('local', 'recents') AND last_checked_at IS NOT NULL"
+        ).fetchone()[0]
+
+    def get_feeds_last_successful_refresh_at(self) -> str | None:
+        """Most recent successful refresh across subscribed feeds, for the
+        health panel's 'is refresh working at all' signal. A max, so one stale
+        feed cannot blank it."""
+        return self.get_connection().execute(
+            "SELECT MAX(last_checked_at) FROM podcasts "
+            "WHERE feed_type NOT IN ('local', 'recents')"
+        ).fetchone()[0]
+
     def get_podcast_slug(self, podcast_id: int) -> str | None:
         """Slug for a podcast id -- cheap single-column lookup."""
         conn = self.get_connection()
@@ -295,7 +346,8 @@ class PodcastMixin:
         for key, value in kwargs.items():
             if key in (
                 'title', 'description', 'artwork_url', 'artwork_cached',
-                'last_checked_at', 'source_url', 'network_id', 'dai_platform',
+                'last_checked_at', 'last_refresh_attempt_at',
+                'source_url', 'network_id', 'dai_platform',
                 'network_id_override', 'audio_analysis_override', 'auto_process_override',
                 'language_override', 'title_override', 'detection_notes', 'detection_mode',
                 'chapters_mode', 'chapters_in_notes',

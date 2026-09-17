@@ -9,6 +9,22 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
+## [2.97.6] - 2026-09-17
+
+### Fixed
+
+- The low-ad-yield action also runs when a run ends through the pass-2 auto-approve recut. That exit returned before the yield check, so a run that auto-approved a corroborated hold never queued its rerun, however little it removed. One such run removed 121 s against a 563 s feed average and was skipped.
+- A hold placed because the reviewer's trim disagreed with a measured member (`reviewer_boundary_conflict`) is now auto-approved when pass 2 independently re-detects the span, the same as the other corroborated holds. Pass 2 had re-found two such spans at 0.98 and 0.9 confidence and dropped both as overlapping a held span, so the episode shipped with 2 of its 4 ads still in it. Only covering the held span corroborates this reason: the trim the hold recorded is the one that crossed the measured member, so a pass-2 ad agreeing with that trim does not release the hold.
+- A count that opens an ad reason ("Two consecutive cross-promotion ads") is no longer taken as the sponsor. One such reason created two patterns for a sponsor named "Two".
+- On the episode page the appended chapter list is rendered as its own block below the description. The blank-line join between the two never showed on the page: the description renderer treats whitespace between block tags as insignificant and collapsed it to a single line break.
+- Word timestamps from an OpenAI-compatible transcription server are read again. The verbose_json spec returns them in a top-level `words` array, but the remote parser only looked for them nested inside each segment, so a spec-compliant server (OpenVINO Model Server, OpenAI itself) returned a full transcript with the words dropped. Boundary refinement was then skipped with a "no word timestamps" warning. The words are now folded into the segment covering each one. The in-process faster-whisper path, which already nests them, is unchanged.
+
+### Changed
+
+- Feed refreshes are staggered across the interval instead of refreshing every feed at once. The scheduler wakes on a short tick and refreshes only the feeds due that tick, oldest attempt first, sized so the whole set is covered once per interval. The old whole-corpus sweep produced a burst of concurrent writes that queued behind each other and, during a run, made the periodic search index rebuild wait out its lock timeout and fail. Due selection is keyed off the last refresh attempt, so a feed that keeps failing retries once per interval like any other rather than being tried every tick. Force Refresh All still refreshes every feed at once. The dashboard "all feeds fresh as of" time is now the oldest successful per-feed refresh, computed on read; a feed that has never succeeded is ignored rather than blanking it, and one that stopped refreshing holds it back to show the staleness.
+- The search index rebuild retries its final table swap on a lost write lock instead of discarding the whole rebuild. The corpus is already staged, so a busy database costs a short wait, not a full re-index.
+- Dependency updates: python-slugify 8.0.4 to 9.0.0 (#744), react and react-dom 19.2.8 to 19.3.0 with matching @types (#738), and soupsieve 2.8.4 to 2.9 to clear CVE-2026-85999 and CVE-2026-86000. Slug output is unchanged across the python-slugify bump.
+
 ## [2.97.4] - 2026-09-15
 
 ### Fixed
