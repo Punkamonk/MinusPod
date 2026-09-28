@@ -9,6 +9,12 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
+## [Unreleased]
+
+### Fixed
+
+- Ad validation no longer auto-rejects ads whose reason contains a word ending in "no" before "ad" or "sponsor" (for example "Casino ad" read as "no ad").
+
 ## [2.97.15] - 2026-09-22
 
 ### Fixed
