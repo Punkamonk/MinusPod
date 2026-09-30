@@ -282,10 +282,11 @@ def test_shifted_identical_block_recovered_by_widened_reprobe(monkeypatch):
     # by the chain and probed with the neighbor offset 0. The true offset
     # (+2.5s) lies outside the base +-2s search window but inside the
     # doubled +-4s retry window: the drift re-probe must recover C as
-    # identical instead of scoring it different.
+    # identical instead of scoring it different. A run-only block E keeps C
+    # off the file end, where the end alignment alone would find it.
     seg = _blocks([('a', 8, 11, 220.0), ('c', 8, 12, 440.0),
-                   ('pad', 2.5, 77, None)])
-    run_pcm, run_marks = _assemble([seg['a'], ('sil', 0.4), seg['c']])
+                   ('pad', 2.5, 77, None), ('e', 8, 13, None)])
+    run_pcm, run_marks = _assemble([seg['a'], ('sil', 0.4), seg['c'], ('sil', 0.4), seg['e']])
     ref_pcm, ref_marks = _assemble(
         [seg['a'], ('sil', 0.4), np.concatenate([seg['pad'], seg['c']])])
 
@@ -301,14 +302,9 @@ def test_shifted_identical_block_recovered_by_widened_reprobe(monkeypatch):
 
     # The widened retry actually ran.
     assert df.XCORR_SEARCH_S * 2 in searches
-    c_regions = [r for r in result['regions']
-                 if r['start_s'] <= 8.5 <= r['end_s'] or r['start_s'] >= 8.0]
-    assert result['status'] == 'no_differential'
-    assert all(r['kind'] == 'identical' for r in result['regions'])
-    assert c_regions
-    tail = result['regions'][-1]
-    assert tail['kind'] == 'identical'
-    assert tail['corr'] >= df.XCORR_MIN_CORR
+    c_region = next(r for r in result['regions'] if r['start_s'] <= 12.0 <= r['end_s'])
+    assert c_region['kind'] == 'identical'
+    assert c_region['corr'] >= df.XCORR_MIN_CORR
 
 
 def test_unprobeable_sliver_yields_unknown():
@@ -402,3 +398,133 @@ def test_matched_block_low_corr_is_not_retried(monkeypatch):
     diffs = [r for r in result['regions'] if r['kind'] == 'differential']
     assert len(diffs) == 1
     assert diffs[0]['corr'] == 0.2
+
+
+# --- Their-copy insertions: unmatched blocks probed at both neighbours ------
+
+def _insertion_segments():
+    return _blocks([('a', 6, 31, 220.0), ('b', 9, 32, 330.0),
+                    ('c', 12, 33, 440.0), ('d', 7, 34, 550.0),
+                    ('e', 10, 35, 660.0), ('ad', 20, 36, None),
+                    ('ours', 11, 37, None), ('fill', 14, 38, None)])
+
+
+def _their_insertion_pair():
+    """Refetch glues a 20s ad onto the head of C, so C is chain-unmatched."""
+    seg = _insertion_segments()
+    sil = ('sil', 0.4)
+    run_pcm, run_marks = _assemble(
+        [seg['a'], sil, seg['b'], sil, seg['c'], sil, seg['d'], sil, seg['e']])
+    ref_pcm, ref_marks = _assemble(
+        [seg['a'], sil, seg['b'], sil, np.concatenate([seg['ad'], seg['c']]),
+         sil, seg['d'], sil, seg['e']])
+    return run_pcm, run_marks, ref_pcm, ref_marks
+
+
+def test_their_insertion_yields_no_differential_regions():
+    run_pcm, run_marks, ref_pcm, ref_marks = _their_insertion_pair()
+
+    result = df._align_and_diff_pcm(run_pcm, ref_pcm, run_marks, ref_marks)
+
+    assert result['status'] == 'no_differential'
+    assert all(r['kind'] == 'identical' for r in result['regions'])
+
+
+def test_their_insertion_with_straddling_anchors_stays_identical():
+    # Interpolating between anchors either side of the insertion gives a ramp
+    # (about +7.5s at C) where the true offset steps to +20s.
+    run_pcm, run_marks, ref_pcm, ref_marks = _their_insertion_pair()
+
+    result = df._align_and_diff_pcm(run_pcm, ref_pcm, run_marks, ref_marks,
+                                    anchor_pairs=[(1.0, 1.0), (40.0, 60.0)])
+
+    assert result['status'] == 'no_differential'
+    assert all(r['kind'] == 'identical' for r in result['regions'])
+
+
+def test_our_unmatched_ad_stays_differential_beside_their_insertion():
+    # Our 11s ad sits where the refetch has a 14s fill; the refetch also glues
+    # a 20s ad onto C. Only our ad block is differential.
+    seg = _insertion_segments()
+    sil = ('sil', 0.4)
+    run_pcm, run_marks = _assemble(
+        [seg['a'], sil, seg['b'], sil, seg['ours'], sil, seg['c'], sil,
+         seg['d'], sil, seg['e']])
+    ref_pcm, ref_marks = _assemble(
+        [seg['a'], sil, seg['b'], sil, seg['fill'], sil,
+         np.concatenate([seg['ad'], seg['c']]), sil, seg['d'], sil, seg['e']])
+
+    result = df._align_and_diff_pcm(run_pcm, ref_pcm, run_marks, ref_marks)
+
+    assert result['status'] == 'ok'
+    diffs = [r for r in result['regions'] if r['kind'] == 'differential']
+    assert len(diffs) == 1
+    # Our ad spans silence midpoints 15.6s-27.0s.
+    assert abs(diffs[0]['start_s'] - 15.6) <= 0.1
+    assert abs(diffs[0]['end_s'] - 27.0) <= 0.1
+    assert diffs[0]['corr'] < df.XCORR_MIN_CORR
+
+
+# --- Run-only pre/post-rolls: probe windows stay inside the refetch -------
+
+def _roll_segments():
+    return _blocks([('a', 9, 41, 220.0), ('b', 10, 42, 330.0), ('c', 11, 43, 440.0),
+                    ('roll', 12, 44, None)])
+
+
+def test_head_probe_far_before_the_refetch_start_does_not_wrap():
+    # Pre-roll only in the run file; the refetch plays the same creative mid-file.
+    seg = _roll_segments()
+    sil = ('sil', 0.4)
+    run_pcm, _ = _assemble([seg['roll'], sil, seg['a'], sil, seg['b'], sil, seg['c']])
+    ref_pcm, _ = _assemble([seg['a'], sil, seg['roll'], sil, seg['b'], sil, seg['c']])
+
+    kind, _corr = df._probe_block(run_pcm, ref_pcm, 0.0, 12.2, [-30.0])
+
+    assert kind != 'identical'
+
+
+def _roll_diff(run_parts, ref_parts):
+    run_pcm, run_marks = _assemble(run_parts)
+    ref_pcm, ref_marks = _assemble(ref_parts)
+    return df._align_and_diff_pcm(run_pcm, ref_pcm, run_marks, ref_marks)
+
+
+def test_run_only_preroll_is_differential():
+    seg = _roll_segments()
+    sil = ('sil', 0.4)
+    result = _roll_diff([seg['roll'], sil, seg['a'], sil, seg['b'], sil, seg['c']],
+                        [seg['a'], sil, seg['b'], sil, seg['c']])
+
+    diffs = [r for r in result['regions'] if r['kind'] == 'differential']
+    assert [(r['start_s'], round(r['end_s'], 1)) for r in diffs] == [(0.0, 12.2)]
+
+
+def test_run_only_postroll_is_differential():
+    seg = _roll_segments()
+    sil = ('sil', 0.4)
+    result = _roll_diff([seg['a'], sil, seg['b'], sil, seg['c'], sil, seg['roll']],
+                        [seg['a'], sil, seg['b'], sil, seg['c']])
+
+    diffs = [r for r in result['regions'] if r['kind'] == 'differential']
+    assert [(round(r['start_s'], 1), round(r['end_s'], 1)) for r in diffs] == [(31.0, 43.2)]
+
+
+def test_drift_retry_reprobes_the_best_candidate(monkeypatch):
+    # The next-neighbour offset wins the first round but is stale; its doubled window finds the match.
+    calls = []
+
+    def correlation(run_pcm, ref_pcm, run_t, offset, *, ref_s, search_s=df.XCORR_SEARCH_S,
+                    prepared=None):
+        calls.append((offset, search_s))
+        if search_s > df.XCORR_SEARCH_S:
+            return 0.9 if offset == 12.0 else 0.3
+        return {-4.0: 0.2, 12.0: 0.5}[offset]
+
+    monkeypatch.setattr(df, '_block_correlation', correlation)
+    monkeypatch.setattr(df, '_prepare_template', lambda *a, **k: None)
+    kind, corr = df._probe_block(np.zeros(1), np.zeros(1), 0.0, 20.0, [-4.0, 12.0],
+                                 allow_retry=True)
+
+    assert calls[-1] == (12.0, df.XCORR_SEARCH_S * 2)
+    assert (kind, corr) == ('identical', 0.9)

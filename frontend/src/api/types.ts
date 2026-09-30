@@ -406,6 +406,8 @@ export interface ProcessingRunStats {
   cueOnly?: boolean;
   // Cue-only mode with transcription skipped: no transcript, chapters, or subtitles.
   transcriptionSkipped?: boolean;
+  // Explicitly records that normalization was disabled for this run.
+  normalizationSkipped?: boolean;
   downloadedDuration?: number | null;
   transcriptSegments?: number;
   // failureClasses is absent when no window was lost; see CoverageGap for the
@@ -421,7 +423,10 @@ export interface ProcessingRunStats {
   detected?: number;
   markers?: { cut: number; held: number; notCut: number } | null;
   verificationAdsCut?: number | null;
+  // Net: original minus output duration, so inserted beeps count against it.
   secondsRemoved?: number | null;
+  sourceSecondsRemoved?: number | null;
+  replacementSecondsAdded?: number | null;
   timings?: ProcessingRunTimings | null;
   // Present only when this run retried a rejected thinking setting with
   // pass defaults. The backend deliberately excludes the provider error.
@@ -538,6 +543,8 @@ export interface EpisodeCorrection {
   original_bounds: { start: number; end: number };
   corrected_bounds?: { start: number; end: number };
   created_at: string;
+  // Absent from builds before the origin column existed.
+  origin?: 'user' | 'auto_pass2';
 }
 
 export interface AdSegment {
@@ -555,11 +562,17 @@ export interface AdSegment {
   silence_snap?: { start?: Record<string, unknown>; end?: Record<string, unknown> };
   validation?: AdValidation;
   // Ad reviewer (issue #197) -- populated only when the reviewer ran on this ad.
-  reviewer_verdict?: 'confirmed' | 'adjust' | 'reject' | 'resurrect' | 'failure';
+  reviewer_verdict?: 'confirmed' | 'adjust' | 'reject' | 'resurrect' | 'failure' | 'inconclusive';
   reviewer_original_start?: number;
   reviewer_original_end?: number;
   reviewer_reasoning?: string;
   reviewer_confidence?: number;
+  // Why a pass-2 review inside this hold did not release it; the hold stays pending.
+  pass2_hold_review?: {
+    span: [number, number];
+    verdict: NonNullable<AdSegment['reviewer_verdict']>;
+    reason: string;
+  };
   reviewer_model?: string;
   source?: 'reviewer' | 'validator';
   // Phase C held-for-review fields.
@@ -570,13 +583,19 @@ export interface AdSegment {
     | 'uncorroborated_tail'
     | 'reviewer_contradiction'
     | 'reviewer_boundary_conflict'
+    | 'reviewer_inconclusive_bounds'
+    | 'reviewer_failed'
+    | 'estimated_pattern_bounds'
     | 'reviewer_reject_conflict'
     | 'no_splice_evidence'
     | 'verification_miss'
+    | 'verification_kept_conflict'
     | 'differential_uncorroborated'
     | 'large_vad_gap_extension'
     | 'cue_template_unproven'
     | 'cue_low_confidence';
+  // Detected span this fragment was carved from when the render removed only part of it.
+  carved_from?: { start: number; end: number };
   // Set when a confirm correction matched this held marker (issue #509);
   // approved holds wait for a recut to apply.
   approved?: boolean;
@@ -1260,6 +1279,8 @@ export interface SystemStatus {
     backend: 'local' | 'openai-api';
     // Local backend only; the remote one reports probe state instead.
     device?: string | null;
+    // Local backend only: set when the local Whisper packages are missing.
+    reason?: string;
     lastOutcome?: {
       status?: string;
       backend?: string;
@@ -1483,6 +1504,7 @@ export interface ReviewerStats {
     adjust: number;
     reject: number;
     resurrect: number;
+    inconclusive: number;
     failure: number;
   };
   pass1AdjustmentCount: number;
@@ -1595,7 +1617,7 @@ export interface SpendAttempt {
   credentialSlot: string;
   model: string;
   returnedModel: string | null;
-  status: string;
+  status: 'success' | 'failure' | 'inconclusive';
   inputTokens: number | null;
   outputTokens: number | null;
   costUsd: string | null;

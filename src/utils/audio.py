@@ -3,10 +3,12 @@
 Provides shared audio file operations used across multiple modules.
 """
 
+import json
 import logging
 import os
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
@@ -38,6 +40,46 @@ def get_audio_codec(audio_path: str) -> str | None:
     except Exception as e:
         logger.warning(f"Codec query failed for {audio_path}: {e}")
     return None
+
+
+@dataclass(frozen=True)
+class RenderInput:
+    """What a render needs from its input file, read by one ffprobe call."""
+    duration: float | None
+    audio_format: tuple[int, int, str] | None  # (sample_rate, channels, channel_layout)
+    chapters: list[dict]  # raw ffprobe chapter entries
+
+
+def probe_render_input(audio_path: str) -> RenderInput | None:
+    """Duration, first audio stream format and chapters of a file, or None when ffprobe fails."""
+    cmd = [
+        'ffprobe', *SAFE_MEDIA_PROBE_ARGS, '-v', 'error',
+        '-select_streams', 'a:0',
+        '-show_entries', 'format=duration:stream=sample_rate,channels,channel_layout',
+        '-show_chapters', '-of', 'json',
+        audio_path
+    ]
+    try:
+        result = tracked_run(cmd, capture_output=True, timeout=FFPROBE_TIMEOUT)
+        if result.returncode != 0:
+            logger.warning(f"ffprobe failed for {audio_path}: "
+                           f"{result.stderr.decode('utf-8', errors='replace') or 'no output'}")
+            return None
+        info = json.loads(result.stdout.decode('utf-8', errors='replace'))
+    except Exception as e:
+        logger.warning(f"Render input probe failed for {audio_path}: {e}")
+        return None
+    try:
+        duration = float(info['format']['duration'])
+    except (KeyError, TypeError, ValueError):
+        duration = None
+    try:
+        stream = info['streams'][0]
+        audio_format = (int(stream['sample_rate']), int(stream['channels']),
+                        stream.get('channel_layout') or '')
+    except (KeyError, IndexError, TypeError, ValueError):
+        audio_format = None
+    return RenderInput(duration, audio_format, info.get('chapters') or [])
 
 
 def get_audio_duration(audio_path: str) -> float | None:

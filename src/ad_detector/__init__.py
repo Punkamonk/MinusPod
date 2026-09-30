@@ -8,6 +8,7 @@ Package layout:
 """
 import logging
 import random
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from llm_client import (
 )
 from llm_route import client_for_route
 from run_context import route_for_phase, run_in_worker_thread
+from sponsor_context import description_sponsor_re
 from sponsor_normalize import segment_category_for
 from utils.language import get_pattern_language
 from utils.llm_call import (
@@ -34,14 +36,20 @@ from utils.llm_call import (
 )
 from utils.markers import (
     DAI_CORE_SPANS,
+    DAI_PROBE_SPANS,
+    dai_probe_window,
     estimated_text_bounds,
+    finite_number,
+    inherit_edge,
+    invalidate_word_timed_edges,
+    learning_bounds,
     note_fold,
 )
 from utils.prompt import (
     format_sponsor_block, render_prompt, apply_override,
     scrub_description, strip_comments_from_prompt
 )
-from utils.text import truncate
+from utils.text import truncate, word_boundary_re
 from utils.time import overlap_ratio, ranges_overlap
 
 from config import (
@@ -87,7 +95,7 @@ from text_pattern_matcher import is_defined_pattern
 from text_recurrence import format_recurrence_hint
 from utils.constants import (
     INVALID_SPONSOR_VALUES,
-    KNOWN_SHORT_BRANDS, canonical_sponsor,
+    KNOWN_SHORT_BRANDS, canonical_sponsor, is_brand_token,
     LEARNING_MIN_CONFIDENCE, LEARNING_MIN_CONFIDENCE_LONG,
     LEARNING_LONG_DURATION_THRESHOLD,
     mentions_advertising,
@@ -104,6 +112,11 @@ from .boundaries import (
     AD_START_PHRASES,
     AD_END_PHRASES,
     _NON_BRAND_WORDS,
+    timed_line_segments,
+    _quote_edge_valid,
+    align_ad_quote_bounds,
+    estimated_pattern_replaced_by_precise_ad,
+    invalidate_quote_alignment,
     refine_ad_boundaries,
     snap_early_ads_to_zero,
     extend_ad_boundaries_by_content,
@@ -114,6 +127,8 @@ from .boundaries import (
     validate_ad_timestamps,
     _unpack_region,
     get_uncovered_portions,
+    record_absorbed_detection,
+    region_matches_marker,
     removal_coverage_regions,
     tighten_pattern_regions,
     merge_same_sponsor_ads,
@@ -124,6 +139,7 @@ from .boundaries import (
     resolve_category_action,
 )
 from .prompts import (
+    EpisodeSponsors,
     USER_PROMPT_TEMPLATE,
     create_windows,
     format_window_prompt,
@@ -140,6 +156,7 @@ from .prompts import (
     log_assembled_system_prompt,
     parse_category_repair_response,
     SEGMENT_ID_SYSTEM_SECTION,
+    AD_QUOTE_ANCHOR_SECTION,
 )
 # Source the JSON-array scanner directly from utils.llm_response instead of
 # laundering it through prompts.py; re-exported below for backward-compat
@@ -429,7 +446,10 @@ def _clamp_ad_to_window(ad, seen_start, seen_end):
     end = min(float(ad['end']), seen_end)
     if start == ad['start'] and end == ad['end']:
         return ad
-    return dict(ad, start=start, end=end)
+    clamped = dict(ad, start=start, end=end)
+    invalidate_quote_alignment(clamped)
+    invalidate_word_timed_edges(clamped)
+    return clamped
 
 
 def dai_differential_ads(dai_differential, fp_pairs, corroborating_spans=None, *,
@@ -491,12 +511,15 @@ def dai_differential_ads(dai_differential, fp_pairs, corroborating_spans=None, *
     # keeps spans separate.
     spans = []
     for c_start, c_end in candidates:
+        p_start, p_end = dai_probe_window(c_start, c_end)
+        probe = {'start': p_start, 'end': p_end}
         if spans and abs(c_start - spans[-1][1]) <= 0.05:
             spans[-1][1] = c_end
+            spans[-1][2].append(probe)
         else:
-            spans.append([c_start, c_end])
+            spans.append([c_start, c_end, [probe]])
 
-    for start, end in spans:
+    for start, end, probes in spans:
         if any(overlap_ratio(fp_start, fp_end, start, end) > 0.5
                for fp_start, fp_end in fp_pairs):
             continue
@@ -516,6 +539,7 @@ def dai_differential_ads(dai_differential, fp_pairs, corroborating_spans=None, *
             # start/end with coarse LLM spans, but the reviewer must not trim
             # away audio that cross-fetch measured as inserted.
             DAI_CORE_SPANS: [{'start': start, 'end': end}],
+            DAI_PROBE_SPANS: probes,
         }
         if stage_overlap:
             ad['reason'] = ('Dynamically inserted: audio differs across '
@@ -620,6 +644,20 @@ def _pattern_match_evidence(match, kind: str) -> str:
     if matched:
         return f'{kind} "{truncate(matched, PATTERN_EVIDENCE_MAX_CHARS)}" {pct}'
     return f'{kind} {pct}'
+
+
+_SPONSOR_MATCH_STAGES = ('fingerprint', 'text_pattern')
+
+
+def _known_sponsor_matchers(ads: list[dict],
+                            episode_description: str | None) -> EpisodeSponsors | None:
+    """Matchers for sponsors heard in ads and named in the description, or None."""
+    audio_re = word_boundary_re(
+        {ad['sponsor'] for ad in ads if ad.get('sponsor') and is_brand_token(ad['sponsor'])})
+    summary_re = description_sponsor_re(episode_description)
+    if audio_re is None and summary_re is None:
+        return None
+    return EpisodeSponsors(audio_re, summary_re)
 
 
 def _phase_for_pass(pass_name: str) -> str:
@@ -979,7 +1017,32 @@ class AdDetector:
         if addressing_mode == 'segment_ids':
             return [f"[{seg['sid']}] {seg['text']}" for seg in window_segments]
         return [f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}"
-                for seg in window_segments]
+                for seg in timed_line_segments(window_segments)]
+
+    @staticmethod
+    def _align_numeric_edges_to_word_lines(ads, window_segments):
+        aligned = []
+        for ad in ads:
+            updated = ad.copy()
+            for edge in ('start', 'end'):
+                value = finite_number(updated.get(edge))
+                if value is None:
+                    continue
+                matches = [line[edge] for line in window_segments
+                           if line.get('word_timed_line')
+                           and finite_number(line.get(edge)) is not None
+                           and (value == line[edge]
+                                or value == float(f"{line[edge]:.1f}"))]
+                if len(matches) == 1:
+                    updated[edge] = matches[0]
+                    updated[f'word_timed_{edge}'] = matches[0]
+            if updated['end'] <= updated['start']:
+                aligned.append(ad)
+                continue
+            invalidate_quote_alignment(updated)
+            invalidate_word_timed_edges(updated)
+            aligned.append(updated)
+        return aligned
 
     def _build_detection_system_prompt(self, slug: str, addressing_mode: str = 'timestamps') -> str:
         """Compose the system prompt for detection window calls.
@@ -996,7 +1059,7 @@ class AdDetector:
             prompt = f"{prompt}\n\n{SHOW_SEGMENTS_PROMPT_SECTION}"
         if addressing_mode == 'segment_ids':
             prompt = f"{prompt}{SEGMENT_ID_SYSTEM_SECTION}"
-        return prompt
+        return f"{prompt}{AD_QUOTE_ANCHOR_SECTION}"
 
     _HINT_TIER1_CAP = 12
     _HINT_SNIPPET_CHARS = 90
@@ -1112,7 +1175,8 @@ class AdDetector:
                                 slug, episode_id, pass_name,
                                 window_label_prefix, validate_timestamps,
                                 recurrence_spans=None,
-                                addressing_mode='timestamps'):
+                                addressing_mode='timestamps',
+                                episode_sponsors=None):
         """Run one window through prompt-build + LLM call + parse + filter.
 
         Returns a ``WindowResult``. Thread-safe: writes nothing to shared
@@ -1217,7 +1281,8 @@ class AdDetector:
             if used_ids:
                 window_ads = resolve_segment_id_ads(
                     id_ads, window_segments, slug, episode_id,
-                    sponsor_service=self.sponsor_service)
+                    sponsor_service=self.sponsor_service,
+                    episode_sponsors=episode_sponsors)
                 # Everything resolve_segment_id_ads discarded referenced a
                 # segment id that does not exist in this window. That is the
                 # hallucination this mode exists to catch, so count it rather
@@ -1230,7 +1295,9 @@ class AdDetector:
                     f"segment-id contract, falling back to timestamp parsing")
                 window_ads = parse_ads_from_response(
                     response_text, slug, episode_id,
-                    sponsor_service=self.sponsor_service)
+                    sponsor_service=self.sponsor_service,
+                    episode_sponsors=episode_sponsors,
+                    segments=window_segments)
                 ads_proposed = len(window_ads)
                 if validate_timestamps:
                     window_ads = validate_ad_timestamps(
@@ -1240,13 +1307,18 @@ class AdDetector:
             window_ads = parse_ads_from_response(
                 response_text, slug, episode_id,
                 sponsor_service=self.sponsor_service,
-                compliance_meta=compliance_meta)
+                compliance_meta=compliance_meta,
+                episode_sponsors=episode_sponsors,
+                segments=window_segments)
             compliant = not compliance_meta['extraction_failed']
             ads_proposed = len(window_ads)
             if validate_timestamps:
                 window_ads = validate_ad_timestamps(
                     window_ads, window_segments, window_start, window_end)
 
+        window_ads = align_ad_quote_bounds(window_ads, window_segments)
+        window_ads = self._align_numeric_edges_to_word_lines(
+            window_ads, window_segments)
         dropped_out_of_window = 0
         dropped_too_long = 0
         valid_window_ads = []
@@ -1482,7 +1554,8 @@ class AdDetector:
                             progress_base, progress_range, slug, episode_id,
                             pass_name, window_label_prefix, validate_timestamps,
                             action_map=None, category_repair_enabled=False,
-                            recurrence_spans=None, addressing_mode='timestamps'):
+                            recurrence_spans=None, addressing_mode='timestamps',
+                            episode_sponsors=None):
         """Shared window orchestration for the detection and verification passes.
 
         Runs every window through ``_run_windows``, merges results in window
@@ -1569,6 +1642,7 @@ class AdDetector:
             validate_timestamps=validate_timestamps,
             recurrence_spans=recurrence_spans,
             addressing_mode=addressing_mode,
+            episode_sponsors=episode_sponsors,
         )
 
         category_repaired = 0
@@ -1651,6 +1725,7 @@ class AdDetector:
                     validate_timestamps=validate_timestamps,
                     recurrence_spans=recurrence_spans,
                     addressing_mode=addressing_mode,
+                    episode_sponsors=episode_sponsors,
                 )
                 recovered_results, sweep_hold_error = self._sweep_lost_windows(
                     windows=windows, lost_results=lost_results,
@@ -1779,7 +1854,9 @@ class AdDetector:
                    progress_callback=None,
                    audio_analysis=None,
                    positional_prior_hint: str = "",
-                   recurrence_spans: list | None = None) -> dict | None:
+                   recurrence_spans: list | None = None,
+                   episode_sponsors: EpisodeSponsors | None = None,
+                   action_map: dict[str, str] | None = None) -> dict | None:
         """Detect ad segments using Claude API with sliding window approach.
 
         Processes transcript in overlapping windows to ensure ads at chunk
@@ -1792,6 +1869,9 @@ class AdDetector:
                                    hint for the per-window prompt (issue #360)
             recurrence_spans: Optional cross-episode text-recurrence spans
                                    (hushpod adoption); rendered per-window.
+            episode_sponsors: Matchers for sponsors already known for this
+                              episode; a long window naming one passes the content gate.
+            action_map: Caller-resolved category actions; resolved here when None.
         """
         if not self.api_key:
             logger.warning("Skipping ad detection - no API key")
@@ -1818,12 +1898,13 @@ class AdDetector:
             # when that draw landed on segment_ids.
             configured_mode, addressing_mode = self._effective_addressing_mode(
                 slug=slug, episode_id=episode_id)
+            detection_segments = timed_line_segments(segments)
             if addressing_mode == 'segment_ids':
-                for sid, seg in enumerate(segments):
+                for sid, seg in enumerate(detection_segments):
                     seg['sid'] = sid
 
             # Create overlapping windows from transcript
-            windows = create_windows(segments)
+            windows = create_windows(detection_segments)
             total_duration = segments[-1]['end']
 
             win_size = get_stage_tunable('window_size_seconds')
@@ -1867,7 +1948,8 @@ class AdDetector:
             # deduplicate_window_ads can gate on it too: window-boundary
             # dedup is the earliest point a categorized detection could be
             # silently fused into an uncategorized one and lose its category.
-            action_map = self._resolve_segment_action_map(slug)
+            if action_map is None:
+                action_map = self._resolve_segment_action_map(slug)
 
             # Gates the category repair pass and the category-miss warning on
             # whether per-category actions are configured for this feed.
@@ -1903,6 +1985,7 @@ class AdDetector:
                 category_repair_enabled=segment_categories_configured,
                 recurrence_spans=recurrence_spans,
                 addressing_mode=addressing_mode,
+                episode_sponsors=episode_sponsors,
             )
             if failure is not None:
                 return failure
@@ -2128,7 +2211,8 @@ class AdDetector:
                           positional_prior_hint: str = "",
                           recurrence_spans: list | None = None,
                           keep_content: bool | None = None,
-                          skip_llm: bool = False) -> dict:
+                          skip_llm: bool = False,
+                          action_map: dict[str, str] | None = None) -> dict:
         """Process transcript for ad detection using three-stage pipeline.
 
         Pipeline stages:
@@ -2161,6 +2245,8 @@ class AdDetector:
             recurrence_spans: Optional cross-episode text-recurrence spans
                  (hushpod adoption), forwarded to the blacklist detect_ads()
                  call only; keep-content mode does not receive it.
+            action_map: Caller-resolved category actions; resolved once here
+                 when None and shared with detect_ads().
 
         Returns:
             Dict with ads, status, and detection metadata
@@ -2188,6 +2274,8 @@ class AdDetector:
         elif self.db and slug:
             podcast_row = self.db.get_podcast_by_slug(slug)
             podcast_db_id = podcast_row['id'] if podcast_row else None
+        if action_map is None:
+            action_map = self._resolve_segment_action_map(slug)
         all_ads = []
         pattern_matched_regions = []  # Regions covered by pattern matching
         detection_stats = {
@@ -2256,7 +2344,7 @@ class AdDetector:
         _check_cancel(cancel_event, slug, episode_id)
 
         # Stage 2: Text Pattern Matching (skip if skip_patterns=True)
-        if not skip_patterns and self.text_pattern_matcher and self.text_pattern_matcher.is_available():
+        if not skip_patterns and self.text_pattern_matcher:
             try:
                 logger.info(f"[{slug}:{episode_id}] Stage 2: Text pattern matching")
                 text_matches = self.text_pattern_matcher.find_matches(
@@ -2397,6 +2485,11 @@ class AdDetector:
                     audio_analysis=audio_analysis,
                     positional_prior_hint=positional_prior_hint,
                     recurrence_spans=recurrence_spans,
+                    episode_sponsors=_known_sponsor_matchers(
+                        [ad for ad in all_ads
+                         if ad.get('detection_stage') in _SPONSOR_MATCH_STAGES],
+                        episode_description),
+                    action_map=action_map,
                 )
 
         if result is None:
@@ -2415,12 +2508,20 @@ class AdDetector:
         claude_ads = result.get('ads', [])
         cross_episode_skipped = 0
 
-        # Resolved once and reused below (the coverage-drop gate) and at the
-        # final merge call: the feed's category->action map.
-        action_map = self._resolve_segment_action_map(slug)
-
         tighten_pattern_regions(claude_ads, pattern_matched_regions, all_ads,
                                 action_map, slug, episode_id)
+
+        superseded = [marker for marker in all_ads
+                      if estimated_pattern_replaced_by_precise_ad(
+                          marker, claude_ads, action_map)]
+        if superseded:
+            superseded_ids = {id(marker) for marker in superseded}
+            all_ads = [marker for marker in all_ads
+                       if id(marker) not in superseded_ids]
+            pattern_matched_regions = [
+                region for region in pattern_matched_regions
+                if not any(region_matches_marker(region, marker)
+                           for marker in superseded)]
 
         # Duration feedback: update pattern avg_duration from Claude's more accurate boundaries
         updated_patterns = set()
@@ -2443,7 +2544,7 @@ class AdDetector:
 
         # Only remove-resolving regions may trim a detection: a keep-action
         # region never cuts, so covering a sponsor detection with one left
-        # the ad in the audio with no marker to remove it (DTNS 5337).
+        # the ad in the audio with no marker to remove it (seen on a production episode).
         coverage_regions = removal_coverage_regions(
             pattern_matched_regions, action_map)
 
@@ -2456,18 +2557,20 @@ class AdDetector:
                 # would discard a keep-resolving category (e.g. intro/outro),
                 # so keep it intact for the merge below to see.
                 if (action_map is not None
-                        and resolve_category_action(ad.get('category'), action_map)
+                        and effective_resolved_action(ad, action_map)
                             != DEFAULT_SEGMENT_ACTION):
                     uncovered_portions = [ad]
                 else:
                     logger.debug(f"[{slug}:{episode_id}] Claude ad {ad['start']:.1f}s-{ad['end']:.1f}s "
                                  f"fully covered by patterns")
+                    record_absorbed_detection(ad, coverage_regions, all_ads)
                     continue
 
-            # Log if ad was trimmed (not returned as-is)
+            # Trimmed: record the covered part as a member, then log the kept portions
             if not (len(uncovered_portions) == 1
                     and uncovered_portions[0]['start'] == ad['start']
                     and uncovered_portions[0]['end'] == ad['end']):
+                record_absorbed_detection(ad, coverage_regions, all_ads)
                 for portion in uncovered_portions:
                     logger.info(f"[{slug}:{episode_id}] Preserved uncovered portion: "
                                 f"{portion['start']:.1f}s-{portion['end']:.1f}s "
@@ -2571,6 +2674,12 @@ class AdDetector:
             'text_start': getattr(match, 'text_start', None),
             'text_end': getattr(match, 'text_end', None),
         }
+        if (detection_stage == 'text_pattern' and span_estimated
+                and not getattr(match, 'defined', False)):
+            entry['has_estimated_pattern_member'] = True
+        if detection_stage == 'fingerprint':
+            entry['fingerprint_match_start'] = match.start
+            entry['fingerprint_match_end'] = match.end
         all_ads.append(entry)
         pattern_matched_regions.append({
             'start': match.start,
@@ -2579,6 +2688,7 @@ class AdDetector:
             # Lets removal_coverage_regions resolve the region's action so a
             # keep-resolving match never shadows a remove-resolving detection.
             'category': match.category,
+            'pattern_defined': getattr(match, 'defined', False),
         })
         if self.pattern_service and match.pattern_id:
             self.pattern_service.record_pattern_match(match.pattern_id, episode_id)
@@ -2623,6 +2733,9 @@ class AdDetector:
             logger.debug(f"Skipping pattern for uncut ad: {ad['start']:.1f}s-{ad['end']:.1f}s")
             return False
 
+        if ad.get('_skip_pattern_learning'):
+            return False
+
         # Only learn from Claude detections (not fingerprint/text pattern)
         if ad.get('detection_stage') != 'claude':
             return False
@@ -2634,7 +2747,8 @@ class AdDetector:
 
         # For longer detections, require higher confidence to avoid learning
         # from merged multi-ad spans which contaminate patterns
-        duration = ad['end'] - ad['start']
+        start, end = learning_bounds(ad)
+        duration = end - start
         if duration > LEARNING_LONG_DURATION_THRESHOLD:
             # Read at call time (not cached) so settings changes apply on
             # the next run without a restart.
@@ -2736,11 +2850,12 @@ class AdDetector:
 
         Returns True if a pattern was successfully created.
         """
+        start, end = learning_bounds(ad)
         try:
             pattern_ids = self.text_pattern_matcher.create_patterns_from_ad(
                 segments=segments,
-                start=ad['start'],
-                end=ad['end'],
+                start=start,
+                end=end,
                 sponsor=sponsor,
                 scope='podcast',
                 podcast_id=podcast_id,
@@ -2752,7 +2867,7 @@ class AdDetector:
             if pattern_ids:
                 logger.info(
                     f"Created {len(pattern_ids)} pattern(s) from Claude detection: "
-                    f"{ad['start']:.1f}s-{ad['end']:.1f}s, sponsor={sponsor}"
+                    f"{start:.1f}s-{end:.1f}s, sponsor={sponsor}"
                 )
 
                 # Each pattern is fingerprinted against its own piece, so a
@@ -2920,6 +3035,11 @@ class AdDetector:
         if not ads:
             return []
 
+        precise_ads = [ad for ad in ads if ad.get('detection_stage') == 'claude']
+        ads = [ad for ad in ads
+               if not estimated_pattern_replaced_by_precise_ad(
+                   ad, precise_ads, action_map)]
+
         # Sort by start time
         ads = sorted(ads, key=lambda x: x['start'])
 
@@ -2929,14 +3049,9 @@ class AdDetector:
 
             # Check for overlap (within 3 seconds)
             if current['start'] <= last['end'] + 3.0:
-                last_action = (resolve_category_action(
-                    last.get('category'), action_map) if action_map else None)
-                current_action = (resolve_category_action(
-                    current.get('category'), action_map) if action_map else None)
-                same_action = (
-                    action_map is None
-                    or effective_resolved_action(last, action_map)
-                    == effective_resolved_action(current, action_map))
+                last_action = effective_resolved_action(last, action_map)
+                current_action = effective_resolved_action(current, action_map)
+                same_action = action_map is None or last_action == current_action
                 if not same_action:
                     # Contested audio: never merge a keep-resolving marker
                     # into a remove-resolving one, and never let a shorter
@@ -2991,7 +3106,9 @@ class AdDetector:
 
                 # Merge - prefer pattern-detected metadata
                 if current['end'] > last['end']:
-                    last['end'] = current['end']
+                    inherit_edge(last, current, 'end')
+                invalidate_quote_alignment(last)
+                invalidate_word_timed_edges(last)
 
                 # Keep higher confidence
                 if current.get('confidence', 0) > last.get('confidence', 0):
@@ -3022,6 +3139,9 @@ class AdDetector:
                 if stage_priority.get(current.get('detection_stage'), 2) < stage_priority.get(last.get('detection_stage'), 2):
                     last['detection_stage'] = current['detection_stage']
                     last['pattern_id'] = current.get('pattern_id')
+                    for key in ('fingerprint_match_start', 'fingerprint_match_end'):
+                        if key in current:
+                            last[key] = current[key]
                     # span_estimated travels with the stage: without it a later
                     # fold reads the promoted stage as grounded, not advisory.
                     last['span_estimated'] = current.get('span_estimated', False)
@@ -3175,16 +3295,18 @@ class AdDetector:
                     # The flag is the reviewer's gate on member protection.
                     if b.get('merged_distinct_ads'):
                         combined['merged_distinct_ads'] = True
-                    combined['start'] = min(a['start'], b['start'])
-                    combined['end'] = max(a['end'], b['end'])
+                    inherit_edge(combined, a if a['start'] <= b['start'] else b, 'start')
+                    inherit_edge(combined, a if a['end'] >= b['end'] else b, 'end')
+                    invalidate_quote_alignment(combined)
+                    invalidate_word_timed_edges(combined)
                     combined['confidence'] = max(a_conf, b_conf)
                     combined['sponsor'] = sponsor
                     combined['pattern_defined'] = bool(a.get('pattern_defined')) or bool(b.get('pattern_defined'))
 
                     category_source = primary
                     if action_map is not None:
-                        a_action = resolve_category_action(a.get('category'), action_map)
-                        b_action = resolve_category_action(b.get('category'), action_map)
+                        a_action = effective_resolved_action(a, action_map)
+                        b_action = effective_resolved_action(b, action_map)
                         if a_action != b_action:
                             if a_action == 'keep':
                                 category_source = a
@@ -3214,7 +3336,9 @@ class AdDetector:
                                     episode_description: str = None,
                                     podcast_description: str = None,
                                     progress_callback=None,
-                                    audio_analysis=None) -> dict:
+                                    audio_analysis=None,
+                                    pass1_cuts: list[dict] | None = None,
+                                    action_map: dict[str, str] | None = None) -> dict:
         """Run ad detection with the verification prompt on processed audio.
 
         Uses the same sliding window approach as detect_ads() but with the
@@ -3229,6 +3353,8 @@ class AdDetector:
             episode_description: Episode description
             podcast_description: Podcast-level description for context
             progress_callback: Optional callback(stage, percent) to report progress
+            pass1_cuts: Pass-1 cuts; their pattern and fingerprint sponsors feed the content gate
+            action_map: Caller-resolved category actions; resolved here when None.
         """
         if not self.api_key:
             logger.warning("Skipping verification detection - no API key")
@@ -3244,24 +3370,31 @@ class AdDetector:
             # verification is a separate sample from pass 1's draw.
             configured_mode, addressing_mode = self._effective_addressing_mode(
                 slug=slug, episode_id=episode_id)
+            detection_segments = timed_line_segments(segments)
             if addressing_mode == 'segment_ids':
-                for sid, seg in enumerate(segments):
+                for sid, seg in enumerate(detection_segments):
                     seg['sid'] = sid
 
-            windows = create_windows(segments)
+            windows = create_windows(detection_segments)
             total_duration = segments[-1]['end'] if segments else 0
 
             logger.info(f"[{slug}:{episode_id}] Verification: Processing {len(windows)} windows "
                        f"for {total_duration/60:.1f}min processed audio")
 
             system_prompt = self.get_verification_prompt()
-            log_assembled_system_prompt(slug, episode_id, system_prompt,
-                                        label="Verification system")
             if addressing_mode == 'segment_ids':
                 system_prompt = f"{system_prompt}{SEGMENT_ID_SYSTEM_SECTION}"
+            system_prompt = f"{system_prompt}{AD_QUOTE_ANCHOR_SECTION}"
+            log_assembled_system_prompt(slug, episode_id, system_prompt,
+                                        label="Verification system")
             model = self.get_verification_model()
 
             logger.info(f"[{slug}:{episode_id}] Verification using model: {model}")
+
+            # Before the scrub: href sponsor links live in the raw description.
+            # Every stage counts: merge priority can relabel a validated pattern cut.
+            episode_sponsors = _known_sponsor_matchers(
+                pass1_cuts or [], episode_description)
 
             # Prepare description section
             description_section = ""
@@ -3284,7 +3417,8 @@ class AdDetector:
             # default verification prompt requires a category, and configured
             # non-default actions enable the same narrow repair pass used by
             # pass 1 for custom/legacy prompts or omitted model fields.
-            action_map = self._resolve_segment_action_map(slug)
+            if action_map is None:
+                action_map = self._resolve_segment_action_map(slug)
             segment_categories_configured = (
                 action_map is not None
                 and any(action != DEFAULT_SEGMENT_ACTION
@@ -3315,6 +3449,7 @@ class AdDetector:
                 action_map=action_map,
                 category_repair_enabled=segment_categories_configured,
                 addressing_mode=addressing_mode,
+                episode_sponsors=episode_sponsors,
             )
             if failure is not None:
                 return failure

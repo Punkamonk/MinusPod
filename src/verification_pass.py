@@ -51,13 +51,15 @@ class VerificationPass:
                progress_callback=None,
                original_segments: list[dict] = None,
                reuse_transcript: bool = False,
-               feed_id: int | None = None) -> dict:
+               feed_id: int | None = None,
+               action_map: dict[str, str] | None = None) -> dict:
         """
         Run full pipeline on processed audio to find missed ads.
 
         Args:
             pass1_cuts: List of ad dicts removed in pass 1 (need start/end).
                         Used to build the timestamp map back to original audio.
+            action_map: The run's resolved category actions, forwarded to detection.
 
         Returns dict with:
             'ads': list of ad dicts in ORIGINAL-audio timestamps (for UI/DB)
@@ -151,6 +153,8 @@ class VerificationPass:
             podcast_description=podcast_description,
             progress_callback=progress_callback,
             audio_analysis=processed_analysis,
+            pass1_cuts=pass1_cuts,
+            action_map=action_map,
         )
         # Window counts ride along on every post-detection return so the run
         # stats can report coverage the verification scan never examined.
@@ -273,8 +277,9 @@ def _build_timestamp_map(pass1_cuts: list[dict]) -> list[tuple[float, float, flo
 _AD_TIMESTAMP_FIELDS = (
     'start', 'end', 'text_start', 'text_end',
     'merged_protected_start', 'merged_protected_end',
+    'fingerprint_match_start', 'fingerprint_match_end',
 )
-_AD_SPAN_FIELDS = ('merged_member_spans', 'dai_core_spans')
+_AD_SPAN_FIELDS = ('merged_member_spans', 'dai_core_spans', 'dai_probe_spans')
 
 
 def _map_ad_to_original(ad: dict, timestamp_map: list[tuple],
@@ -296,8 +301,9 @@ def _map_ad_to_original(ad: dict, timestamp_map: list[tuple],
             continue
         for span in spans:
             if isinstance(span, dict):
-                map_field(span, 'start')
-                map_field(span, 'end')
+                for key in ('start', 'end', 'fingerprint_match_start',
+                            'fingerprint_match_end'):
+                    map_field(span, key)
     return mapped
 
 

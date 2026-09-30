@@ -10,7 +10,7 @@ from config import (
     resolve_max_boundary_shift,
     HOLD_REASON_DIFFERENTIAL_UNCORROBORATED,
 )
-from utils.markers import clip_merge_spans, find_marker_in_list
+from utils.markers import clip_merge_spans, find_marker_in_list, parse_ad_markers
 from utils.time import utc_now_iso, utc_now, parse_iso_datetime
 from sponsor_normalize import get_or_create_known_sponsor
 from pattern_service import PatternService, compute_pattern_trust
@@ -22,7 +22,9 @@ from utils.text import (
     BOUNDARY_SNAP_TOLERANCE_S, extract_timed_spans_in_range,
     parse_transcript_segments,
 )
-from text_pattern_matcher import split_template_text, MAX_PATTERN_CHARS, TextPatternMatcher
+from text_pattern_matcher import (
+    split_template_text, can_split_pattern, MAX_PATTERN_CHARS, TextPatternMatcher,
+)
 
 from flask import Response, request
 
@@ -43,7 +45,8 @@ def list_patterns():
     """List all ad patterns with optional filtering.
 
     Query params:
-      scope, podcast_id, network_id, active (bool, default true),
+      scope (all|global|network|podcast, default all), podcast_id, network_id,
+      active_only (bool, default false; 'active' accepted as a legacy alias),
       source (one of 'local', 'community', 'imported')
     """
     from utils.community_tags import PATTERN_SOURCES
@@ -52,7 +55,8 @@ def list_patterns():
     scope = request.args.get('scope')
     podcast_id = request.args.get('podcast_id')
     network_id = request.args.get('network_id')
-    active_only = request.args.get('active', 'true').lower() == 'true'
+    active_only_param = request.args.get('active_only', request.args.get('active'))
+    active_only = (active_only_param or 'false').lower() == 'true'
     source = request.args.get('source')
     if source and source not in PATTERN_SOURCES:
         source = None  # ignore garbage values rather than 400; preserves prior behavior
@@ -66,7 +70,11 @@ def list_patterns():
     )
     now = utc_now()
     for pattern in patterns:
+        # Matcher-only join columns; the list response does not carry them.
+        pattern.pop('sponsor_tags', None)
+        pattern.pop('sponsor_active', None)
         pattern['trust'] = compute_pattern_trust(pattern, now)
+        pattern['can_split'] = can_split_pattern(pattern)
 
     return json_response({'patterns': patterns})
 
@@ -639,13 +647,7 @@ def _insert_manual_marker(episode, start, end, sponsor_name, reason,
     start. Returns the full marker list; the new marker's pattern_id is
     None and must be backfilled by the caller after pattern creation.
     """
-    markers = []
-    raw_markers = episode.get('ad_markers_json')
-    if raw_markers:
-        try:
-            markers = json.loads(raw_markers)
-        except (TypeError, ValueError):
-            markers = []
+    markers = parse_ad_markers(episode.get('ad_markers_json')) or []
     # If the user left "Reason" blank, synthesize one so the EpisodeDetail
     # page row has something to render (it shows segment.reason for the
     # description line). Without this, manual markers appear as just a
@@ -951,7 +953,7 @@ def _submit_correction_split(db, pattern_service, slug, episode_id,
         split_marker = dict(marker)
         # Review bookkeeping belongs to the original span, not the pieces.
         for stale in ('reviewer_original_start', 'reviewer_original_end',
-                      'approved'):
+                      'reviewer_locked_start', 'reviewer_locked_end', 'approved'):
             split_marker.pop(stale, None)
         split_marker.update({
             'start': piece['start'],
@@ -1280,13 +1282,7 @@ def _matches_held_marker(m, start, end, tol):
 def _load_episode_markers(db, slug, episode_id):
     """(episode row, parsed markers) from a single row load."""
     episode = db.get_episode(slug, episode_id) or {}
-    raw = episode.get('ad_markers_json')
-    if not raw:
-        return episode, None
-    try:
-        return episode, json.loads(raw)
-    except (TypeError, ValueError):
-        return episode, None
+    return episode, parse_ad_markers(episode.get('ad_markers_json'))
 
 
 def _load_markers(db, slug, episode_id):
