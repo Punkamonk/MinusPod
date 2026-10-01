@@ -67,6 +67,10 @@ HOLD_REASON_VERIFICATION_KEPT_CONFLICT = 'verification_kept_conflict'
 HOLD_REASON_CUE_TEMPLATE_UNPROVEN = 'cue_template_unproven'
 HOLD_REASON_CUE_LOW_CONFIDENCE = 'cue_low_confidence'
 HOLD_REASON_LARGE_VAD_GAP = 'large_vad_gap_extension'
+# An LLM span with no category or an audio-only reason whose transcript holds no ad language (#807).
+HOLD_REASON_NO_TRANSCRIPT_EVIDENCE = 'no_transcript_evidence'
+# Share of an evidence-gated span a measured DAI core must cover to stand in for transcript evidence.
+EVIDENCE_GATE_DAI_CORE_MIN_COVERAGE = 0.5
 # Holds only the reviewer stamps; recut validation cannot re-derive them.
 REVIEWER_HOLD_REASONS = frozenset({
     HOLD_REASON_REVIEWER_CONTRADICTION,
@@ -472,7 +476,7 @@ PODCAST_SEARCH_PROVIDERS = (SEARCH_PROVIDER_ITUNES, SEARCH_PROVIDER_PODCASTINDEX
 # ============================================================
 # Processing Limits
 # ============================================================
-MAX_EPISODE_RETRIES = 4         # Retries before permanent failure (initial + 4 retries = 5 total attempts, ladder 5m/15m/30m/60m)
+MAX_EPISODE_RETRIES = 4         # Failed attempts before permanent failure (initial + 3 retries, 5m/15m/30m apart)
 JIT_RETRY_COOLDOWN_SECONDS = 60 # Base cooldown between JIT retries (doubles per attempt)
 WINDOW_SIZE_SECONDS = 600       # Claude processing window (10 min)
 WINDOW_OVERLAP_SECONDS = 180    # Overlap between windows (3 min)
@@ -648,8 +652,12 @@ SPLICE_STEP_SIDE_WINDOW_SECONDS = 5.0     # Side window for spectral aggregation
 SPLICE_CALIBRATION_RECENT_EPISODES = 10
 SPLICE_CALIBRATION_MIN_EPISODES = 5       # Min VALID payloads for calibrated; below this: cold_start
 SPLICE_CALIBRATION_MAX_FP_PER_HOUR = 1.0  # Target content false-positive event rate
+# Minimum corroborated fraction of long LLM cuts for a feed to stay calibrated.
+SPLICE_CALIBRATED_MIN_CORROBORATED = 0.5
+SPLICE_HOST_READ_RECENT_EPISODES = 20  # Wider than 10: many episodes carry no long cut
 SPLICE_CORROBORATION_WINDOW_SECONDS = 3.0  # Event-to-edge distance that corroborates a marker
 VETO_MIN_CUT_SECONDS = 60.0  # Cuts at/over this from claude/text_pattern need splice evidence
+SPLICE_VETO_IDENTICAL_MIN_COVERAGE = 0.95  # no_differential cut this identical skips the veto
 TERMINAL_SNAP_WINDOW_SECONDS = 30.0        # Max backward scan from a terminal marker's start
 TERMINAL_SNAP_EOF_TOLERANCE_SECONDS = 2.0  # Marker end within this of EOF counts as terminal
 # Tail no-VAD re-transcription window (spec 1.2). An untranscribed tail whose
@@ -658,6 +666,14 @@ TERMINAL_SNAP_EOF_TOLERANCE_SECONDS = 2.0  # Marker end within this of EOF count
 # tail_retranscribe_min_seconds / tail_retranscribe_max_seconds settings.
 TAIL_RETRANSCRIBE_MIN_SECONDS = 10.0
 TAIL_RETRANSCRIBE_MAX_SECONDS = 600.0
+# Mid-episode holes re-transcribed without VAD: per-episode caps and the
+# mean volume below which a hole is treated as silence.
+HOLE_RETRANSCRIBE_MAX_HOLES = 20
+HOLE_RETRANSCRIBE_MAX_SECONDS = 600.0
+HOLE_RETRANSCRIBE_QUIET_DB = -45.0
+# A stretch this long with no transcribed speech is audio the reviewer cannot
+# see; no reviewer edge moves across it. The hole pass never uses a smaller gap.
+UNREVIEWABLE_GAP_SECONDS = 8.0
 # A podping host counts as active only if seen within this window, so a host
 # that drops podping support decays back to uncovered (#579).
 PODPING_HOST_ACTIVE_DAYS = 30

@@ -13,6 +13,7 @@ from collections.abc import Callable
 
 from config import (
     resolve_stage_tunables,
+    UNREVIEWABLE_GAP_SECONDS,
     AD_REVIEWER_PARALLEL_ADS_DEFAULT,
     AD_REVIEWER_PARALLEL_ADS_MIN,
     AD_REVIEWER_PARALLEL_ADS_MAX,
@@ -36,6 +37,7 @@ from config import (
 )
 from audio_enforcer import content_anchors
 from ad_detector.boundaries import timed_line_segments
+from ad_detector.cue_boundary_snap import SNAP_GAP_SECONDS
 from text_pattern_matcher import is_defined_pattern
 from database import DEFAULT_REVIEW_PROMPT, DEFAULT_RESURRECT_PROMPT
 from llm_capabilities import PASS_REVIEWER_1, PASS_REVIEWER_2
@@ -68,6 +70,7 @@ from utils.text import (
     BOUNDARY_SNAP_TOLERANCE_S,
     get_timestamped_transcript_for_range,
     get_timestamped_words_for_range,
+    transcript_gaps,
 )
 from utils.time import overlap_seconds
 
@@ -583,6 +586,8 @@ class TranscriptIndex:
         self.end = _EdgeIndex(units, words)
         # Start edges are end edges on the negated timeline.
         self.start = _EdgeIndex(_negated(units), _negated(words))
+        self.gaps = transcript_gaps([{'start': lo, 'end': hi} for lo, hi in self.end.units],
+                                    UNREVIEWABLE_GAP_SECONDS)
 
 
 def _edge_transcript_supported(index: TranscriptIndex, edge: str, new: float, old: float) -> bool:
@@ -662,6 +667,102 @@ def _end_capped_floor(ix: _EdgeIndex, independent, proposed: float, floor: float
     if any(overlap_seconds(lo, hi, capped, floor) > 0 for lo, hi in independent):
         return None
     return capped
+
+
+def _timestamped_with_gaps(lines: list[dict], gaps, lo: float, hi: float,
+                           closed: bool = False) -> str:
+    """Timestamped transcript for [lo, hi] plus a note for each gap centred in it."""
+    in_range = [ln for ln in lines if ln.get('end', 0.0) >= lo and ln.get('start', 0.0) <= hi]
+    mine = [(g_lo, g_hi) for g_lo, g_hi in gaps
+            if lo <= (g_lo + g_hi) / 2 < hi or (closed and (g_lo + g_hi) / 2 == hi)]
+    if not mine:
+        return get_timestamped_transcript_for_range(in_range, lo, hi)
+    starts = [ln.get('start', 0.0) for ln in in_range]
+    parts, cut = [], 0
+    for g_lo, g_hi in mine:
+        at = bisect_right(starts, g_lo)
+        parts.append(get_timestamped_transcript_for_range(in_range[cut:at], lo, hi))
+        parts.append(f"[{g_lo:.2f}s-{g_hi:.2f}s] ({g_hi - g_lo:.1f} s of audio with no transcript)")
+        cut = at
+    parts.append(get_timestamped_transcript_for_range(in_range[cut:], lo, hi))
+    return '\n'.join(part for part in parts if part)
+
+
+def _hold_inward_edges(start: float, end: float, start_limits, end_limits,
+                       barriers) -> tuple[float, float]:
+    """Keep each edge from moving inward past its limits, stopping at a hard barrier before one.
+
+    Limits are (span edge, floor) pairs: the span edge triggers and filters barriers, the edge lands on floor.
+    """
+    for edge, floor in start_limits:
+        if start > edge:
+            start = max([floor] + [min(b['end'], start) for b in barriers
+                                   if b['start'] < start and b['end'] > edge])
+    for edge, floor in end_limits:
+        if end < edge:
+            end = min([floor] + [max(b['start'], end) for b in barriers
+                                 if b['end'] > end and b['start'] < edge])
+    return start, end
+
+
+def _untranscribed_limits(index: TranscriptIndex, original_start: float,
+                          original_end: float) -> tuple[list, list]:
+    """Edge limits from untranscribed stretches of UNREVIEWABLE_GAP_SECONDS or more inside the span."""
+    gaps = list(index.gaps)
+    units = index.end.units
+    if any(lo < original_end and hi > original_start for lo, hi in units):
+        # Audio before the first and after the last speech unit is untranscribed too.
+        gaps += [(original_start, units[0][0]), (index.end.max_his[-1], original_end)]
+    inside = [(max(lo, original_start), min(hi, original_end)) for lo, hi in gaps]
+    inside = [(lo, hi) for lo, hi in inside if hi - lo >= UNREVIEWABLE_GAP_SECONDS]
+    return [(lo, lo) for lo, _hi in inside], [(hi, hi) for _lo, hi in inside]
+
+
+def _silence_limits(ad: dict, original_start: float,
+                    original_end: float) -> tuple[list, list]:
+    """Edge limits from absorbed silence touching either edge."""
+    spans = silent_absorbed_spans(ad)
+    return ([(lo, min(lo, original_start)) for lo, _hi in spans
+             if lo <= original_start + EDGE_TOLERANCE],
+            [(hi, max(hi, original_end)) for _lo, hi in spans
+             if hi >= original_end - EDGE_TOLERANCE])
+
+
+def _cue_snap_limits(ad: dict, original_start: float,
+                     original_end: float) -> tuple[list, list]:
+    """Edge limits at the labelled template cues the ad's edges were snapped to."""
+    snap = ad.get('cue_snap') if isinstance(ad.get('cue_snap'), dict) else {}
+
+    def cue_edge(edge: str, key: str) -> float | None:
+        record = snap.get(edge)
+        if not isinstance(record, dict) or not is_template_cue(record):
+            return None
+        return finite_number(record.get(key))
+
+    starts, ends = [], []
+    # A start edge sits just after the cue ends; an end edge just before the cue starts.
+    cue_end = cue_edge('start', 'cue_end')
+    if cue_end is not None:
+        lim = cue_end + SNAP_GAP_SECONDS
+        if original_start - EDGE_TOLERANCE <= lim < original_end:
+            starts.append((lim, max(lim, original_start)))
+    cue_start = cue_edge('end', 'cue_start')
+    if cue_start is not None:
+        lim = cue_start - SNAP_GAP_SECONDS
+        if original_start < lim <= original_end + EDGE_TOLERANCE:
+            ends.append((lim, min(lim, original_end)))
+    return starts, ends
+
+
+def _hold_inward_limits(ad: dict, start: float, end: float, original_start: float,
+                        original_end: float, index: TranscriptIndex,
+                        barriers) -> tuple[float, float]:
+    """Apply the transcript-gap, boundary-cue and absorbed-silence no-cross rules in one call."""
+    limits = (_untranscribed_limits(index, original_start, original_end),
+              _cue_snap_limits(ad, original_start, original_end),
+              _silence_limits(ad, original_start, original_end))
+    return _hold_inward_edges(start, end, [lim for st, _ in limits for lim in st],
+                              [lim for _, en in limits for lim in en], barriers)
 
 
 def _floor_source(floor: float, proposed: float, core_edge: float) -> str:
@@ -1450,7 +1551,11 @@ class AdReviewer:
                         min_conf=min_conf,
                     )
                     if recovered is not None:
-                        verdict.adjusted_start, verdict.adjusted_end = recovered
+                        # Recovery applies the member floor; a one-tap approve must not cross untranscribed audio.
+                        verdict.adjusted_start, verdict.adjusted_end = _hold_inward_limits(
+                            updated_ad, *recovered, verdict.original_start,
+                            verdict.original_end, transcript_units,
+                            episode_meta.get('hard_barriers') or [])
                 if (verdict.adjusted_start is not None
                         and verdict.adjusted_end is not None):
                     held["reviewer_proposed_start"] = verdict.adjusted_start
@@ -1509,6 +1614,7 @@ class AdReviewer:
                         max_shift,
                         episode_meta.get('slug'),
                         episode_meta.get('episode_id'),
+                        segments=segments, transcript_units=transcript_units,
                         hard_barriers=episode_meta.get('hard_barriers'),
                         min_conf=min_conf)
                     if _bounds_unchanged(new_start, new_end,
@@ -1633,6 +1739,7 @@ class AdReviewer:
             episode_meta=episode_meta,
             pool=pool,
             max_shift=max_shift,
+            transcript_units=transcript_units,
         )
         slug = episode_meta.get("slug")
         episode_id = episode_meta.get("episode_id")
@@ -1921,6 +2028,24 @@ class AdReviewer:
                 )
             clamped_start, clamped_end = floor_start, floor_end
 
+        # No edge moves inward across untranscribed audio or past a labelled boundary cue it
+        # was snapped to; it stops at a hard barrier before either.
+        barriers = hard_barriers or []
+        index = transcript_units or TranscriptIndex(segments)
+        proposed = (clamped_start, clamped_end)
+        clamped_start, clamped_end = _hold_inward_edges(
+            clamped_start, clamped_end,
+            *_untranscribed_limits(index, original_start, original_end), barriers)
+        gap_start, gap_end = clamped_start, clamped_end
+        clamped_start, clamped_end = _hold_inward_edges(
+            clamped_start, clamped_end,
+            *_cue_snap_limits(ad, original_start, original_end), barriers)
+        start_held_by = ('boundary cue' if clamped_start != gap_start
+                         else 'untranscribed audio' if gap_start != proposed[0] else None)
+        end_held_by = ('boundary cue' if clamped_end != gap_end
+                       else 'untranscribed audio' if gap_end != proposed[1] else None)
+        held_logged = not (start_held_by or end_held_by)
+
         # Probes and independent spans hold the floor; unsupported edges stop at the straddling word.
         core_start, core_end = dai_core_bounds(ad)
         if core_start is not None:
@@ -1928,7 +2053,6 @@ class AdReviewer:
             floor_end = max(clamped_end, core_end)
             # Only the probe windows of a region are measured, so an edge on a
             # transcript pause may cross the rest, stopping at independent evidence.
-            index = transcript_units or TranscriptIndex(segments)
             independent = reviewer_independent_spans(ad, min_conf)
             cap_start = cap_end = None
             if _edge_transcript_supported(index, 'start', clamped_start,
@@ -1950,17 +2074,27 @@ class AdReviewer:
             if ((floor_start, floor_end) != (clamped_start, clamped_end)
                     or floor_start > core_start or floor_end < core_end):
                 start_source = ('spoken word cap' if cap_start is not None
+                                else start_held_by
+                                if start_held_by and floor_start == clamped_start
                                 else _floor_source(floor_start, clamped_start, core_start))
                 end_source = ('spoken word cap' if cap_end is not None
+                              else end_held_by
+                              if end_held_by and floor_end == clamped_end
                               else _floor_source(floor_end, clamped_end, core_end))
                 logger.info(
                     f"[{slug}:{episode_id}] Reviewer trim vs DAI core "
                     f"{core_start:.1f}-{core_end:.1f}s: "
-                    f"{clamped_start:.1f}-{clamped_end:.1f} -> "
+                    f"{proposed[0]:.1f}-{proposed[1]:.1f} -> "
                     f"{floor_start:.1f}-{floor_end:.1f} "
                     f"(start floored by {start_source}, end floored by {end_source})"
                 )
+                held_logged = True
             clamped_start, clamped_end = floor_start, floor_end
+        if not held_logged:
+            reasons = ' and '.join(dict.fromkeys(r for r in (start_held_by, end_held_by) if r))
+            logger.info(
+                f"[{slug}:{episode_id}] Reviewer trim stopped at {reasons}: "
+                f"{proposed[0]:.1f}-{proposed[1]:.1f} -> {clamped_start:.1f}-{clamped_end:.1f}")
 
         # A widened edge never enters kept audio beyond the original span.
         for barrier in hard_barriers or []:
@@ -1971,16 +2105,9 @@ class AdReviewer:
 
         # Absorbed silence stays with the cut: no edge moves inward across an edge-touching span,
         # but the floor stops at a hard barrier between the proposal and the span edge.
-        barriers = hard_barriers or []
-        for lo, hi in silent_absorbed_spans(ad):
-            if lo <= original_start + EDGE_TOLERANCE and clamped_start > lo:
-                clamped_start = max([min(lo, original_start)] + [
-                    min(b['end'], clamped_start) for b in barriers
-                    if b['start'] < clamped_start and b['end'] > lo])
-            if hi >= original_end - EDGE_TOLERANCE and clamped_end < hi:
-                clamped_end = min([max(hi, original_end)] + [
-                    max(b['start'], clamped_end) for b in barriers
-                    if b['end'] > clamped_end and b['start'] < hi])
+        clamped_start, clamped_end = _hold_inward_edges(
+            clamped_start, clamped_end,
+            *_silence_limits(ad, original_start, original_end), barriers)
 
         if clamped_end <= clamped_start:
             clamped_start, clamped_end = original_start, original_end
@@ -2151,6 +2278,7 @@ class AdReviewer:
         episode_meta: dict,
         pool: str,
         max_shift: int = 60,
+        transcript_units=None,
     ) -> str:
         """Build the per-ad user prompt.
 
@@ -2171,15 +2299,14 @@ class AdReviewer:
         ])
         # Per-segment timestamps everywhere, context included (#695): the
         # system prompt's examples read trim boundaries out of context lines.
-        before_text = get_timestamped_transcript_for_range(
-            context_segments, context_start, start
-        )
-        ad_text = get_timestamped_transcript_for_range(context_segments, start, end)
+        # Same word-level gaps the clamp enforces.
+        gaps = (transcript_units or TranscriptIndex(segments)).gaps
+        before_text = _timestamped_with_gaps(context_segments, gaps, context_start, start)
+        ad_text = _timestamped_with_gaps(context_segments, gaps, start, end, closed=True)
         if not ad_text:
             fallback = ad.get("end_text", "") or ""
             ad_text = f"[{start:.1f}s-{end:.1f}s] {fallback}" if fallback else ""
-        after_text = get_timestamped_transcript_for_range(
-            context_segments, end, context_end)
+        after_text = _timestamped_with_gaps(context_segments, gaps, end, context_end)
         start_words = get_timestamped_words_for_range(
             segments, max(0.0, start - max_shift), start + max_shift)
         end_words = get_timestamped_words_for_range(

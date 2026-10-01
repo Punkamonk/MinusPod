@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from ad_detector.prompts import _span_names_sponsor
 from ad_validator import AdValidator
-from sponsor_context import local_commercial_context
+from sponsor_context import framed_sponsor_names, local_commercial_context, names_vanity_link
 from tests.unit.marker_test_utils import ACME_REGISTRY, CLOSING, RegistryStub, registry_confirms
 
 
@@ -93,16 +93,48 @@ class TestCommercialContext:
         v = _validator('Acme came up. Go to othersite.com today.', registry=False)
         assert _commercial(v) is False
 
+    @pytest.mark.parametrize('registry', [True, False])
+    @pytest.mark.parametrize('link', ['drinkacme .com slash show', 'drinkacme dot com slash show',
+                                      'drinkacme.com/show', 'shop.example.net slash acme'])
+    def test_call_to_action_link_beside_the_sponsor_is_commercial(self, registry, link):
+        v = _validator(f'I take Acme every morning. Go to {link}.', registry=registry)
+        assert _commercial(v) is True
+
+    @pytest.mark.parametrize('text', [
+        'I take Acme every morning. That is drinkacme .com slash show.',
+        'Go to drinkacme .com slash show.',
+    ])
+    def test_link_without_a_call_to_action_or_sponsor_is_not_commercial(self, text):
+        assert _commercial(_validator(text, registry=False)) is False
+
+    def test_call_to_action_link_two_segments_from_the_sponsor_is_not_commercial(self):
+        segments = [{'start': 0.0, 'end': 100.0, 'text': 'Acme came up, Acme again.'},
+                    {'start': 100.0, 'end': 200.0, 'text': 'We talked about the week.'},
+                    {'start': 200.0, 'end': 400.0,
+                     'text': 'Check out github.com slash owner slash repo.'}]
+        v = AdValidator(3600.0, segments, episode_description='', sponsor_service=ACME_REGISTRY)
+        assert _commercial(v) is False
+        assert registry_confirms(v, dict(_SPAN)) is False
+
+    @pytest.mark.parametrize('text', ['That is drinkacme .com slash show',
+                                      'That is drinkacme dot com slash show'])
+    def test_spaced_dot_reads_as_a_vanity_link(self, text):
+        assert names_vanity_link([text], 'drinkacme') is True
+
 
 
 # Production shapes: a host read naming the brand nine times with a link, and the closing above.
 HOST_READ = ' '.join(['Acme is the easiest way to protect your home.'] * 9
                      + ['Learn more at acme.com.'])
+# A read whose only commercial marker is a call to action on a domain other than the brand.
+VANITY_READ = ('Acme is one scoop that covers your daily nutrients. I take Acme every morning. '
+               "Go to drinkacme .com slash show. That's drinkacme .com slash show.")
 
 
 @pytest.mark.parametrize(('text', 'expected'), [
     (HOST_READ, True),
     (CLOSING, True),
+    (VANITY_READ, True),
     ('I use Acme at home, Acme is fine', False),
 ])
 def test_detector_and_validator_registry_gates_agree(text, expected):
@@ -167,3 +199,34 @@ def test_a_conversational_brand_named_more_does_not_hide_the_advertised_one():
     validator = AdValidator(3600.0, segments, episode_description='', sponsor_service=registry)
     assert registry_confirms(validator, dict(_SPAN)) is True
     assert _span_names_sponsor(segments, 0.0, 400.0, None, registry) is True
+
+
+@pytest.mark.parametrize('text', [
+    'See what it looks like at acme.com slash show',
+    'Go to acme.com/show today',
+    'That is acme dot com slash show',
+    'A-C-M-E.com/show',
+])
+def test_vanity_link_on_the_sponsor_domain(text):
+    assert names_vanity_link([text], 'Acme') is True
+
+
+@pytest.mark.parametrize('text', [
+    'I tried acme.com last week',
+    'See initech.com slash show',
+    'acme and then slash show',
+])
+def test_no_vanity_link_without_a_path_on_the_sponsor_domain(text):
+    assert names_vanity_link([text], 'Acme') is False
+
+
+@pytest.mark.parametrize('text,names', [
+    ('Based on transcript: This episode of the show is brought to you by Acme. A-C-M-E.', ['Acme']),
+    ('Sponsored by Acme Home, the alarm people', ['Acme Home']),
+    ('Thanks to Acme for supporting the show', ['Acme']),
+    ('Brought to you by the folks at Acme', []),
+    ('No framing here, just Acme', []),
+    ('', []),
+])
+def test_framed_sponsor_names(text, names):
+    assert framed_sponsor_names(text) == names

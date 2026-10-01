@@ -9,15 +9,88 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
-## [Unreleased]
+## [2.97.45] - 2026-10-01
+
+### Fixed
+- Model-detected spans with no category, or with a reason that only cites audio signals (splice, DAI transition, volume step), are now held for review. They are cut only when the span's transcript names a sponsor or carries a link, promo code or sponsor phrase. Measured audio also allows the cut: a cross-fetch core, fingerprint, cue or cross-fetch difference. (#807)
+- A model reason that only echoes audio signals no longer counts as ad language, and a splice id or dB reading is never taken as a sponsor name.
+
+## [2.97.44] - 2026-10-01
+
+### Fixed
+- A learned pattern piece takes the sponsor that is named most inside it, so a passing mention of another registered brand can no longer relabel or block the read.
+- Learned pieces are split at the transcript boundary where the next read starts and trimmed to the sponsor's own copy, instead of inheriting a neighbouring read's opening or closing sentences.
+
+## [2.97.43] - 2026-10-01
+
+### Fixed
+- Pattern learning on a merged ad block now learns the stretches of the LLM detection that no existing pattern covers, instead of skipping the whole detection when one known read sits inside it. Each piece names its sponsor only from the words spoken inside it.
+
+## [2.97.42] - 2026-10-01
+
+### Fixed
+- Patterns are now learned from the LLM detections inside a merged marker that no existing pattern already covers, so feeds whose ad breaks end up as cross-fetch regions learn patterns too.
+- A reviewer trim can no longer pull an ad edge away from a labelled boundary cue the edge was snapped to.
+- The review modal's sponsor is validated as a string, and frontend and backend regression tests cover it (follow-up to #805, reported in #804).
+- A focused control at the top of a settings section no longer has its focus ring clipped; the section body only clips while it is collapsed, hidden by search, or animating.
+- The Whisper model is unloaded from the GPU after the transcript repair passes and whenever the processing queue is empty, instead of staying resident until the next episode.
+
+## [2.97.41] - 2026-09-30
 
 ### Added
-- Added benchmark support for Ollama models, starting with gemma4:e4b.
+- The podcast settings page has the same search as the Settings page: type to filter the setting groups, matches are highlighted, and the groups that hold them expand. Reported in #803.
 
 ### Changed
-- Modifies `scrub_description` to support taking a percentage of the `max_length` from the beginning and end. Default takes 100% from beginning.
-- Updates the documentation and unit tests for the `strip_comments_from_prompt` utility to preserve literal comments (e.g., those indented by four or more spaces) while still removing other comments.
-- Utilize Docker BuildKit's cache mounts for npm and pip dependency installations in Dockerfiles. This significantly reduces local build times by persisting node modules and Python package caches across builds, particularly for large dependencies like PyTorch.
+- Feed settings are grouped into collapsible sections, so the search and the Expand all and Collapse all buttons work the same way as on the Settings page. The new sections start open.
+
+### Fixed
+- Speech that Whisper's batched decoder skipped inside an episode is re-transcribed without voice detection before detection runs, in both passes. A sponsor read whose opening never reached the transcript is now seen by the detector, the text patterns and the reviewer. The repaired pass-1 transcript is saved, and a hole that held no speech is not tried again on reprocess.
+- The reviewer can no longer move an ad edge across 8 s or more of untranscribed audio inside the ad. This also covers the trim offered on a held ad. Untranscribed audio at the start or end of an ad counts for every ad that contains transcribed speech; gaps between transcribed words count for every ad.
+- The reviewer prompt names every untranscribed stretch between transcribed words inside a candidate instead of showing nothing there. Stretches at the start or end of a candidate are not listed, though the edge rule still applies to them.
+
+## [2.97.40] - 2026-09-30
+
+### Fixed
+- A call-to-action path link ('go to brand-site dot com slash show') counts as commercial language for a sponsor named beside it. The domain need not match the brand and the dot may be spaced, so these reads are no longer held for missing splice evidence.
+- A transcription whose Whisper model fails to load on the GPU is retried instead of being marked permanently failed, in pass 2 as well; an out-of-memory mid-transcription still fails as before.
+- Pass-2 fragments shorter than one second left by a split at a hold edge are dropped before validation.
+
+## [2.97.39] - 2026-09-30
+
+### Added
+- Global splice veto toggle in Settings; the per-feed setting now shows which global value it inherits.
+- Episode detail reports the feed's splice calibration; long LLM cuts record whether audio evidence
+  corroborated them.
+- The LLM benchmark supports Ollama models, starting with gemma4:e4b (#797).
+- `GUNICORN_ACCESS_LOG` and `GUNICORN_ERROR_LOG` select where the server logs go (console, disabled, or
+  a file). Thanks to @tlvince (#799).
+
+### Changed
+- `scrub_description` can take part of `max_length` from the start of a description and the rest from
+  the end, with an ellipsis between. The default still takes it all from the start (#785).
+- The `strip_comments_from_prompt` docstring and tests now cover literal comments: one indented four or
+  more spaces is markdown code and stays in the prompt (#785).
+- The Dockerfiles use BuildKit cache mounts for npm and pip, so local rebuilds reuse downloaded packages
+  such as PyTorch instead of fetching them again (#785).
+
+### Fixed
+- The splice veto no longer holds a long cut when the cross-fetch proved the whole episode identical
+  across downloads (baked-in audio has no splice to find).
+- A sponsor the detection names is confirmed from the span transcript when the span speaks a framing
+  phrase for it and carries a link or offer. First-time sponsors no longer fail the veto. Patrons,
+  listeners and the show's own name never count.
+- A feed whose long cuts rarely show splice evidence is classified host_read and the veto does not apply
+  to it; the status is measured from the last 20 episodes once five carry the new field.
+- A hold review that returns an adjust covering the reviewed span now releases the covered part of the
+  hold and sends the audio outside the hold through pass 2. Before, the whole hold stayed in place.
+- Pending holds shrink to what the rendered cuts leave, so a hold never claims audio that a reviewed or
+  merged cut already removed.
+- The settings API returns the four chapter density tunables, so the Chapter density form shows the
+  stored values after a reload instead of the defaults. Reported in #800.
+
+### Security
+- Bumped urllib3 to 2.8.0 to clear CVE-2026-97687, CVE-2026-97688 and CVE-2026-97689 reported against
+  2.7.0.
 
 ## [2.97.38] - 2026-09-30
 

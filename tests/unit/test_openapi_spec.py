@@ -206,6 +206,19 @@ def test_every_hold_reason_list_matches_config_constants():
     assert set(re.findall(r"'(\w+)'", union)) == constants
 
 
+def test_splice_calibration_fields_are_documented():
+    with SPEC_PATH.open() as f:
+        schemas = yaml.safe_load(f)['components']['schemas']
+    calibration = schemas['EpisodeDetail']['allOf'][1]['properties']['spliceCalibration']
+    assert calibration['properties']['status']['enum'] == ['cold_start', 'calibrated', 'host_read']
+    assert set(calibration['properties']['long_cut_corroboration']['properties']) == {
+        'episodes', 'cuts', 'corroborated', 'fraction'}
+    validation = schemas['AdMarker']['properties']['validation']['properties']
+    assert validation['audio_corroboration']['enum'] == [
+        'transition_pair', 'template_cue', 'volume_anomaly', 'splice_evidence',
+        'dai_differential', 'none']
+
+
 def test_patterns_list_params_match_handler():
     """GET /patterns documents exactly the query params the handler reads."""
     with SPEC_PATH.open() as f:
@@ -220,3 +233,14 @@ def test_patterns_list_params_match_handler():
 
     active_only_schema = next(p for p in params if p['name'] == 'active_only')['schema']
     assert active_only_schema['default'] is False
+
+
+def test_every_stage_tunable_is_documented():
+    with SPEC_PATH.open() as f:
+        doc = yaml.safe_load(f)
+    put_props = (doc['paths']['/settings/ad-detection']['put']['requestBody']
+                 ['content']['application/json']['schema']['properties'])
+    for payload_key, _db_key, _kind in config.STAGE_TUNABLE_PAYLOAD_KEYS:
+        assert payload_key in put_props, payload_key
+    entry = doc['components']['schemas']['Settings']['properties']['stageTunables']['additionalProperties']
+    assert set(entry['properties']) == {'value', 'isDefault', 'envOverride'}

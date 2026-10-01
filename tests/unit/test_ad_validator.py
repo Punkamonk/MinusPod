@@ -2343,15 +2343,22 @@ class TestRegistryConfirmsLongAds:
     def test_long_break_is_held_without_the_registry(self):
         v = AdValidator(3700.0, self._segments(), episode_description='',
                         min_cut_confidence=0.80)
-        ad = v.validate([self._ad()]).ads[0]
+        ad = v.validate([dict(self._ad(), reason='ad break')]).ads[0]
         assert ad['validation']['decision'] == 'REVIEW'
         assert ad.get('held_for_review')
 
     def test_the_registry_confirms_it_and_it_is_accepted(self):
         v = AdValidator(3700.0, self._segments(), episode_description='',
                         min_cut_confidence=0.80, sponsor_service=self._REGISTRY)
-        result = v.validate([self._ad()])
+        ad = dict(self._ad(), reason='ad break')
+        assert v._sponsor_confirmation_source(ad) == 'registry'
+        result = v.validate([ad])
         assert result.ads[0]['validation']['decision'] == 'ACCEPT'
+
+    def test_a_reason_named_sponsor_needs_spoken_framing(self):
+        v = AdValidator(3700.0, self._segments(), episode_description='',
+                        min_cut_confidence=0.80)
+        assert v._sponsor_confirmation_source(self._ad()) is None
 
     def test_a_break_naming_no_known_sponsor_is_not_cut(self):
         segs = self._segments()
@@ -2377,7 +2384,8 @@ class TestRegistryConfirmsLongAds:
 
         v = AdValidator(3700.0, self._segments(), episode_description='',
                         min_cut_confidence=0.80, sponsor_service=Boom())
-        assert v.validate([self._ad()]).ads[0]['validation']['decision'] != 'ACCEPT'
+        ad = dict(self._ad(), reason='ad break')
+        assert v.validate([ad]).ads[0]['validation']['decision'] != 'ACCEPT'
 
 
 class TestConfigurableDurationCeilings:

@@ -657,7 +657,7 @@ def test_build_recut_respects_splice_veto_disabled(monkeypatch):
     # splice_veto_enabled defaults to True (the bug). With the setting read as
     # False it must not be held.
     ads = [{'start': 1800.0, 'end': 1890.0, 'confidence': 0.92,
-            'detection_stage': 'claude',
+            'detection_stage': 'claude', 'category': 'sponsor',
             'reason': 'Vrbo vacation rental read with booking details'}]
     analysis = {'splice_evidence': {'version': 1, 'events': [],
                                     'calibration': {'status': 'calibrated'}}}
@@ -683,6 +683,29 @@ def test_build_recut_respects_splice_veto_disabled(monkeypatch):
         "splice_veto_enabled=False must not veto the cut on recut"
     )
     assert all_ads[0].get('hold_reason') != 'no_splice_evidence'
+
+
+def test_build_recut_waives_the_splice_veto_on_baked_in_audio(monkeypatch):
+    """The stored no_differential payload reaches the validator on recut."""
+    ads = [{'start': 1800.0, 'end': 1890.0, 'confidence': 0.92,
+            'detection_stage': 'claude', 'category': 'sponsor', 'reason': 'host read for Acme'}]
+    analysis = {'splice_evidence': {'version': 1, 'events': [],
+                                    'calibration': {'status': 'calibrated'}}}
+    dd = {'status': 'no_differential', 'regions': [
+        {'start_s': 0.0, 'end_s': 3600.0, 'kind': 'identical', 'corr': 1.0}]}
+    _stub_recut_db(monkeypatch, ads)
+    monkeypatch.setattr(processing.db, 'get_episode_audio_analysis',
+                        lambda s, e: json.dumps(analysis))
+    monkeypatch.setattr(processing.db, 'get_episode_dai_differential',
+                        lambda s, e: json.dumps(dd))
+    segments = [{'start': 1800.0, 'end': 1890.0, 'text': 'a host read'}]
+    ads_to_remove, all_ads, *_ = processing._build_recut_ad_list(
+        'slug', 'ep', segments, 3600.0, '', 0.80,
+        corrections=_user_corrections('slug', 'ep'))
+    assert len(ads_to_remove) == 1
+    assert all_ads[0].get('hold_reason') != 'no_splice_evidence'
+    assert ('INFO: Splice veto skipped, cross-fetch shows baked-in audio'
+            in all_ads[0]['validation']['flags'])
 
 
 def test_build_recut_held_nothing_stays_held_uncut(monkeypatch):
@@ -1615,3 +1638,17 @@ def test_recut_keeps_a_cut_that_is_long_only_by_absorbed_silence(monkeypatch):
     assert _spans(ads_to_remove) == {(1000.0, 1950.0)}
     assert all_ads[0]['validation']['decision'] == 'ACCEPT'
     assert not any('950.0s' in f for f in all_ads[0]['validation']['flags'])
+
+
+def test_build_recut_keeps_an_uncategorised_echo_marker_held(monkeypatch):
+    """#807: a stored LLM marker with no category and an audio-echo reason is re-held on recut."""
+    ads = [{'start': 1250.0, 'end': 1300.0, 'confidence': 0.95, 'detection_stage': 'claude',
+            'reason': 'DAI transition pair and volume anomaly indicate ad boundary'}]
+    _stub_recut_db(monkeypatch, ads)
+    segments = [{'start': 1250.0, 'end': 1300.0,
+                 'text': "and that's how we ended up moving the studio across town last spring"}]
+    ads_to_remove, all_ads, *_ = processing._build_recut_ad_list(
+        'slug', 'ep', segments, 3600.0, '', 0.80,
+        corrections=_user_corrections('slug', 'ep'))
+    assert ads_to_remove == []
+    assert all_ads[0]['hold_reason'] == 'no_transcript_evidence'

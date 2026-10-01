@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.97.38
+  version: 2.97.45
   contact:
     name: MinusPod
   license:
@@ -890,7 +890,7 @@ paths:
                     - 'null'
                   description: >-
                     Per-feed splice check. Tri-state: null inherits the global
-                    splice_veto_enabled setting, true forces the check on, false lets
+                    spliceVetoEnabled setting, true forces the check on, false lets
                     long cuts through without splice evidence.
                 maxAdDurationOverride:
                   type:
@@ -4736,7 +4736,7 @@ paths:
             no filter.
           schema:
             type: string
-            enum: [max_duration, no_cue_evidence, uncorroborated_tail, reviewer_contradiction, reviewer_boundary_conflict, reviewer_inconclusive_bounds, estimated_pattern_bounds, reviewer_reject_conflict, reviewer_failed, no_splice_evidence, verification_miss, verification_kept_conflict, differential_uncorroborated, large_vad_gap_extension, cue_template_unproven, cue_low_confidence]
+            enum: [max_duration, no_cue_evidence, uncorroborated_tail, reviewer_contradiction, reviewer_boundary_conflict, reviewer_inconclusive_bounds, estimated_pattern_bounds, reviewer_reject_conflict, reviewer_failed, no_splice_evidence, verification_miss, verification_kept_conflict, differential_uncorroborated, large_vad_gap_extension, cue_template_unproven, cue_low_confidence, no_transcript_evidence]
       responses:
         '200':
           description: Paginated detection list
@@ -6160,6 +6160,12 @@ paths:
                     keep. Audio that differs between two fetches of the same
                     enclosure was inserted, whatever the category says
                     (default true).
+                spliceVetoEnabled:
+                  type: boolean
+                  description: >-
+                    Hold a long cut found only in the transcript for review
+                    unless the audio shows an edit point at its edges. A feed's
+                    own spliceVetoEnabled overrides this (default true).
                 differentialMeasuredCorrMax:
                   type: number
                   format: float
@@ -11399,8 +11405,9 @@ components:
             - boolean
             - 'null'
           description: >-
-            Per-feed splice check. null inherits the global setting, true forces the
-            check on, false lets long cuts through without splice evidence.
+            Per-feed splice check. null inherits the global spliceVetoEnabled
+            setting, true forces the check on, false lets long cuts through
+            without splice evidence.
         maxAdDurationOverride:
           type:
             - number
@@ -11746,6 +11753,30 @@ components:
                   type:
                     - string
                     - 'null'
+            spliceCalibration:
+              type:
+                - object
+                - 'null'
+              description: The feed's splice calibration when this episode's audio was analyzed, or null when no audio analysis is stored. status host_read means most of the feed's recent long transcript-only cuts showed no edit point in the audio, so the splice check does not hold them. long_cut_corroboration counts those cuts over recent episodes.
+              properties:
+                status:
+                  type: string
+                  enum: [cold_start, calibrated, host_read]
+                episodes_considered:
+                  type: integer
+                long_cut_corroboration:
+                  type: object
+                  properties:
+                    episodes:
+                      type: integer
+                    cuts:
+                      type: integer
+                    corroborated:
+                      type: integer
+                    fraction:
+                      type:
+                        - number
+                        - 'null'
             transcriptAvailable:
               type: boolean
             chaptersRegenerating:
@@ -12743,7 +12774,7 @@ components:
         hold_reason:
           type: string
           nullable: true
-          enum: [max_duration, no_cue_evidence, uncorroborated_tail, reviewer_contradiction, reviewer_boundary_conflict, reviewer_inconclusive_bounds, estimated_pattern_bounds, reviewer_reject_conflict, reviewer_failed, no_splice_evidence, verification_miss, verification_kept_conflict, differential_uncorroborated, large_vad_gap_extension, cue_template_unproven, cue_low_confidence, null]
+          enum: [max_duration, no_cue_evidence, uncorroborated_tail, reviewer_contradiction, reviewer_boundary_conflict, reviewer_inconclusive_bounds, estimated_pattern_bounds, reviewer_reject_conflict, reviewer_failed, no_splice_evidence, verification_miss, verification_kept_conflict, differential_uncorroborated, large_vad_gap_extension, cue_template_unproven, cue_low_confidence, no_transcript_evidence, null]
           description: Why the marker requires review. reviewer_boundary_conflict means a reviewer proposal crossed protected merged-ad evidence; reviewer_reject_conflict means the reviewer rejected a span backed by measured evidence or a confirmed sponsor; reviewer_failed means the review call failed and no independent evidence backs the bounds.
         reviewer_reasoning:
           type: string
@@ -12851,6 +12882,10 @@ components:
               items:
                 type: string
               description: Auto-corrections applied (merged ads, clamped boundaries)
+            audio_corroboration:
+              type: string
+              enum: [transition_pair, template_cue, volume_anomaly, splice_evidence, dai_differential, none]
+              description: Audio evidence found at the edges of a long cut detected from the transcript, or none. Set only on those cuts, in the first pass.
 
     ReviewDetection:
       type: object
@@ -12910,7 +12945,7 @@ components:
           type: string
           nullable: true
           description: Why the detection is held for review; null unless status is pending
-          enum: [max_duration, no_cue_evidence, uncorroborated_tail, reviewer_contradiction, reviewer_boundary_conflict, reviewer_inconclusive_bounds, estimated_pattern_bounds, reviewer_reject_conflict, reviewer_failed, no_splice_evidence, verification_miss, verification_kept_conflict, differential_uncorroborated, large_vad_gap_extension, cue_template_unproven, cue_low_confidence, null]
+          enum: [max_duration, no_cue_evidence, uncorroborated_tail, reviewer_contradiction, reviewer_boundary_conflict, reviewer_inconclusive_bounds, estimated_pattern_bounds, reviewer_reject_conflict, reviewer_failed, no_splice_evidence, verification_miss, verification_kept_conflict, differential_uncorroborated, large_vad_gap_extension, cue_template_unproven, cue_low_confidence, no_transcript_evidence, null]
         status:
           type: string
           enum: [accepted, rejected, pending]
@@ -13555,6 +13590,16 @@ components:
             A marker overlapping a measured differential region is cut even
             when segmentCategoryActions maps its category to keep
             (default true).
+          properties:
+            value:
+              type: boolean
+            isDefault:
+              type: boolean
+        spliceVetoEnabled:
+          type: object
+          description: >-
+            Hold long transcript-only cuts that show no edit point in the
+            audio. A feed's own spliceVetoEnabled overrides this (default true).
           properties:
             value:
               type: boolean
@@ -14257,8 +14302,10 @@ components:
         stageTunables:
           type: object
           description: |
-            Per-stage LLM tunables (temperature, max_tokens, reasoning) and
-            global Ollama context window. Each field carries the resolved
+            Per-stage LLM tunables (temperature, max_tokens, reasoning), chapter
+            density, detection window geometry and the global Ollama context
+            window, keyed by the same names as the PUT
+            /settings/ad-detection body. Each field carries the resolved
             value (env > DB > default), an isDefault flag, and the name of
             any environment variable that is overriding the stored value.
           additionalProperties:
@@ -14318,6 +14365,8 @@ components:
               type: string
               enum: [auto, float16, int8_float16, int8, float32]
             positionalPriorEnabled:
+              type: boolean
+            spliceVetoEnabled:
               type: boolean
             vadGapDetectionEnabled:
               type: boolean

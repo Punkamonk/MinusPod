@@ -106,6 +106,77 @@ def _segments_for_pattern_learning(segments, start, end):
     return clipped
 
 
+# Leading sentences of the previous read shorter than this are dropped from a learned piece.
+LEAD_TRIM_MAX_S = 10.0
+# Silence after a leading segment that marks it as a separate read's tail, not this read's opening.
+LEAD_TAIL_GAP_S = 1.0
+# Longest such tail segment: a closing line, not an unbranded opening of the read itself.
+LEAD_TAIL_MAX_S = 3.0
+_SENTENCE_END_RE = re.compile(r'[.!?]["\')\]]*$')
+
+
+def _sentences(units: list[dict]) -> list[dict]:
+    """Group timed units (words, or whole untimed segments) into sentences."""
+    sentences, current = [], []
+    for unit in units:
+        current.append(unit)
+        if _SENTENCE_END_RE.search((unit.get('text') or '').strip()):
+            sentences.append(current)
+            current = []
+    if current:
+        sentences.append(current)
+    return [{'start': group[0]['start'], 'end': group[-1]['end'],
+             'text': ' '.join(u['text'] for u in group)} for group in sentences]
+
+
+def _drop_paused_tail(sentences, segment_bounds, lo, sponsor_re):
+    """Drop one short leading segment before the first sponsor sentence when a pause follows it."""
+    first_named = next((x['start'] for x in sentences if sponsor_re.search(x['text'])), None)
+    lead = min(((a, b) for a, b in segment_bounds if a >= lo - 0.01), default=None)
+    if first_named is None or lead is None or lead[1] > first_named + 0.01:
+        return sentences
+    following = min((a for a, _ in segment_bounds if a >= lead[1] - 0.01), default=None)
+    if (following is not None and following - lead[1] >= LEAD_TAIL_GAP_S
+            and lead[1] - lead[0] <= LEAD_TAIL_MAX_S):
+        return [x for x in sentences if x['end'] > lead[1] + 0.01]
+    return sentences
+
+
+def trim_piece_to_read(units, segment_bounds, lo, hi, sponsor_re, other_brand_res, handoff_re,
+                       trim_lead: bool, min_s: float = 0.0) -> tuple[float, float, str] | None:
+    """A learned piece narrowed to its sponsor's own copy, or None when it never names the sponsor.
+
+    trim_lead drops the previous read's short tail: the fragment of a segment the piece starts inside,
+    or leading segments set off by a pause; after the last sponsor sentence, a handoff or another
+    read's brand ends the piece. A trim that would leave the read under min_s is not applied.
+    """
+    sentences = untrimmed = _sentences([u for u in units if u['end'] > lo and u['start'] < hi])
+    # Only a piece starting inside a segment carries the previous read's tail.
+    straddled = next((seg_end for seg_start, seg_end in segment_bounds
+                      if seg_start < lo - 0.01 < seg_end), None)
+    if trim_lead and straddled is not None:
+        lead = [x for x in sentences if x['end'] <= straddled + 0.01]
+        if (lead and lead[-1]['end'] - lead[0]['start'] < LEAD_TRIM_MAX_S
+                and not any(sponsor_re.search(x['text']) for x in lead)):
+            sentences = sentences[len(lead):]
+    elif trim_lead:
+        sentences = _drop_paused_tail(sentences, segment_bounds, lo, sponsor_re)
+    naming = [i for i, x in enumerate(sentences) if sponsor_re.search(x['text'])]
+    if not naming:
+        return None
+    for i in range(naming[-1] + 1, len(sentences)):
+        text = sentences[i]['text']
+        if handoff_re.match(text) or any(other.search(text) for other in other_brand_res):
+            sentences = sentences[:i]
+            break
+    if sentences[-1]['end'] - sentences[0]['start'] < min_s <= untrimmed[-1]['end'] - untrimmed[0]['start']:
+        logger.info(f"Keeping learned piece {lo:.1f}-{hi:.1f}s untrimmed: the trim would leave "
+                    f"{sentences[-1]['end'] - sentences[0]['start']:.1f}s, under the {min_s:.0f}s minimum")
+        sentences = untrimmed
+    return (sentences[0]['start'], sentences[-1]['end'],
+            ' '.join(x['text'] for x in sentences))
+
+
 def bounded_segment_texts(segments, start, end) -> list[str]:
     """Text of each segment overlapping [start, end]; an edge segment keeps only its in-span words."""
     texts = []
@@ -1529,7 +1600,8 @@ class TextPatternMatcher:
             return []
 
         # Local import: split_planning imports this module for its phrase list.
-        from split_planning import build_split_candidates, build_split_pieces
+        from split_planning import (HANDOFF_RE, brand_mention_offsets, build_split_candidates,
+                                    build_split_pieces)
 
         def create(piece_start, piece_end, piece_sponsor,
                    from_split=False, piece_text=None, piece_category=category):
@@ -1544,6 +1616,29 @@ class TextPatternMatcher:
         learning_segments = _segments_for_pattern_learning(segments, start, end)
         if learning_segments is None:
             return []
+        segment_bounds = [(seg.get('start', 0.0), seg.get('end', 0.0)) for seg in segments
+                          if seg.get('end', 0.0) > start and seg.get('start', 0.0) < end]
+        cut_down = bool((ad or {}).get('_cut_down'))
+        patterns = self.brand_patterns()
+
+        def trimmed(piece_start, piece_end, piece_sponsor, trim_lead, others):
+            """The piece cut to its sponsor's copy, logged when it moves; None if never named."""
+            sponsor_re = (patterns.get(canonical_sponsor(piece_sponsor))
+                          or word_boundary_re([piece_sponsor]))
+            if sponsor_re is None:
+                return None
+            other_res = [patterns[name] for name in others
+                         if name != canonical_sponsor(piece_sponsor) and name in patterns]
+            result = trim_piece_to_read(learning_segments, segment_bounds, piece_start, piece_end,
+                                        sponsor_re, other_res, HANDOFF_RE, trim_lead,
+                                        min_s=self._pattern_duration_bounds()[0])
+            if result is None:
+                logger.info(f"Learned piece {piece_start:.1f}-{piece_end:.1f}s never names "
+                            f"{piece_sponsor}; not learned")
+            elif (result[0], result[1]) != (piece_start, piece_end):
+                logger.info(f"Trimmed learned piece {piece_start:.1f}-{piece_end:.1f}s to "
+                            f"{result[0]:.1f}-{result[1]:.1f}s, the {piece_sponsor} copy")
+            return result
         _, max_duration = self._pattern_duration_bounds()
         ad_text = self._get_text_around_time(learning_segments, start, end)
         # Registry rows once per span: every gate and divider source below
@@ -1563,16 +1658,22 @@ class TextPatternMatcher:
         bundled = bool(labeled) and not labels_compatible(intro_label, outro_label)
         contaminated = (len(member_sponsors) > 1 or bundled
                         or bool(self._contaminating_brands(ad_text, sponsor, rows)))
+        # Brands another read in this span repeats: a sentence naming one is that read's copy.
+        repeated = [name for name, offsets in
+                    brand_mention_offsets(ad_text, rows, patterns).items()
+                    if len(offsets) >= 2]
         if (end - start <= max_duration
                 and len(find_transition_offsets(ad_text)) <= 1
                 and not contaminated and not merged_distinct):
+            if (ad or {}).get('_member_of') and sponsor:
+                piece = trimmed(start, end, sponsor, cut_down, repeated)
+                return create(piece[0], piece[1], sponsor, piece_text=piece[2]) if piece else []
             return create(start, end, sponsor, piece_text=ad_text)
 
         spans = timed_spans_from_segments(learning_segments, start, end)
-        patterns = self.brand_patterns()
         times = [c['time'] for c in build_split_candidates(
             spans, start, end, members=members, brands=brands, cuts=cuts,
-            compiled=patterns)]
+            compiled=patterns, segments=segments)]
         if not times:
             if merged_distinct:
                 logger.info("Skipping pattern learning: merged ads have no reliable divider")
@@ -1591,7 +1692,7 @@ class TextPatternMatcher:
             return []
 
         pieces = build_split_pieces(spans, start, end, times, brands=brands,
-                                    compiled=patterns)
+                                    compiled=patterns, sponsor=sponsor)
         if bundled:
             logger.info(
                 f"Splitting bundled span {start:.0f}-{end:.0f}s: intro from "
@@ -1620,10 +1721,14 @@ class TextPatternMatcher:
                  for m in labeled if m.get('category')),
                 key=lambda pair: pair[0], default=(0.0, None))
             piece_category = cover['category'] if overlap > 0 else category
+            bounds = trimmed(piece['start'], piece['end'], piece_sponsor,
+                             index > 0 or cut_down, repeated)
+            if bounds is None:
+                continue
             created.extend(
-                create(piece['start'], piece['end'],
+                create(bounds[0], bounds[1],
                        canonical_sponsor(piece_sponsor),
-                       from_split=True, piece_text=piece['text'],
+                       from_split=True, piece_text=bounds[2],
                        piece_category=piece_category))
         return created
 

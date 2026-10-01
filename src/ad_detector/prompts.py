@@ -10,7 +10,8 @@ import re
 from collections import Counter
 from typing import NamedTuple
 
-from sponsor_context import SPONSOR_MIN_MENTIONS, registry_sponsor, text_has_commercial_context
+from sponsor_context import (SPONSOR_MIN_MENTIONS, framed_sponsor_names, registry_sponsor,
+                             text_has_commercial_context)
 from sponsor_service import SponsorService
 from text_pattern_matcher import bounded_segment_texts
 from utils.prompt import (
@@ -20,9 +21,10 @@ from utils.text import truncate
 from utils.time import parse_timestamp
 from utils.llm_response import extract_json_ads_array
 from utils.constants import (
-    INVALID_SPONSOR_VALUES, STRUCTURAL_FIELDS,
+    AUDIO_ECHO_RE, INVALID_SPONSOR_VALUES, STRUCTURAL_FIELDS,
     SPONSOR_PRIORITY_FIELDS, SPONSOR_PATTERN_KEYWORDS,
     SPONSOR_MAX_NAME_CHARS, REASON_DESCRIPTION_MAX,
+    is_non_brand_name,
     is_sponsor_reasoning_rationale,
     mentions_advertising,
     NOT_AD_CLASSIFICATIONS,
@@ -298,7 +300,7 @@ def _get_valid_sponsor_value(value):
         return None
     if len(str_value) > SPONSOR_MAX_NAME_CHARS:
         return None
-    if is_sponsor_reasoning_rationale(str_value):
+    if is_sponsor_reasoning_rationale(str_value) or AUDIO_ECHO_RE.search(str_value):
         return None
     return str_value
 
@@ -350,6 +352,13 @@ def _extract_sponsor_name(ad: dict) -> str:
         key_lower = key.lower()
         if key_lower in STRUCTURAL_FIELDS or key_lower in priority_lower:
             continue
+        if key_lower in ('reason', 'description'):
+            # Prose about the span names a sponsor only through a credit ("brought to you by Acme").
+            framed = framed_sponsor_names(val) if isinstance(val, str) else []
+            value = _get_valid_sponsor_value(framed[0]) if framed else None
+            if value:
+                return value
+            continue
         if isinstance(val, str) and len(val) < 80:
             value = _get_valid_sponsor_value(val)
             if value:
@@ -359,8 +368,8 @@ def _extract_sponsor_name(ad: dict) -> str:
         if key.lower() in STRUCTURAL_FIELDS:
             continue
         if isinstance(val, str) and len(val) > 10:
-            sponsor = extract_sponsor_from_text(val)
-            if sponsor:
+            sponsor = extract_sponsor_from_text(AUDIO_ECHO_RE.sub(' ', val))
+            if sponsor and not is_non_brand_name(sponsor):
                 return sponsor
 
     return 'Advertisement detected'

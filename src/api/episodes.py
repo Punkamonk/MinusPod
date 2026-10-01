@@ -698,6 +698,8 @@ def get_episode(slug, episode_id):
         except (json.JSONDecodeError, TypeError):
             dai_differential = None
 
+    splice_calibration = db.get_episode_splice_calibration(slug, episode_id)
+
     base = _episode_base_json(
         episode, slug=slug, is_local=is_local, storage=storage,
         title_skip_patterns=podcast.get('title_skip_patterns'))
@@ -767,6 +769,7 @@ def get_episode(slug, episode_id):
         'partialDetection': _partial_detection(episode, processing_runs),
         'incompleteCoverage': _incomplete_coverage(processing_runs),
         'daiDifferential': dai_differential,
+        'spliceCalibration': splice_calibration,
         'transcript': episode.get('transcript_text'),
         'transcriptAvailable': bool(episode.get('transcript_text')),
         'originalTranscriptAvailable': bool(episode.get('has_original_transcript')),

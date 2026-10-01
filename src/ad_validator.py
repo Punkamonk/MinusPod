@@ -16,7 +16,7 @@ from config import (
     MERGE_GAP_THRESHOLD, MAX_SILENT_GAP,
     SILENT_REMAINDER_MIN_COVERAGE,
     HOLD_REASON_MAX_DURATION, HOLD_REASON_NO_CUE,
-    HOLD_REASON_NO_SPLICE, VETO_MIN_CUT_SECONDS,
+    HOLD_REASON_NO_SPLICE, VETO_MIN_CUT_SECONDS, SPLICE_VETO_IDENTICAL_MIN_COVERAGE,
     HOLD_REASON_UNCORROBORATED_TAIL,
     HOLD_REASON_DIFFERENTIAL_UNCORROBORATED,
     HOLD_REASON_ESTIMATED_PATTERN,
@@ -26,7 +26,8 @@ from config import (
     CUE_ONLY_SAFETY_HOLD_NEW, CUE_ONLY_SAFETY_AUTO_CUT,
     CUE_ONLY_AUTOCUT_CONFIDENCE,
     HOLD_REASON_CUE_TEMPLATE_UNPROVEN, HOLD_REASON_CUE_LOW_CONFIDENCE,
-    HOLD_REASON_LARGE_VAD_GAP,
+    HOLD_REASON_LARGE_VAD_GAP, HOLD_REASON_NO_TRANSCRIPT_EVIDENCE,
+    EVIDENCE_GATE_DAI_CORE_MIN_COVERAGE, measured_evidence, repair_segment_category,
     MAX_ADJACENT_AUTO_EXTENSION_SECONDS, MERGE_GAP_SECONDS, is_pending_review,
     REVIEWER_REJECT_PRESERVED_FLAG,
 )
@@ -60,18 +61,29 @@ from utils.markers import (
     subtract_spans,
     union_cover,
 )
-from differential_fetcher import differential_region_overlapping
+from differential_fetcher import differential_region_overlapping, identical_coverage
 from community_export import brand_match_candidates
-from text_pattern_matcher import bounded_segment_texts
-from sponsor_context import (SPONSOR_MIN_MENTIONS, description_sponsor_re,
-                             local_commercial_context, registry_sponsor)
+from text_pattern_matcher import AD_TRANSITION_PHRASES, bounded_segment_texts
+from sponsor_context import (BARE_LINK_RE, BRAND_LINK_RE, COMMERCIAL_CONTEXT_RE, CTA_LINK_RE,
+                             SPONSOR_FRAMING_RE, SPONSOR_IS_SPONSOR_RE, SPONSOR_MIN_MENTIONS,
+                             SPONSOR_THANKS_RE, VANITY_LINK_RE, description_sponsor_re,
+                             framed_sponsor_names, framed_with_link_or_offer,
+                             local_commercial_context, names_vanity_link, registry_sponsor)
 from sponsor_normalize import SPONSOR_SUBSTRING_PATTERNS
-from utils.constants import squash_brand
+from sponsor_service import SponsorService
+from utils.constants import (AUDIO_ECHO_RE, is_brand_token, is_non_brand_name,
+                             mentions_advertising, squash_brand)
 from utils.text import extract_text_from_segments, word_boundary_re
 from utils.time import overlap_ratio
 from ad_detector.boundaries import effective_resolved_action
 
 logger = logging.getLogger(__name__)
+
+_SPONSOR_SEPARATOR_RE = re.compile(r'[,;/:]|\band\b', re.IGNORECASE)
+# A reason-derived "sponsor" headed by one of these is the audience, not an advertiser.
+_AUDIENCE_WORDS = frozenset({'patrons', 'patron', 'listeners', 'listener', 'members',
+                             'supporters', 'viewers', 'subscribers', 'you'})
+_AUDIENCE_PHRASES = frozenset({'the show', 'our sponsors'})
 
 # A held remainder is a new pending span: the hold's approval stamps and
 # correction bookkeeping describe the released part, not it.
@@ -233,6 +245,12 @@ class ValidationResult:
     corrections: list[str] = field(default_factory=list)
 
 
+def _covered_seconds(spans, lo: float, hi: float) -> float:
+    """Seconds of [lo, hi] the union of (start, end) spans covers."""
+    return sum(b - a for a, b in merge_runs(
+        (max(a, lo), min(b, hi)) for a, b in spans if min(b, hi) > max(a, lo)))
+
+
 class AdValidator:
     """Validates and corrects ad detection results.
 
@@ -264,6 +282,18 @@ class AdValidator:
 
     # Sources that are evidence from the span itself, unlike the model's reason.
     SPAN_CONFIRMATION_SOURCES = frozenset({'transcript', 'registry'})
+    # LLM-detected stages whose cut needs ad language in its own transcript (#807).
+    EVIDENCE_GATE_STAGES = frozenset({'claude', 'verification'})
+    # Patterns any one of which in the span transcript is ad language.
+    TRANSCRIPT_EVIDENCE_RES = (COMMERCIAL_CONTEXT_RE, SPONSOR_FRAMING_RE, SPONSOR_THANKS_RE,
+                               SPONSOR_IS_SPONSOR_RE, BRAND_LINK_RE, BARE_LINK_RE, CTA_LINK_RE,
+                               VANITY_LINK_RE)
+    # "thanks to" is chat as often as a credit; the framing patterns above already cover the others.
+    EVIDENCE_TRANSITION_PHRASES = tuple(
+        p for p in AD_TRANSITION_PHRASES
+        if p != 'thanks to' and 'brought to you by' not in p and 'sponsored by' not in p)
+    # Transcript-detected stages whose long cuts need audio evidence.
+    VETO_STAGES = ('claude', 'text_pattern')
 
     VAGUE_REASONS: ClassVar[list[str]] = [
         'advertisement', 'ad detected', 'sponsor', 'promotional content',
@@ -311,7 +341,8 @@ class AdValidator:
                  differential_corr_max: float = 0.60,
                  sponsor_service=None,
                  max_ad_duration: float = MAX_AD_DURATION,
-                 max_ad_duration_confirmed: float = MAX_AD_DURATION_CONFIRMED):
+                 max_ad_duration_confirmed: float = MAX_AD_DURATION_CONFIRMED,
+                 podcast_name: str = None):
         """Initialize validator.
 
         Args:
@@ -343,6 +374,8 @@ class AdValidator:
             max_ad_duration_confirmed: Length above which even a confirmed
                 sponsor does not help.
         """
+        self.podcast_name = podcast_name
+        self._show_key = squash_brand(podcast_name or '')
         self.episode_duration = episode_duration
         self.segments = segments or []
         self.episode_description = episode_description or ""
@@ -426,14 +459,39 @@ class AdValidator:
         return self._variant_index
 
     def _matches_expected_sponsor(self, found: str, expected: str) -> bool:
-        labels = {squash_brand(part) for part in re.split(
-            r'[,;/:]|\band\b', expected, flags=re.IGNORECASE)}
+        labels = {squash_brand(part) for part in _SPONSOR_SEPARATOR_RE.split(expected)}
         if squash_brand(found) in labels:
             return True
         if not self.sponsor_service or not hasattr(self.sponsor_service, 'get_sponsors'):
             return False
         return any(labels & variants
                    for variants in self._sponsor_variant_index().get(squash_brand(found), ()))
+
+    def _named_sponsors(self, ad: dict) -> tuple[list[str], bool]:
+        """(names, from_reason): the detection's sponsor field, else names its reason frames or labels."""
+        def usable(names):
+            return [name for name in names if name and not is_non_brand_name(name)
+                    and is_brand_token(squash_brand(name))]
+        field = usable(part.strip() for part in _SPONSOR_SEPARATOR_RE.split(ad.get('sponsor') or ''))
+        if field:
+            return field, False
+        reason = ad.get('reason')
+        names = (usable(framed_sponsor_names(reason))
+                 or usable((SponsorService.extract_sponsor_from_reason(reason),)))
+        return [name for name in names if not self._is_audience_or_show(name)], True
+
+    def _is_audience_or_show(self, name: str) -> bool:
+        key = ' '.join(name.lower().split())
+        words = key.split()
+        if key in _AUDIENCE_PHRASES or words[0] in _AUDIENCE_WORDS or words[-1] in _AUDIENCE_WORDS:
+            return True
+        show = self._show_key
+        squashed = squash_brand(name)
+        if not show or not squashed:
+            return False
+        # A long name the show title starts with is a truncated title; one brand word is not.
+        return (show in squashed
+                or (len(words) >= 3 and show.startswith(squashed)))
 
     def _bounded_text_segments(self, ad: dict) -> list[str]:
         return bounded_segment_texts(self.segments, ad['start'], ad['end'])
@@ -451,8 +509,9 @@ class AdValidator:
 
     def _sponsor_confirmation_source(self, ad: dict) -> str | None:
         """Where the ad's sponsor was confirmed: 'transcript' (a description
-        sponsor is spoken in the span), 'registry' (see _registry_confirms),
-        'reason' (only the detection model's own prose names it), or None.
+        sponsor or one the detection named is advertised in the span),
+        'registry' (see _registry_confirms), 'reason' (only the detection
+        model's own prose names it), or None.
         Prose is checked last: it is the one source the model wrote itself.
         """
         texts = self._bounded_text_segments(ad)
@@ -469,6 +528,24 @@ class AdValidator:
 
         if self._registry_confirms(ad, texts):
             return 'registry'
+
+        # A brand the detection named, advertised in the span, even when no registry row knows it.
+        names, from_reason = self._named_sponsors(ad)
+        for name in names:
+            # Model prose is weaker than its label: the span must frame the name and read a link or offer.
+            if from_reason:
+                advertised = framed_with_link_or_offer(
+                    texts, name, names_sponsor=self._names_sponsor,
+                    matches_expected=self._matches_expected_sponsor)
+            else:
+                advertised = (local_commercial_context(
+                    texts, name, names_sponsor=self._names_sponsor,
+                    matches_expected=self._matches_expected_sponsor)
+                    or (names_vanity_link(texts, name)
+                        and self._names_sponsor(' '.join(texts), name)))
+            if advertised:
+                logger.info(f"Sponsor '{name}' named by the detection is advertised in the span")
+                return 'transcript'
 
         if self._description_sponsor_re is not None:
             named = self._description_sponsor_re.search(ad.get('reason', ''))
@@ -997,9 +1074,15 @@ class AdValidator:
         # Make decision based on adjusted confidence and flags
         decision = self._make_decision(confidence, flags, duration)
 
+        # Measured on every long transcript-detected cut, held or not, so calibration sees them all.
+        long_llm = (decision == Decision.ACCEPT and duration >= self.veto_min_cut_seconds
+                    and ad.get('detection_stage') in self.VETO_STAGES
+                    and isinstance((self._audio_analysis or {}).get('splice_evidence'), dict))
+        corroboration = self._audio_corroboration_source(ad) if long_llm else None
+
         # Apply per-feed hold rules after the base decision.
         decision = self._apply_hold_rules(ad, decision, confidence, flags, duration,
-                                          confirmation_source)
+                                          confirmation_source, corroboration)
         # Only a human decides what an auto-approval left of a hold.
         if remainder_reason and decision != Decision.REJECT:
             if not ad.get('held_for_review'):
@@ -1018,6 +1101,8 @@ class AdValidator:
             # model's own reason is not evidence against that same model.
             'sponsor_confirmed': confirmation_source in self.SPAN_CONFIRMATION_SOURCES,
         }
+        if long_llm:
+            ad['validation']['audio_corroboration'] = corroboration or 'none'
 
         return ad
 
@@ -1162,9 +1247,16 @@ class AdValidator:
 
     def _splice_calibrated(self) -> bool:
         """True when this feed's splice calibration status is 'calibrated'
-        (spec 2.3c); cold-start feeds corroborate but never veto."""
+        (spec 2.3c); cold-start and host_read feeds corroborate but never veto."""
         payload = (self._audio_analysis or {}).get('splice_evidence') or {}
         return payload.get('calibration', {}).get('status') == 'calibrated'
+
+    def _cross_fetch_identical_coverage(self, ad: dict) -> float:
+        """Identical coverage of the ad on a no_differential cross-fetch, else 0.0."""
+        payload = (self._audio_analysis or {}).get('dai_differential')
+        if not isinstance(payload, dict) or payload.get('status') != 'no_differential':
+            return 0.0
+        return identical_coverage(payload, ad['start'], ad['end'])
 
     def _audio_corroboration_source(self, ad: dict) -> str | None:
         """Return the strongest stored-audio evidence source near the ad's
@@ -1281,7 +1373,8 @@ class AdValidator:
 
     def _apply_hold_rules(self, ad: dict, decision: Decision, confidence: float,
                           flags: list[str], duration: float,
-                          confirmation_source: str | None) -> Decision:
+                          confirmation_source: str | None,
+                          corroboration: str | None) -> Decision:
         """Apply per-feed hold rules after the base decision.
 
         A held ad gets decision=REVIEW with held_for_review=True so the gate
@@ -1327,6 +1420,19 @@ class AdValidator:
             self._mark_held(ad, flags, HOLD_REASON_DIFFERENTIAL_UNCORROBORATED)
             return Decision.REVIEW
 
+        # Rule 7: an uncategorised or audio-only LLM span needs ad language in its transcript; skipped
+        # without a transcript. Ordered before the cue gate and splice veto so the hold names the real fault.
+        if (decision == Decision.ACCEPT and self.segments
+                and ad.get('detection_stage') in self.EVIDENCE_GATE_STAGES
+                and confirmation_source not in self.SPAN_CONFIRMATION_SOURCES
+                and self._evidence_gate_triggered(ad)
+                and not self._has_transcript_ad_evidence(ad)
+                and not self._evidence_gate_exempt(ad)):
+            logger.info(f"Holding {ad['start']:.1f}-{ad['end']:.1f}s: no ad language in the span "
+                        f"transcript (category={ad.get('category')}, reason={(ad.get('reason') or '')[:80]!r})")
+            self._mark_held(ad, flags, HOLD_REASON_NO_TRANSCRIPT_EVIDENCE)
+            return Decision.REVIEW
+
         # Rule 2: cue-gated approval. Only applies to ACCEPT after rule 1.
         # is_cue_backed treats manual markers as exempt (human decision).
         if self.cue_gate_enabled and decision == Decision.ACCEPT:
@@ -1359,14 +1465,20 @@ class AdValidator:
         # only: cold-start evidence corroborates but never vetoes.
         if (self.splice_veto_enabled and decision == Decision.ACCEPT
                 and duration >= self.veto_min_cut_seconds
-                and ad.get('detection_stage') in ('claude', 'text_pattern')
+                and ad.get('detection_stage') in self.VETO_STAGES
                 and self._splice_calibrated()
-                and self._audio_corroboration_source(ad) is None):
+                and corroboration is None):
             # A sponsor the span itself names stands in for audio evidence; model prose does not.
             if confirmation_source in self.SPAN_CONFIRMATION_SOURCES:
                 flags.append(f"INFO: Splice veto waived, sponsor confirmed by {confirmation_source}")
                 logger.info(f"Splice veto waived for {ad['start']:.1f}s-{ad['end']:.1f}s: "
                             f"sponsor confirmed by {confirmation_source}")
+            # Nothing was inserted in this fetch pair, so baked-in audio cannot show a splice.
+            elif ((coverage := self._cross_fetch_identical_coverage(ad))
+                  >= SPLICE_VETO_IDENTICAL_MIN_COVERAGE):
+                flags.append("INFO: Splice veto skipped, cross-fetch shows baked-in audio")
+                logger.info(f"Splice veto skipped for {ad['start']:.1f}s-{ad['end']:.1f}s: "
+                            f"cross-fetch found no inserted audio ({coverage:.0%} identical)")
             else:
                 self._mark_held(ad, flags, HOLD_REASON_NO_SPLICE)
                 return Decision.REVIEW
@@ -1394,6 +1506,44 @@ class AdValidator:
         """Whether an auto pattern guessed part of this ad's span."""
         return bool(ad.get('has_estimated_pattern_member')
                     or (ad.get('span_estimated') and not ad.get('pattern_defined')))
+
+    @classmethod
+    def _evidence_gate_triggered(cls, ad: dict) -> bool:
+        """A missing or unknown category, or a reason that only echoes audio signals."""
+        reason = ad.get('reason') or ''
+        audio_only = (bool(AUDIO_ECHO_RE.search(reason)) and not mentions_advertising(reason)
+                      and 'based on transcript' not in reason.lower())
+        return repair_segment_category(ad.get('category')) is None or audio_only
+
+    def _has_transcript_ad_evidence(self, ad: dict) -> bool:
+        """A registry brand, link, promo code, or sponsor or transition phrase in the span transcript."""
+        text = ' '.join(self._bounded_text_segments(ad))
+        if not text.strip():
+            return False
+        lowered = text.lower()
+        if (any(pattern.search(text) for pattern in self.TRANSCRIPT_EVIDENCE_RES)
+                or self.AD_SIGNAL_PATTERNS.search(text)
+                or any(phrase in lowered for phrase in self.EVIDENCE_TRANSITION_PHRASES)):
+            return True
+        if self.sponsor_service:
+            try:
+                # One passing mention of a common-word brand is conversation, not a read.
+                return self.sponsor_service.count_sponsor_mentions(text) >= SPONSOR_MIN_MENTIONS
+            except Exception as e:
+                logger.debug(f"Sponsor registry lookup failed: {e}")
+        return False
+
+    def _evidence_gate_exempt(self, ad: dict) -> bool:
+        """Measured audio that stands in for transcript evidence: DAI core, a measured member, a differential."""
+        start, end = ad['start'], ad['end']
+        covered = _covered_seconds(dai_core_spans(ad), start, end)
+        if end > start and covered / (end - start) >= EVIDENCE_GATE_DAI_CORE_MIN_COVERAGE:
+            return True
+        if measured_evidence(ad):
+            return True
+        return bool(differential_region_overlapping(
+            (self._audio_analysis or {}).get('dai_differential'), start, end,
+            self.differential_corr_max))
 
     @classmethod
     def _estimated_pattern_needs_hold(cls, ad: dict) -> bool:
@@ -1614,13 +1764,10 @@ class AdValidator:
                     and sig.get('start', end) < end and sig.get('end', start) > start):
                 return False
         lo, hi = start + EDGE_TOLERANCE, end - EDGE_TOLERANCE
-        clipped = []
-        for span in analysis.get('silence_spans') or []:
-            a, b = finite_number(span.get('start')), finite_number(span.get('end'))
-            if a is not None and b is not None and min(b, hi) > max(a, lo):
-                clipped.append((max(a, lo), min(b, hi)))
-        covered = sum(b - a for a, b in merge_runs(clipped))
-        return hi > lo and covered >= SILENT_REMAINDER_MIN_COVERAGE * (hi - lo)
+        spans = [(a, b) for a, b in ((finite_number(span.get('start')), finite_number(span.get('end')))
+                                     for span in analysis.get('silence_spans') or [])
+                 if a is not None and b is not None]
+        return hi > lo and _covered_seconds(spans, lo, hi) >= SILENT_REMAINDER_MIN_COVERAGE * (hi - lo)
 
     def _mark_held(self, ad: dict, flags: list[str], reason: str) -> None:
         """Set held_for_review state on the ad dict and append a flag entry."""
