@@ -11,6 +11,9 @@ release notes.
 
 ## [Unreleased]
 
+### Fixed
+- The evidence gate (#807) now holds LLM spans whose reason restates the audio signals without the word "pair": "DAI transition(s)", "dynamic ad insertion" and "potential ad content" count as audio echoes, so a reason such as "Dynamic ad insertion detected" or "DAI transition with volume anomaly and splice evidence" is no longer read as ad language. Those spans were being cut as ads; they now need ad language in the span transcript or measured audio evidence.
+
 ## [2.100.11] - 2026-10-12
 
 Maintenance release with no new functionality. The processing pipeline, API, and UI behave as in 2.100.10. The work is module splits, documentation, dependency updates, OpenAPI corrections, and one settings save fix.
