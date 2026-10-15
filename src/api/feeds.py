@@ -44,6 +44,7 @@ from config import (
     EPISODE_LOGS_VALUES,
     cue_only_missing_roles,
 )
+from description_chapters import TO_END, TRIM_MODES
 from differential_fetcher import is_likely_dai_feed
 from positional_prior import compute_ad_distribution
 from llm_capabilities import chapters_capability_error
@@ -204,18 +205,26 @@ def _normalize_title_override(value):
 _DETECTION_NOTES_MAX = 1000
 
 
-def _normalize_detection_notes(value):
+def _normalize_notes(value, field):
     """None or blank clears; otherwise trimmed text up to the cap."""
     if value is None:
         return None, None
     if not isinstance(value, str):
-        return None, "detectionNotes must be a string or null"
+        return None, f"{field} must be a string or null"
     text = value.strip()
     if not text:
         return None, None
     if len(text) > _DETECTION_NOTES_MAX:
-        return None, f"detectionNotes must be {_DETECTION_NOTES_MAX} characters or fewer"
+        return None, f"{field} must be {_DETECTION_NOTES_MAX} characters or fewer"
     return text, None
+
+
+def _normalize_chapter_notes(value):
+    return _normalize_notes(value, 'chapterNotes')
+
+
+def _normalize_detection_notes(value):
+    return _normalize_notes(value, 'detectionNotes')
 
 
 def _fetch_feed_content(url, timeout=30, podcast=None):
@@ -439,6 +448,23 @@ def _normalize_title_skip_patterns(value):
 
 def _normalize_description_skip_patterns(value):
     return _normalize_skip_patterns(value, 'descriptionSkipPatterns')
+
+
+def _normalize_description_trim_pattern(value):
+    """Validate descriptionTrimPattern: a single glob string or null (cleared)."""
+    if value is None:
+        return None, None
+    if (not isinstance(value, str) or not value.strip()
+            or len(value) > _TITLE_SKIP_PATTERN_MAX_LEN):
+        return None, (f'descriptionTrimPattern must be a string of '
+                      f'1-{_TITLE_SKIP_PATTERN_MAX_LEN} characters or null')
+    return value.strip(), None
+
+
+def _normalize_description_trim_mode(value):
+    if value in TRIM_MODES:
+        return value, None
+    return None, f"descriptionTrimMode must be one of: {', '.join(TRIM_MODES)}"
 
 
 def _normalize_title_skip_action(value):
@@ -932,6 +958,7 @@ def _podcast_base_json(podcast, feed_url, db, global_actions=None) -> dict:
         'downloadUserAgentOverride': podcast.get('download_user_agent_override'),
         'feedUserAgentOverride': podcast.get('feed_user_agent_override'),
         'detectionNotes': podcast.get('detection_notes'),
+        'chapterNotes': podcast.get('chapter_notes'),
         # Local-only metadata (_LOCAL_ONLY_FIELDS gates PATCH writes to local
         # feeds; reading them back is harmless for a subscribed feed, which
         # simply never has them set). Was write-only before this fix: PATCH
@@ -960,6 +987,8 @@ def _podcast_base_json(podcast, feed_url, db, global_actions=None) -> dict:
         'episodeLogs': podcast.get('episode_logs'),
         'titleSkipPatterns': _deserialize_skip_patterns(podcast.get('title_skip_patterns')),
         'descriptionSkipPatterns': _deserialize_skip_patterns(podcast.get('description_skip_patterns')),
+        'descriptionTrimPattern': podcast.get('description_trim_pattern'),
+        'descriptionTrimMode': podcast.get('description_trim_mode') or TO_END,
         'titleSkipAction': podcast.get('title_skip_action') or 'serve_original',
         'minDurationSeconds': podcast.get('min_duration_seconds'),
         'maxDurationSeconds': podcast.get('max_duration_seconds'),
@@ -1753,6 +1782,12 @@ def export_opml():
     )
 
 
+@api.route('/feeds/subscriber-keys', methods=['GET'])
+@log_request
+def list_all_feed_subscriber_keys():
+    return json_response({'keys': get_database().list_all_feed_subscriber_keys()})
+
+
 @api.route('/feeds/<slug>/subscriber-keys', methods=['GET'])
 @log_request
 def list_feed_subscriber_keys(slug):
@@ -1974,6 +2009,12 @@ def update_feed(slug):
             return error_response(title_err, 400)
         updates['title_override'] = title_val
 
+    if 'chapterNotes' in data:
+        chapter_notes_val, chapter_notes_err = _normalize_chapter_notes(data['chapterNotes'])
+        if chapter_notes_err:
+            return error_response(chapter_notes_err, 400)
+        updates['chapter_notes'] = chapter_notes_val
+
     if 'detectionNotes' in data:
         notes_val, notes_err = _normalize_detection_notes(data['detectionNotes'])
         if notes_err:
@@ -2070,6 +2111,18 @@ def update_feed(slug):
         if desc_patterns_err:
             return error_response(desc_patterns_err, 400)
         updates['description_skip_patterns'] = desc_patterns_val
+
+    if 'descriptionTrimPattern' in data:
+        trim_val, trim_err = _normalize_description_trim_pattern(data['descriptionTrimPattern'])
+        if trim_err:
+            return error_response(trim_err, 400)
+        updates['description_trim_pattern'] = trim_val
+
+    if 'descriptionTrimMode' in data:
+        mode_val, mode_err = _normalize_description_trim_mode(data['descriptionTrimMode'])
+        if mode_err:
+            return error_response(mode_err, 400)
+        updates['description_trim_mode'] = mode_val
 
     if 'titleSkipAction' in data:
         action_val, action_err = _normalize_title_skip_action(data['titleSkipAction'])

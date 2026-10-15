@@ -502,7 +502,6 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
         audio_logger.info(f"[{slug}:{episode_id}] Confidence threshold: {min_cut_confidence:.0%}")
 
         common._publish_status('start_job', slug, episode_id, episode_title, podcast_name)
-        common._publish_status('update_job_stage', slug, episode_id, "downloading", 0)
 
         upsert_kwargs = dict(
             original_url=episode_url, title=episode_title,
@@ -844,6 +843,8 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                         segment_actions=segment_actions,
                         corrections=user_corrections,
                         transcript_spans=transcript_spans,
+                        description_trim=((podcast_settings or {}).get('description_trim_pattern'),
+                                          (podcast_settings or {}).get('description_trim_mode')),
                     )
 
                 # Late keep partition: _refine_and_validate's heuristic
@@ -1149,9 +1150,11 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
             # File the confirms before finalizing so the recut below applies
             # them in this run: two finalizes wrote two history rows and
             # notified twice for one reprocess.
-            if verify._file_corroborated_hold_approvals(
-                    slug, episode_id, all_ads_with_validation,
-                    corrections=user_corrections):
+            # A matched chapter's trim marker rides the same single in-run recut.
+            approvals_filed = verify._file_corroborated_hold_approvals(
+                slug, episode_id, all_ads_with_validation,
+                corrections=user_corrections)
+            if approvals_filed or publish.pending_chapter_trim(all_ads_with_validation):
                 # No cancel_event: a cancel here reaches the background
                 # wrapper's cleanup, which deletes the finished files.
                 recut_progress = {}
@@ -1176,14 +1179,14 @@ def process_episode(slug: str, episode_id: str, episode_url: str,
                     failure._handle_processing_failure(
                         slug, episode_id, episode_title, podcast_name,
                         db.get_episode(slug, episode_id),
-                        RuntimeError('Approval recut failed after rewriting the '
+                        RuntimeError('In-run recut failed after rewriting the '
                                      'episode'), start_time, run_stats=run_stats)
                     _settle_provider_reservations()
                     return False
                 # Nothing was overwritten: finalize this run's render and leave
                 # the filed confirms for the next run to apply.
                 audio_logger.warning(
-                    f"[{slug}:{episode_id}] Approval recut failed before it "
+                    f"[{slug}:{episode_id}] In-run recut failed before it "
                     f"rewrote anything; finalizing this run's render"
                 )
 

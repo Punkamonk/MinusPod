@@ -9,9 +9,41 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
-## [Unreleased]
+## [2.100.15] - 2026-10-15
 
 ### Fixed
+- An MP3 without a Xing, Info or VBRI header no longer gets the duration ffprobe estimates from its bitrate. When ffprobe says it is estimating, the file is decoded once and that length is used. End cues in the last seconds are scanned again and markers and cuts can reach the real end. Reprocessing an episode picks up the exact length. (#860)
+- A feed's episode list keeps its page, status filter, sort, title search and page size in the URL. Opening an episode and pressing Back returns to the same page instead of page 1. The title search updates the URL once typing pauses.
+- The transcript viewer's search box has its own row, with Source, Start and End beneath it in the same labeled fields the other filter bars use. The filters no longer wrap unevenly on a phone. The End box shows the episode's last timestamp until a value is typed.
+
+## [2.100.14] - 2026-10-14
+
+### Fixed
+- MP3 stream copy no longer re-encodes an episode because one edge is word-timed, quote-aligned, reviewer-locked or confirmed, or because a cut touches the start or end of the file. Locked edges snap inward per cut, so kept audio is never shortened. A beep action still skips copy, and that skip is now logged. (#858)
+- The Downloads tab on the History page no longer scrolls sideways on desktop. Long IPv6 addresses wrap, titles truncate, and the extra columns appear as the window widens. Narrow windows get the card layout.
+- The Detection notes and Chapter notes fields in feed settings use the standard text input style instead of a secondary fill.
+
+## [2.100.13] - 2026-10-14
+
+### Added
+- Feeds can trim an episode by a description chapter. When a timestamp line in the description matches a title pattern, the span from that timestamp to the end of the episode (or to the next chapter) is cut like an ad, so a show whose second half is a re-run no longer needs to be skipped. The rule also matches the episode's chapters, including the ones MinusPod generates, and a matching generated chapter queues an automatic recut. Feeds can add chapter notes that are sent with every chapter request.
+- History page gains a Downloads tab: every episode download with time, client IP, location, subscriber label and client app, with sorting and filters. Range requests from the same client within 15 minutes count as one download. Geo lookup (ipwho.is over HTTPS) is off by default and enabled under Settings. It runs within five minutes of a download and starts as soon as the setting is turned on. Rows are kept for 90 days by default and pruned daily. See [Download History](docs/download-history.md).
+- Download history rows have an Actions menu to view the user agent, view the last request, block the client's user agent (adds `^` plus its product token to the JIT blocked user agents list) or revoke the subscriber feed that fetched it; rows fetched with the global feed key offer no revoke.
+- Settings > Authenticated feeds lists every subscriber feed across all podcasts with its label and feed; each feed's settings gain a Security section to create and revoke subscriber feeds for that podcast.
+- Each LLM-detected marker records the addressing mode it was detected under and the model's pre-snap boundaries; the reviewer log and corrections carry the mode, and /stats/reviewer and /stats/addressing report verdicts, correction rates and snap distance per mode.
+
+### Changed
+- A feed's max ad duration cap or its max ad duration (reject) override now also lifts the detector's 7-minute cap on a single LLM detection, so a show whose mid-roll is one continuous 8 to 10 minute block can be detected as one span instead of pieces. The 7-minute default is now the global setting Longest single LLM detection. The verification pass honors the same cap.
+- Detected Ads and Ad Review cards share one layout: the category selector sits above a single equal-width row of Play, Confirm ad, Not an ad, Split and Edit. Pattern merge suggestions put the Merge button below the member list, matching Cleanup. The feed settings Episode filters section uses compact pattern chips and buttons on mobile.
+- The search index is refreshed from its change journal every 6 hours and fully rebuilt weekly; rebuild writes yield between batches so the podping listener and processing queue no longer wait 10 to 20 s on the write lock during a rebuild.
+
+### Fixed
+- Reprocessing or re-detecting an episode on a local feed, or any episode with a retained original, no longer reports a Downloading phase; the status bar shows Preparing until transcription starts.
+- Search results no longer show raw HTML tags from episode and podcast descriptions; the index stores plain text and is rebuilt once on upgrade.
+- A reviewer boundary adjustment can no longer move an ad edge back across an audio cue that is set to be removed with the ad, so break stingers are cut instead of left audible.
+- Changing the category in a held marker's editor now records the new category and keeps the marker held; it no longer confirms the marker with the old category.
+- Confirming the reviewer's trimmed span on a held marker no longer fails with 'Adjusted bounds must lie within the reviewed span' when the hold was carved out of a larger detection. The stale trim is dropped from the remainder, the button is hidden when the trim does not overlap the held span, and the error names the spans when it still applies.
+- The subscriber-feed podcast picker is sorted alphabetically.
 - The evidence gate (#807) now holds LLM spans whose reason restates the audio signals without the word "pair": "DAI transition(s)", "dynamic ad insertion" and "potential ad content" count as audio echoes, so a reason such as "Dynamic ad insertion detected" or "DAI transition with volume anomaly and splice evidence" is no longer read as ad language. Those spans were being cut as ads; they now need ad language in the span transcript or measured audio evidence.
 
 ## [2.100.11] - 2026-10-12

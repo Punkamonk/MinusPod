@@ -115,6 +115,13 @@ function correctionBadgeLabel(correction: EpisodeCorrection): string {
   return correction.correction_type === 'false_positive' ? 'Not an ad' : 'Adjusted';
 }
 
+type ProposedAdSegment = AdSegment & { reviewer_proposed_start: number; reviewer_proposed_end: number };
+
+function proposalOverlaps(seg: AdSegment): seg is ProposedAdSegment {
+  return seg.reviewer_proposed_start != null && seg.reviewer_proposed_end != null
+    && seg.reviewer_proposed_start < seg.end && seg.reviewer_proposed_end > seg.start;
+}
+
 // Row-identity payload the corrections API keys on. One builder so the
 // reason coercion stays consistent across the modal and the row buttons.
 function toOriginalAd(segment: AdSegment) {
@@ -1470,7 +1477,7 @@ function EpisodeDetail() {
               detectionStage: seg.detection_stage || 'first_pass',
               patternId: null,
               correctedBounds:
-                seg.reviewer_proposed_start != null && seg.reviewer_proposed_end != null
+                proposalOverlaps(seg)
                   ? { start: seg.reviewer_proposed_start, end: seg.reviewer_proposed_end }
                   : null,
             }}
@@ -1479,6 +1486,11 @@ function EpisodeDetail() {
             episodeDuration={episode.originalDuration ?? 0}
             boundsWindow={{ min: seg.start - 0.5, max: seg.end + 0.5 }}
             onSubmit={(s) => {
+              if (s.kind === 'recategorize') {
+                // A category is a property of the span, not a verdict: stay open and held.
+                handleCorrection({ type: 'recategorize', originalAd, category: s.category });
+                return;
+              }
               if (s.kind === 'reject') {
                 handleCorrection({ type: 'reject', originalAd });
               } else {
@@ -1681,7 +1693,7 @@ function EpisodeDetail() {
                       >
                         {btnLabel(confirmStatus, oneTapRecut ? 'Confirm & Recut' : 'Confirm ad')}
                       </button>
-                      {segment.reviewer_proposed_start != null && segment.reviewer_proposed_end != null && (
+                      {proposalOverlaps(segment) && (
                         <button
                           onClick={() => {
                             if (oneTapRecut) {

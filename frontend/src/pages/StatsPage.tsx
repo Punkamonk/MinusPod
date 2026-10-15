@@ -1,6 +1,7 @@
-import { Fragment, useState, useMemo, useRef, useEffect, type ReactNode } from 'react';
+import { Fragment, useState, useMemo, type ReactNode } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { Link, useSearchParams } from 'react-router';
+import { Link } from 'react-router';
+import { useUrlParams } from '../hooks/useUrlParams';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Cell,
@@ -22,7 +23,8 @@ import { Pagination } from '../components/Pagination';
 import { SortHeader, useSortState } from '../components/SortHeader';
 import DisclosureButton from '../components/DisclosureButton';
 import CostAmount from '../components/CostAmount';
-import { selectBase, inputBase, focusRing, filterGrid, filterLabel, filterControl } from '../components/fieldStyles';
+import DateField from '../components/DateField';
+import { selectBase, focusRing, filterGrid, filterLabel, filterControl } from '../components/fieldStyles';
 import { SLOT_LABELS } from '../api/types';
 import { btnSecondary } from '../components/buttonStyles';
 import { badgeBase, tint } from '../components/badgeStyles';
@@ -33,49 +35,6 @@ const CLEANUP_ACTION_LABELS: Record<string, string> = {
   trim: 'Trims', split: 'Splits', rename: 'Sponsor renames',
   retire: 'Retirements', flag: 'Flags', category: 'Category changes',
 };
-
-interface SpendDateFieldProps {
-  id: string;
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  min?: string;
-  max?: string;
-}
-
-function SpendDateField({
-  id, label, value, onChange, min, max,
-}: SpendDateFieldProps): ReactNode {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [editing, setEditing] = useState(false);
-  useEffect(() => {
-    if (!editing && inputRef.current && inputRef.current.value !== value) {
-      inputRef.current.value = value;
-    }
-  }, [editing, value]);
-  return (
-    <div className="min-w-0">
-      <label htmlFor={id} className={filterLabel}>{label}</label>
-      <div className="flex items-center gap-1">
-        <input
-          ref={inputRef}
-          type="date"
-          id={id}
-          min={min}
-          max={max}
-          defaultValue={value}
-          onFocus={() => setEditing(true)}
-          onChange={(event) => onChange(event.target.value)}
-          onBlur={() => {
-            setEditing(false);
-            onChange(inputRef.current?.value ?? '');
-          }}
-          className={`${filterControl} ${inputBase} max-sm:px-0 max-sm:text-base [&::-webkit-date-and-time-value]:text-left [&::-webkit-datetime-edit]:min-w-0 [&::-webkit-datetime-edit]:p-0`}
-        />
-      </div>
-    </div>
-  );
-}
 
 type PodcastSortField = 'podcastTitle' | 'episodeCount' | 'runCount' | 'totalAds' | 'avgAds' | 'avgTimeSavedSeconds' | 'avgEpisodeLengthSeconds' | 'totalCost' | 'avgTokensPerEpisode';
 
@@ -122,25 +81,6 @@ const STATS_PARAM_DEFAULTS = {
   muSort: 'knownCostUsd', muDir: 'desc', muPage: '1',
   ecSort: 'lastActivityAt', ecDir: 'desc', ecPage: '1',
 } as const;
-
-type StatsParam = keyof typeof STATS_PARAM_DEFAULTS;
-
-function useStatsParams() {
-  const [params, setParams] = useSearchParams();
-  const read = (key: StatsParam) => params.get(key) ?? STATS_PARAM_DEFAULTS[key];
-  // One patch per interaction: two separate setters in the same handler would
-  // each build from the pre-update query and the second would drop the first.
-  const write = (changes: Partial<Record<StatsParam, string>>) => {
-    const next = new URLSearchParams(params);
-    for (const [key, value] of Object.entries(changes)) {
-      if (value && value !== STATS_PARAM_DEFAULTS[key as StatsParam]) next.set(key, value);
-      else next.delete(key);
-    }
-    setParams(next, { replace: true });
-  };
-  const readPage = (key: StatsParam) => Math.max(1, Number(read(key)) || 1);
-  return { read, readPage, write };
-}
 
 // Option list that always contains the current selection, so a filter whose
 // value has no data in the selected scope is still shown as selected.
@@ -751,7 +691,7 @@ export default function StatsPage() {
   // Shared ledger filters (date interval, podcast, provider, model) drive both
   // the model-usage and episode-cost lists below, and all of it round-trips
   // through the URL.
-  const { read, readPage, write } = useStatsParams();
+  const { read, readPage, write } = useUrlParams(STATS_PARAM_DEFAULTS);
   const ledgerFrom = read('from');
   const ledgerTo = read('to');
   const ledgerPodcast = read('podcast');
@@ -1213,14 +1153,14 @@ export default function StatsPage() {
 
         <div className={`${filterGrid} lg:grid-cols-5 mb-3`}>
           <div className="grid grid-cols-2 gap-2 sm:gap-4 min-w-0 min-[375px]:col-span-2">
-          <SpendDateField
+          <DateField
             id="spendFrom"
             label="From"
             value={ledgerFrom}
             max={ledgerTo || undefined}
             onChange={(value) => write({ from: value, muPage: '1', ecPage: '1' })}
           />
-          <SpendDateField
+          <DateField
             id="spendTo"
             label="To"
             value={ledgerTo}

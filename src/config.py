@@ -408,6 +408,10 @@ def _parsed_skip_patterns(patterns_json):
     return tuple(str(p).lower() for p in patterns if p)
 
 
+DESCRIPTION_CHAPTER_STAGE = 'description_chapter'
+CHAPTER_TRIM_SOURCES = ('generated_chapter', 'upstream_chapter')
+
+
 def _matches_skip_patterns(text, patterns_json):
     """Case-insensitive fnmatch of text against the pattern list encoded in patterns_json."""
     if not text or not patterns_json:
@@ -984,6 +988,13 @@ EPISODE_LOG_LEVEL_DEBUG = 'debug'
 EPISODE_LOG_LEVEL_INFO = 'info'
 EPISODE_LOG_LEVELS = (EPISODE_LOG_LEVEL_DEBUG, EPISODE_LOG_LEVEL_INFO)
 
+DOWNLOAD_HISTORY_RETENTION_DAYS_MIN = 1
+DOWNLOAD_HISTORY_RETENTION_DAYS_MAX = 3650
+DOWNLOAD_HISTORY_RETENTION_DAYS_DEFAULT = 90
+
+MAX_LLM_WINDOW_AD_MIN = 60
+MAX_LLM_WINDOW_AD_MAX = 900
+
 
 def _episode_log_setting(db, key):
     """One episode-log setting from the given handle, or None to use the
@@ -1315,6 +1326,33 @@ def resolve_splice_veto_enabled(db, podcast_id, global_default: bool) -> bool:
     """
     override = _resolve_override(db, podcast_id, 'splice_veto_enabled', bool, None)
     return global_default if override is None else override
+
+
+def resolve_download_history_retention_days(db) -> int:
+    """Download history retention in days, clamped to the allowed range."""
+    days = db.get_setting_int('download_history_retention_days',
+                              DOWNLOAD_HISTORY_RETENTION_DAYS_DEFAULT)
+    return min(max(days, DOWNLOAD_HISTORY_RETENTION_DAYS_MIN),
+               DOWNLOAD_HISTORY_RETENTION_DAYS_MAX)
+
+
+def resolve_max_llm_window_ad_seconds(db) -> float:
+    """Longest single ad one LLM detection window may report."""
+    try:
+        value = float(db.get_setting_float('max_llm_window_ad_seconds',
+                                           MAX_AD_DURATION_WINDOW))
+        return min(max(value, MAX_LLM_WINDOW_AD_MIN), MAX_LLM_WINDOW_AD_MAX)
+    except Exception:
+        return MAX_AD_DURATION_WINDOW
+
+
+def resolve_window_ad_cap(db, podcast_id) -> float:
+    """Longest single LLM detection kept for a feed: the global window cap,
+    raised by the feed's hold cap or reject override when larger."""
+    return max(resolve_max_llm_window_ad_seconds(db),
+               resolve_max_ad_duration_override(db, podcast_id) or 0,
+               _resolve_override(db, podcast_id,
+                                 'max_ad_duration_reject_override', float, None) or 0)
 
 
 def resolve_max_ad_duration_confirmed(db) -> float:

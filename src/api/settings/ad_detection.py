@@ -26,6 +26,8 @@ from config import (
     LOW_AD_YIELD_ACTIONS,
     EPISODE_LOG_LEVELS,
     EPISODE_LOG_RETENTION_DAYS_MIN, EPISODE_LOG_RETENTION_DAYS_MAX,
+    DOWNLOAD_HISTORY_RETENTION_DAYS_MIN, DOWNLOAD_HISTORY_RETENTION_DAYS_MAX,
+    MAX_LLM_WINDOW_AD_MIN, MAX_LLM_WINDOW_AD_MAX,
     USER_AGENT_MAX_LENGTH, validate_user_agent,
     resolve_segment_category_actions_map,
     valid_ad_chapter_title_format,
@@ -165,6 +167,7 @@ def apply_settings_payload_in_transaction(db, data, *, allow_inactive_tunables=F
         _apply_opening_exclusion_fields,
         _apply_ad_merge_fields,
         _apply_max_ad_duration_fields,
+        _apply_max_llm_window_ad_field,
         _apply_detection_tuning_fields,
         _apply_segment_category_actions,
         _apply_ad_chapter_fields,
@@ -292,6 +295,18 @@ def _validate_processing_defaults_payload(data):
         return f'episodeLogLevel must be one of: {", ".join(EPISODE_LOG_LEVELS)}', 400
     if 'feedAuthEnabled' in data and not isinstance(data['feedAuthEnabled'], bool):
         return 'feedAuthEnabled must be a boolean', 400
+    for key in ('downloadHistoryEnabled', 'downloadGeoLookupEnabled'):
+        if key in data and not isinstance(data[key], bool):
+            return f'{key} must be a boolean', 400
+    if 'downloadHistoryRetentionDays' in data:
+        days = data['downloadHistoryRetentionDays']
+        if (not isinstance(days, int) or isinstance(days, bool)
+                or days < DOWNLOAD_HISTORY_RETENTION_DAYS_MIN
+                or days > DOWNLOAD_HISTORY_RETENTION_DAYS_MAX):
+            return (
+                'downloadHistoryRetentionDays must be an integer between '
+                f'{DOWNLOAD_HISTORY_RETENTION_DAYS_MIN} and '
+                f'{DOWNLOAD_HISTORY_RETENTION_DAYS_MAX}', 400)
     return None
 
 
@@ -710,6 +725,24 @@ def _apply_processing_flags(db, data):
             # cannot 304-skip re-rendering served feeds with the new state.
             common.after_commit(db.clear_all_podcast_etags)
             logger.info(f"Updated feed auth to: {value}")
+
+    for payload_key, setting_key in (
+            ('downloadHistoryEnabled', 'download_history_enabled'),
+            ('downloadGeoLookupEnabled', 'download_geo_lookup_enabled')):
+        if payload_key in data:
+            was_geo_on = db.get_setting_bool('download_geo_lookup_enabled', False)
+            db.set_setting(setting_key, 'true' if data[payload_key] else 'false',
+                           is_default=False)
+            logger.info(f"Updated {setting_key} to: {data[payload_key]}")
+            if setting_key == 'download_geo_lookup_enabled' and data[payload_key] and not was_geo_on:
+                # Deferred import: main_app imports api before main_app.background.
+                from main_app.background import _start_geo_lookup
+                common.after_commit(_start_geo_lookup)
+
+    if 'downloadHistoryRetentionDays' in data:
+        days = data['downloadHistoryRetentionDays']
+        db.set_setting('download_history_retention_days', str(days), is_default=False)
+        logger.info(f"Updated download history retention to {days} days")
 
     if 'vttTranscriptsEnabled' in data:
         value = 'true' if data['vttTranscriptsEnabled'] else 'false'
@@ -1221,6 +1254,9 @@ def validate_settings_payload(
     issue = _validate_max_ad_duration_payload(db, data)
     if issue is not None:
         return issue
+    _value, issue = _max_llm_window_ad_value(data)
+    if issue is not None:
+        return issue
     issue = _validate_detection_tuning_payload(db, data)
     if issue is not None:
         return issue
@@ -1372,6 +1408,30 @@ def _max_ad_duration_values(db, data):
         return None, (
             'maxAdDurationSeconds cannot exceed maxAdDurationConfirmedSeconds', 400)
     return writes, None
+
+
+def _max_llm_window_ad_value(data):
+    if 'maxLlmWindowAdSeconds' not in data:
+        return None, None
+    try:
+        value = float(data['maxLlmWindowAdSeconds'])
+    except (TypeError, ValueError):
+        return None, ('maxLlmWindowAdSeconds must be a number', 400)
+    if not math.isfinite(value) or not MAX_LLM_WINDOW_AD_MIN <= value <= MAX_LLM_WINDOW_AD_MAX:
+        return None, (f'maxLlmWindowAdSeconds must be between '
+                      f'{MAX_LLM_WINDOW_AD_MIN} and {MAX_LLM_WINDOW_AD_MAX}', 400)
+    return value, None
+
+
+def _apply_max_llm_window_ad_field(db, data):
+    value, issue = _max_llm_window_ad_value(data)
+    if issue is not None:
+        return error_response(*issue)
+    if value is None:
+        return None
+    db.set_setting('max_llm_window_ad_seconds', str(value), is_default=False)
+    logger.info(f"Updated max_llm_window_ad_seconds to: {value}")
+    return None
 
 
 def _validate_max_ad_duration_payload(db, data):

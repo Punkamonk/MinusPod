@@ -80,6 +80,7 @@ export interface Feed {
   feedUserAgentOverride?: string | null;
   titleOverride?: string | null;
   detectionNotes?: string | null;
+  chapterNotes?: string | null;
   detectionMode?: string | null;
   chaptersMode?: 'auto' | 'generate' | 'off' | null;
   differentialFetchMode?: 'inherit' | 'auto' | 'on' | 'off' | null;
@@ -143,6 +144,9 @@ export interface Feed {
   // Per-feed episode description blacklist (#835): fnmatch glob patterns matched
   // against the plain-text description. A match is never queued or JIT-processed.
   descriptionSkipPatterns?: string[];
+  // Per-feed description chapter trim: cut from a matching timestamp line to the end or next chapter.
+  descriptionTrimPattern?: string | null;
+  descriptionTrimMode?: 'to_end' | 'to_next';
   // RSS visibility for episodes excluded by title, description, or duration.
   titleSkipAction?: 'serve_original' | 'hide' | null;
   minDurationSeconds?: number | null;
@@ -860,6 +864,9 @@ export interface Settings {
   feedUserAgent: SettingValue;
   logDownloadQuery: SettingValueBoolean;
   feedAuthEnabled: SettingValueBoolean;
+  downloadHistoryEnabled: SettingValueBoolean;
+  downloadGeoLookupEnabled: SettingValueBoolean;
+  downloadHistoryRetentionDays: SettingValueNumber;
   feedAuthKey: string | null;
   // User agents served original audio instead of triggering JIT processing.
   jitBlockedUserAgents: { value: string[]; isDefault: boolean };
@@ -910,6 +917,7 @@ export interface Settings {
   adDetectionExcludeStartSeconds: SettingValueNumber;
   maxAdDurationSeconds: SettingValueNumber;
   maxAdDurationConfirmedSeconds: SettingValueNumber;
+  maxLlmWindowAdSeconds: SettingValueNumber;
   positionalPriorEnabled: SettingValueBoolean;
   verificationMissHoldMinConfidence: SettingValueNumber;
   verificationMissAutocutMinConfidence: SettingValueNumber;
@@ -1116,6 +1124,7 @@ export interface Settings {
     adDetectionExcludeStartSeconds: number;
     maxAdDurationSeconds: number;
     maxAdDurationConfirmedSeconds: number;
+    maxLlmWindowAdSeconds: number;
     positionalPriorEnabled: boolean;
     verificationMissHoldMinConfidence: number;
     verificationMissAutocutMinConfidence: number;
@@ -1187,6 +1196,9 @@ export interface UpdateSettingsPayload {
   feedUserAgent?: string;
   logDownloadQuery?: boolean;
   feedAuthEnabled?: boolean;
+  downloadHistoryEnabled?: boolean;
+  downloadGeoLookupEnabled?: boolean;
+  downloadHistoryRetentionDays?: number;
   jitBlockedUserAgents?: string[];
   audioBitrate?: string;
   audioEncoderCompressionLevel?: string;
@@ -1233,6 +1245,7 @@ export interface UpdateSettingsPayload {
   adDetectionExcludeStartSeconds?: number;
   maxAdDurationSeconds?: number;
   maxAdDurationConfirmedSeconds?: number;
+  maxLlmWindowAdSeconds?: number;
   positionalPriorEnabled?: boolean;
   verificationMissHoldMinConfidence?: number;
   verificationMissAutocutMinConfidence?: number;
@@ -1561,6 +1574,38 @@ export interface ProcessingHistoryResponse {
   page: number;
   limit: number;
   totalPages: number;
+}
+
+export type DownloadGeoStatus = 'ok' | 'private' | 'failed' | 'unresolvable';
+
+export interface DownloadHistoryEntry {
+  id: number;
+  episodeId: string;
+  episodeTitle: string | null;
+  podcastSlug: string;
+  podcastTitle: string;
+  clientIp: string;
+  userAgent: string;
+  subscriberLabel: string | null;
+  subscriberKeyId: string | null;
+  subscriberRevoked: boolean;
+  userAgentBlocked: boolean;
+  lastRequestLine: string | null;
+  lastRequestHeaders: Record<string, string> | null;
+  country: string | null;
+  region: string | null;
+  city: string | null;
+  geoStatus: DownloadGeoStatus | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  requestCount: number;
+}
+
+export interface DownloadHistoryResponse {
+  downloads: DownloadHistoryEntry[];
+  total: number;
+  page: number;
+  limit: number;
 }
 
 export interface BulkActionResult {
