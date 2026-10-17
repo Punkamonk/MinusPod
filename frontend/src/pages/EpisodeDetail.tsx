@@ -1,3 +1,4 @@
+import { pageTitle } from '../components/pageStyles';
 import { useState, useRef, useMemo } from 'react';
 import { useParams, Link } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -44,7 +45,7 @@ import { StageBadge } from '../components/StageBadge';
 import ProcessingRunsTable from '../components/ProcessingRunsTable';
 import CostAmount from '../components/CostAmount';
 import EpisodeLogsCard from '../components/EpisodeLogsCard';
-import { btnDestructive, btnPrimary, btnSecondary } from '../components/buttonStyles';
+import { btnDestructive, btnPrimary, btnSecondary, touchCompact } from '../components/buttonStyles';
 import DropdownMenu, { type DropdownMenuItem } from '../components/DropdownMenu';
 import { fileInputBase, focusRing } from '../components/fieldStyles';
 import { badgeBase, tint } from '../components/badgeStyles';
@@ -845,7 +846,7 @@ function EpisodeDetail() {
             />
           </div>
           <div className="flex flex-col gap-2 min-w-0">
-            <h1 className="text-xl sm:text-2xl font-bold text-foreground">{episode.title}</h1>
+            <h1 className={pageTitle}>{episode.title}</h1>
             <div className="flex flex-wrap items-center gap-2 sm:gap-4 text-sm text-muted-foreground">
               <span>{formatDate(episode.published)}</span>
               {episode.status === 'completed' && episode.newDuration ? (
@@ -1211,7 +1212,7 @@ function EpisodeDetail() {
                     onClick={() => openEditorFresh(false)}
                     aria-label={showEditor ? 'Hide editor' : 'Edit ads'}
                     title={showEditor ? 'Hide editor' : 'Edit ads'}
-                    className={`inline-flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-xs sm:text-sm ${btnSecondary} rounded-md transition-colors whitespace-nowrap ${focusRing}`}
+                    className={`${touchCompact} gap-1.5 sm:px-3 sm:py-1.5 text-xs sm:text-sm ${btnSecondary} rounded-md transition-colors whitespace-nowrap ${focusRing}`}
                   >
                     <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -1223,7 +1224,7 @@ function EpisodeDetail() {
                     onClick={() => openEditorFresh(true)}
                     aria-label="Add new ad"
                     title="Add new ad"
-                    className={`inline-flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-xs sm:text-sm ${btnPrimary} rounded-md transition-colors whitespace-nowrap ${focusRing}`}
+                    className={`${touchCompact} gap-1.5 sm:px-3 sm:py-1.5 text-xs sm:text-sm ${btnPrimary} rounded-md transition-colors whitespace-nowrap ${focusRing}`}
                   >
                     <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />

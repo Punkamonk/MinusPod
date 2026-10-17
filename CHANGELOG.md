@@ -9,6 +9,28 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
+## [2.100.17] - 2026-10-17
+
+### Fixed
+- Search ranks a title hit above the same words in a description or transcript. A
+  multi-word query no longer needs its function words, such as "the" or "for", to
+  appear in a description. Episode results show the publish date and status, and a
+  title hit is highlighted in the title rather than shown as a description snippet.
+- The ad editor's playback controls share one row on a phone, and the Selection label sits above its start and end boxes. The Edit and Add buttons above Detected Ads are 36 px squares with centered icons.
+
+## [2.100.16] - 2026-10-16
+
+### Fixed
+- Compose passes transcription backend and API settings from `.env`. The example environment keeps CPU image defaults intact. Installation and deployment guidance now covers Parakeet storage, memory limits, cache paths, and backend-specific troubleshooting.
+- Failed Settings, search, queue, history, and sponsor requests show recovery actions instead of empty or indefinite-loading states. Search filters fit narrow screens and sponsor/pattern results open filtered destinations.
+- Dialogs require accessible names, contain keyboard focus, restore their triggers, and coordinate nested dialogs and popovers. Global search uses Ctrl/Cmd+K; editor shortcuts leave native controls alone.
+- Feed deletion, resets, and replace-mode imports use explicit confirmations. Registered settings drafts block accidental navigation and reload; edited dialogs ask before discarding changes. App updates wait for an explicit reload.
+- Shared touch targets retain 44 CSS px minimums on coarse pointers, including tablets. History summary values and labels align across clickable and static cards. History cards expose sorting, date ranges stay paired, and populated History and episode-cost tables switch to cards at tablet widths.
+- Theme text and filled-control contrast now passes the expanded contrast checks. Status-bar spacing follows its measured height, and shared animations respect reduced-motion preferences.
+- Independently saved settings now protect drafts during navigation and background refreshes. Failed retention saves keep the entered value; notification, key, pricing, and security fields cannot be edited while their saves are pending. UTC remains available in the timezone selector.
+- Form labels, help, and validation messages are associated with their controls. Headers and summary cards share sizing rules. WebKit dialog focus returns to the clicked trigger, and webhook deletion uses an explicit confirmation.
+- The design guide takes its theme values from the application source. CI checks the two match and runs browser checks for dialogs, forms and responsive layouts.
+
 ## [2.100.15] - 2026-10-15
 
 ### Fixed

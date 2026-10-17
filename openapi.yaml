@@ -12,7 +12,7 @@ info:
     - Monitor system status and trigger cleanup operations
     - Manage cross-episode ad patterns with network and podcast scope
     - Submit corrections to improve ad detection accuracy
-  version: 2.100.15
+  version: 2.100.17
   contact:
     name: MinusPod
   license:
@@ -18417,11 +18417,16 @@ components:
           type: string
         title:
           type: string
+        titleSnippet:
+          type:
+            - string
+            - 'null'
+          description: The title with its matched words highlighted; null when the title did not match
         snippet:
           type:
             - string
             - 'null'
-          description: Highlighted match context; null for a title-only substring match
+          description: Highlighted match context from the description; null when nothing in it matched
     SearchEpisodeResult:
       type: object
       properties:
@@ -18439,11 +18444,16 @@ components:
           type:
             - string
             - 'null'
+        titleSnippet:
+          type:
+            - string
+            - 'null'
+          description: The title with its matched words highlighted; null when the title did not match
         snippet:
           type:
             - string
             - 'null'
-          description: Highlighted match context; null for a title-only substring match
+          description: Highlighted match context from the description; null when nothing in it matched
     SearchTranscriptResult:
       type: object
       properties:

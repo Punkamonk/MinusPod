@@ -79,7 +79,7 @@ jobs:
   frontend-build:
     name: Frontend build (tsc + vite)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
@@ -98,6 +98,15 @@ jobs:
 
       - name: Lint (eslint)
         run: npm run lint
+
+      - name: Check design guide parity
+        run: npm run design:check
+
+      - name: Install browser
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Browser UI contracts
+        run: npm run test:browser
 
       - name: Test (Vitest)
         run: npm run test

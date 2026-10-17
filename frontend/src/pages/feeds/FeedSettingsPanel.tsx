@@ -22,6 +22,7 @@ import {
 import { WHISPER_LANGUAGES, labelForLanguage } from '../../utils/whisperLanguages';
 import { useSyncFromQuery } from '../../hooks/useSyncFromQuery';
 import { useDraftField, type DraftField } from '../../hooks/useDraftField';
+import { useUnsavedChanges } from '../../hooks/useUnsavedChanges';
 import { btnPrimary, btnSecondary, btnOutline } from '../../components/buttonStyles';
 import { ConfirmModal } from '../../components/Modal';
 import SavedBadge from '../settings/SavedBadge';
@@ -270,6 +271,9 @@ function FeedSettingsPanel({ feed, slug }: Props) {
   // the button/badge update instantly. Dirty compare trims, so a whitespace-only edit isn't dirty.
   const notesField = useDraftField(feed, (f) => f.detectionNotes ?? '', (v) => v.trim());
   const chapterNotesField = useDraftField(feed, (f) => f.chapterNotes ?? '', (v) => v.trim());
+  useUnsavedChanges([cueScoreField, pairMinField, pairMaxField, pairFracField, snapConfField, snapLeadField,
+    snapLagField, maxAdDurField, maxAdDurRejectField, introExclusionField, notesField, chapterNotesField]
+    .some(field => field.dirty) || isEditingSourceUrl || isEditingNetwork);
   const [chapterNotesSaved, setChapterNotesSaved] = useState(false);
   const [chapterNotesError, setChapterNotesError] = useState<string | null>(null);
   const [detectionNotesSaved, setDetectionNotesSaved] = useState(false);
@@ -538,6 +542,7 @@ function FeedSettingsPanel({ feed, slug }: Props) {
         onToggle={setPanelOpen}
       >
         <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">Notes, source URL, and network edits need Save. Other controls apply when changed; numeric fields save when you leave the field.</p>
           <SearchableSectionGroup
             placeholder="Search feed settings..."
             ariaLabel="Search feed settings"
@@ -773,8 +778,9 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                   }}
                   placeholder="What only this show does, e.g. host-read ads start right after 'a word from our sponsors'."
                   className={`w-full resize-y placeholder:text-muted-foreground ${inputBase}`}
+                  aria-describedby="detection-notes-help"
                 />
-                <p className="flex justify-between gap-2 text-xs text-muted-foreground">
+                <p id="detection-notes-help" className="flex justify-between gap-2 text-xs text-muted-foreground">
                   <span>Sent to the model with every episode of this feed.</span>
                   <span className="tabular-nums shrink-0">{notesField.value.length} / 1000</span>
                 </p>
@@ -839,6 +845,7 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                     })}
                     disabled={updateMutation.isPending}
                     className={`self-start min-w-0 max-w-full disabled:opacity-50 ${selectBase} pl-2`}
+                    aria-describedby="processing-mode-help"
                   >
                     <option value="standard">Standard (detect and cut ads)</option>
                     <option value="keep_content">Keep content only (experimental)</option>
@@ -854,7 +861,7 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                       ad-break end template. Mark one of each below to turn it on.
                     </p>
                   )}
-                  <p className={PROCESSING_MODE_HINTS[processingMode].className}>
+                  <p id="processing-mode-help" className={PROCESSING_MODE_HINTS[processingMode].className}>
                     {PROCESSING_MODE_HINTS[processingMode].text}
                   </p>
                   {processingMode === 'cue_only' && (
@@ -1164,8 +1171,9 @@ function FeedSettingsPanel({ feed, slug }: Props) {
                   }}
                   placeholder="Make listener donations their own chapter."
                   className={`w-full resize-y placeholder:text-muted-foreground ${inputBase}`}
+                  aria-describedby="chapter-notes-help"
                 />
-                <p className="flex justify-between gap-2 text-xs text-muted-foreground">
+                <p id="chapter-notes-help" className="flex justify-between gap-2 text-xs text-muted-foreground">
                   <span>Sent with every chapter request for this feed, for example: Always make the listener donation and producer thank-you segment its own chapter titled Donations.</span>
                   <span className="tabular-nums shrink-0">{chapterNotesField.value.length} / 1000</span>
                 </p>

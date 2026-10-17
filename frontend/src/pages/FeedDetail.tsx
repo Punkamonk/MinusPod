@@ -1,3 +1,4 @@
+import { pageTitle } from '../components/pageStyles';
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { Pencil, Trash2 } from 'lucide-react';
 import { useParams, Link, useNavigate, useLocation } from 'react-router';
@@ -35,7 +36,7 @@ import { formatDateTime } from '../utils/format';
 import RichText from '../components/RichText';
 import { btnDestructive, btnGhost, btnPrimary, btnSecondary } from '../components/buttonStyles';
 import { cardActionBtn } from '../components/rowActionStyles';
-import { Modal } from '../components/Modal';
+import { Modal, ConfirmModal } from '../components/Modal';
 import { selectBase } from '../components/fieldStyles';
 import { focusRing } from '../components/fieldStyles';
 import { badgeBase, tint } from '../components/badgeStyles';
@@ -137,10 +138,9 @@ function FeedDetail() {
   // Anchor row for shift-click range selection; reset wherever selection is.
   const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
-  // Delete confirms by a second click within 3s, matching the dashboard.
+  // Feed deletion requires an explicit confirmation.
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [bulkResult, setBulkResult] = useState<BulkActionResult | null>(null);
   const [passthroughResult, setPassthroughResult] = useState<
     { enabled: boolean; updated: number; queued: number } | null
@@ -284,24 +284,13 @@ function FeedDetail() {
       navigate('/');
     },
     onError: (err) => {
-      setDeleteConfirm(false);
       setActionError(getErrorMessage(err, 'Could not delete this feed.'));
     },
   });
 
-  // The timer outlives the page on a successful delete, which navigates away.
-  useEffect(() => () => {
-    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-  }, []);
-
   const handleDeleteFeed = () => {
-    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    if (deleteConfirm) {
-      deleteMutation.mutate();
-    } else {
-      setDeleteConfirm(true);
-      deleteTimerRef.current = setTimeout(() => setDeleteConfirm(false), 3000);
-    }
+    setActionError(null);
+    setDeleteConfirm(true);
   };
 
   const updateMutation = useMutation({
@@ -594,7 +583,7 @@ function FeedDetail() {
               </div>
             ) : (
               <div className="flex items-start gap-2">
-                <h1 className="text-2xl font-bold text-foreground min-w-0 break-words">
+                <h1 className={pageTitle}>
                   {feedDisplayTitle(feed)}
                 </h1>
                 <FeedTypeBadge feedType={feed.feedType} className="mt-1.5" />
@@ -925,7 +914,7 @@ function FeedDetail() {
 
       {/* Reprocess All Confirmation Modal */}
       {showReprocessConfirm && (
-        <Modal onClose={() => setShowReprocessConfirm(false)} panelClassName="max-w-md w-full">
+        <Modal ariaLabel="Reprocess all episodes" onClose={() => setShowReprocessConfirm(false)} panelClassName="max-w-md w-full">
           <div className="p-6">
             <h2 className="text-xl font-semibold text-foreground mb-4">
               Reprocess All Episodes
@@ -967,7 +956,7 @@ function FeedDetail() {
 
       {/* Reprocess Results Modal */}
       {reprocessResult && (
-        <Modal onClose={closeReprocessModal} panelClassName="max-w-md w-full">
+        <Modal ariaLabel="Reprocess queued" onClose={closeReprocessModal} panelClassName="max-w-md w-full">
           <div className="p-6">
             <h2 className="text-xl font-semibold text-foreground mb-4">Reprocess Queued</h2>
             <p className="text-xs text-muted-foreground mb-4">
@@ -991,7 +980,7 @@ function FeedDetail() {
 
       {/* Reprocess Error Modal */}
       {reprocessAllMutation.error && (
-        <Modal onClose={closeReprocessModal} panelClassName="max-w-md w-full">
+        <Modal ariaLabel="Reprocess failed" onClose={closeReprocessModal} panelClassName="max-w-md w-full">
           <div className="p-6">
             <h2 className="text-xl font-semibold text-destructive mb-4">Reprocess Failed</h2>
             <p className="text-sm text-muted-foreground mb-4">
@@ -1009,7 +998,7 @@ function FeedDetail() {
 
       {/* Bulk Delete Confirmation Modal */}
       {showBulkDeleteConfirm && (
-        <Modal onClose={() => setShowBulkDeleteConfirm(false)} panelClassName="max-w-md w-full">
+        <Modal ariaLabel="Delete selected episodes" onClose={() => setShowBulkDeleteConfirm(false)} panelClassName="max-w-md w-full">
           <div className="p-6">
             <h2 className="text-xl font-semibold text-foreground mb-4">
               Delete {effectiveSelectedIds.size} Episode{effectiveSelectedIds.size > 1 ? 's' : ''}
@@ -1038,7 +1027,7 @@ function FeedDetail() {
 
       {/* Bulk Action Result Modal */}
       {bulkResult && (
-        <Modal onClose={() => setBulkResult(null)} panelClassName="max-w-md w-full">
+        <Modal ariaLabel="Bulk action complete" onClose={() => setBulkResult(null)} panelClassName="max-w-md w-full">
           <div className="p-6">
             <h2 className="text-xl font-semibold text-foreground mb-4">Bulk Action Complete</h2>
             <ResultStatsGrid queued={bulkResult.queued} skipped={bulkResult.skipped} queuedLabel="Actioned" />
@@ -1069,7 +1058,7 @@ function FeedDetail() {
 
       {/* Pass-through Result Modal */}
       {passthroughResult && (
-        <Modal onClose={() => setPassthroughResult(null)} panelClassName="max-w-md w-full">
+        <Modal ariaLabel="Pass-through result" onClose={() => setPassthroughResult(null)} panelClassName="max-w-md w-full">
           <div className="p-6">
             <h2 className="text-xl font-semibold text-foreground mb-4">
               {passthroughResult.enabled ? 'Pass-through Set' : 'Pass-through Cleared'}
@@ -1091,7 +1080,7 @@ function FeedDetail() {
       {/* Same bottom-right confirm/error toasts the dashboard uses. */}
       {(deleteConfirm || actionError) && (
         <div className="fixed bottom-4 right-4 flex flex-col items-end gap-2">
-          {actionError && (
+          {actionError && !deleteConfirm && (
             <div className="max-w-sm bg-destructive/10 border border-destructive text-destructive rounded-lg p-4 shadow-lg text-sm flex items-start gap-3">
               <span className="flex-1">{actionError}</span>
               <button
@@ -1106,8 +1095,10 @@ function FeedDetail() {
             </div>
           )}
           {deleteConfirm && (
-            <div className="bg-card border border-border rounded-lg p-4 shadow-lg max-w-sm">
-              <p className="text-sm text-foreground">Click delete again to confirm</p>
+            <ConfirmModal title={`Delete ${feed?.title || slug}?`} confirmLabel="Delete feed" pending={deleteMutation.isPending}
+              onCancel={() => { setDeleteConfirm(false); setActionError(null); }} onConfirm={() => deleteMutation.mutate()}>
+              <p>This removes the feed and its downloaded files.</p>
+              {actionError && <p role="alert" className="text-destructive">{actionError}</p>}
               {stopsProcessingMessage && (
                 <p className="text-sm text-warning mt-1">{stopsProcessingMessage}</p>
               )}
@@ -1121,7 +1112,7 @@ function FeedDetail() {
                   Only the combined feed is removed; the source feeds and episodes stay.
                 </p>
               )}
-            </div>
+            </ConfirmModal>
           )}
         </div>
       )}
