@@ -8,6 +8,7 @@
 
 - [Overview](#overview)
 - [Saving and updates](#saving-and-updates)
+- [Install as an app](#install-as-an-app)
 - [Dashboard views](#dashboard-views)
 - [Episode actions and job state](#episode-actions-and-job-state)
 - [Feed Display Title](#feed-display-title)
@@ -87,7 +88,7 @@ The server includes a web-based management UI at `/ui/`. Opening the server root
 - Podcast search via PodcastIndex.org
 - Search: press Ctrl+K on Windows/Linux or Cmd+K on macOS to open the keyboard palette, or use the search field on the Dashboard. Both return shows, episodes, and transcript matches together, spanning every episode status. The header magnifier, or the palette's own "Advanced search" link, opens a dedicated search page with type filters plus pattern and sponsor matches
 - Multiple dark themes (Tokyo Night, Dracula, Catppuccin, Nord, Gruvbox, Solarized, and more) with light/dark toggle
-- Installable as Progressive Web App (PWA)
+- Installs as an app on phones, tablets and desktops ([Install as an app](#install-as-an-app))
 
 ### Saving and updates
 
@@ -96,6 +97,19 @@ Settings shows whether a control uses the page's Save Changes button, its own Sa
 When an app update is ready, a banner offers Reload. Finish saving or discard registered drafts before applying it. Updates no longer reload the page automatically while a draft is open.
 
 Feed deletion, settings reset, and replacement imports use explicit confirmation dialogs. Read the named target and consequences before confirming. Failed requests show an error and Retry where supported; a failure does not establish an empty list.
+
+### Install as an app
+
+The web UI is a Progressive Web App. Installed, it opens full screen from its own icon, with no browser toolbar, and keeps your login session. Browsers only offer to install over HTTPS, so put the server behind the reverse proxy or tunnel from the [installation guide](installation.md) first.
+
+| Platform | How |
+|---|---|
+| iPhone and iPad | Open the UI in Safari, tap Share, then Add to Home Screen. Only Safari can install it on iOS. Chrome and Firefox there cannot. |
+| Android | Chrome offers an Install prompt on first visit. If it does not, open the browser menu and choose Install app or Add to Home screen. |
+| macOS | Chrome and Edge show an install icon at the right end of the address bar. Safari 17 and later: File, then Add to Dock. |
+| Windows | Chrome and Edge show the same install icon in the address bar, or use the browser menu and choose Install MinusPod. |
+
+The installed app updates the same way as the browser tab: when a new version is ready, the Reload banner appears and applies it. To remove it, delete the icon as you would any app.
 
 ### Dashboard views
 
@@ -275,7 +289,7 @@ When a feed has a max ad duration cap or cue-gated approval on, ads that cannot 
 - **Approve & Recut** - stores a confirm correction and immediately re-cuts the original audio if retained; otherwise the button reads Approve and the cut applies on the next reprocess.
 - **Dismiss** - records a rejection and leaves the audio unchanged.
 
-When the original audio is retained, a pencil button next to the play button opens the ad in the waveform editor, where you can drag the boundaries before confirming; confirming with moved boundaries cuts only the span inside the pins. If the hold came from the ad reviewer proposing a boundary past the detected span, confirming at that position is accepted too, not just a narrower one.
+When the original audio is retained, a pencil button next to the play button opens the ad in the waveform editor, where you can drag the boundaries before confirming. Confirming with moved boundaries cuts only the span inside the pins. If the hold came from the ad reviewer proposing a boundary past the detected span, confirming at that position is accepted too, not just a narrower one.
 
 When the ad reviewer proposed a narrower span, the row offers a trimmed confirm that approves only that span. If the hold is a remainder carved out of a larger detection, the proposal is dropped or clamped to the remainder, and the trimmed button is hidden when the proposal does not overlap the held span. Changing the category in the editor records the new category and keeps the ad held; it does not confirm it.
 
