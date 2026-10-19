@@ -34,6 +34,16 @@ export const SEGMENT_CATEGORY_DESCRIPTIONS: Record<SegmentCategory, string> = {
   recap: 'Previews and coming-up bumpers',
 };
 
+// Label for the button that approves a held or rejected marker. A sponsor or
+// uncategorized marker is an ad; any other category names itself, so confirming
+// a subscribe reminder doesn't read as calling it an ad.
+export function confirmLabel(category?: string | null): string {
+  if (!category || category === 'sponsor' || !(category in SEGMENT_CATEGORY_LABELS)) {
+    return 'Confirm ad';
+  }
+  return `Confirm ${SEGMENT_CATEGORY_LABELS[category as SegmentCategory].toLowerCase()}`;
+}
+
 export type SegmentAction = 'remove' | 'beep' | 'keep' | 'mark';
 
 export const SEGMENT_ACTIONS: SegmentAction[] = ['remove', 'beep', 'keep', 'mark'];

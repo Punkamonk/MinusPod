@@ -7,7 +7,7 @@ import { cardActionBtn, tableActionBtn } from '../../components/rowActionStyles'
 import { StageBadge } from '../../components/StageBadge';
 import { SegmentCategoryBadge } from '../../components/SegmentCategoryBadge';
 import {
-  SEGMENT_CATEGORIES, SEGMENT_CATEGORY_LABELS, isKeepLike, type SegmentCategory,
+  SEGMENT_CATEGORIES, SEGMENT_CATEGORY_LABELS, confirmLabel, isKeepLike, type SegmentCategory,
 } from '../../utils/segmentCategory';
 import { formatTimestamp, formatDate } from '../../utils/format';
 import { btnDestructive, btnOutline, btnPrimary } from '../../components/buttonStyles';
@@ -216,10 +216,10 @@ function DetectionActions({ d, variant, playing, onTogglePlay, actions }: {
       type="button"
       onClick={() => actions.onApprove?.(d)}
       disabled={actions.busy}
-      aria-label="Confirm ad"
+      aria-label={confirmLabel(d.category)}
       className={`${btn} ${btnPrimary} disabled:opacity-50 ${focusRing}`}
     >
-      {isCard ? <ShortLabel full="Confirm ad" short="Confirm" /> : 'Confirm ad'}
+      {isCard ? <ShortLabel full={confirmLabel(d.category)} short="Confirm" /> : confirmLabel(d.category)}
     </button>
   );
   const dismiss = actions.onDismiss && undecided && (

@@ -22,7 +22,7 @@ import { DETECTION_STAGE_META } from '../utils/detectionStage';
 import { CORROBORATION_CLASS, CORROBORATION_META } from '../utils/corroboration';
 import { formatConfidence } from '../utils/confidence';
 import { isActionBlocked } from '../utils/processingStage';
-import { isKeepLike } from '../utils/segmentCategory';
+import { confirmLabel, isKeepLike } from '../utils/segmentCategory';
 import { applyEpisodeJobState, jobStateFromError } from '../utils/jobStateCache';
 import AdEditor, { AdCorrection } from '../components/AdEditor';
 import AdReviewModal from '../components/AdReviewModal';
@@ -1694,7 +1694,7 @@ function EpisodeDetail() {
                         data-testid={`approve-recut-${index}`}
                         className={`flex-1 sm:flex-none ${rowActionBtn} ${btnClass(confirmStatus, btnPrimary)} ${focusRing}`}
                       >
-                        {btnLabel(confirmStatus, oneTapRecut ? 'Confirm & Recut' : 'Confirm ad')}
+                        {btnLabel(confirmStatus, oneTapRecut ? 'Confirm & Recut' : confirmLabel(segment.category))}
                       </button>
                       {proposalOverlaps(segment) && (
                         <button
@@ -1890,7 +1890,7 @@ function EpisodeDetail() {
                             disabled={correctionMutation.isPending}
                             className={`flex-1 sm:flex-none ${rowActionBtn} ${btnClass(confirmStatus, btnPrimary)} ${focusRing}`}
                           >
-                            {btnLabel(confirmStatus, 'Confirm ad')}
+                            {btnLabel(confirmStatus, confirmLabel(segment.category))}
                           </button>
                           <button
                             onClick={() => handleCorrection({ type: 'reject', originalAd })}

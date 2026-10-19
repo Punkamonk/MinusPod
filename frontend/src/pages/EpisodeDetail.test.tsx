@@ -609,6 +609,21 @@ describe('Held for Review: stale reviewer trim', () => {
   });
 });
 
+describe('Held for Review: confirm label names the category', () => {
+  it('labels an interaction marker "Confirm interaction", not "Confirm ad"', async () => {
+    renderDetail(makeEpisode({
+      hasOriginalAudio: true,
+      pendingReviewMarkers: [{ ...heldMarker, category: 'interaction' }, secondHeldMarker],
+    }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('approve-recut-0')).toBeDefined();
+    });
+    expect(screen.getByTestId('approve-recut-0').textContent).toBe('Confirm interaction');
+    expect(screen.getByTestId('approve-recut-1').textContent).toBe('Confirm ad');
+  });
+});
+
 describe('Held for Review: per-action error isolation', () => {
   beforeEach(() => {
     mockSubmitCorrection.mockReset();
