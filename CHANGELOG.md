@@ -9,6 +9,21 @@ Alongside the standard sections, a "Breaking" section marks changes
 that require operator action; these are surfaced at the top of stable
 release notes.
 
+## [2.100.19] - 2026-10-19
+
+### Added
+- Docs: nine short videos under docs/videos, each in a portrait and a
+  landscape cut. A tour of the web UI, an animated walk through the
+  processing pipeline, and one video each for the review queue, audio
+  cues, processing modes and segment actions, local feeds, providers and
+  cost, the Podcasting 2.0 output, and learned patterns with Pattern
+  Cleanup. The two animations ship with their
+  source and a rebuild recipe. The recordings ship with the Playwright
+  harness that drives them, so a take can be redone against any instance
+  without putting a feed URL or an API key on screen. The project README
+  and the doc for each feature embed the landscape cut, uploaded as a
+  GitHub attachment so it plays inline.
+
 ## [2.100.18] - 2026-10-18
 
 ### Added
