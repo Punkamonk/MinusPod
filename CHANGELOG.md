@@ -12,6 +12,7 @@ release notes.
 ## [Unreleased]
 
 ### Changed
+- Segment-ID prompts mark pauses of 1.5 s or longer between transcript lines with a gap cue, so the model can see jingles and silence it otherwise cannot. (#883, #884, from mrfootoyou)
 - Use minimal timestamps in LLM prompts to help reduce token usage.
 
 ## [2.100.19] - 2026-10-19
