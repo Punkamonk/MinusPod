@@ -73,27 +73,23 @@ def _dai_marker(**extra):
     return marker
 
 
-def _clamp(marker, start, end, barriers=None):
+def _clamp(marker, start, end, barriers=None, original=(728.8, 939.9), segments=HOLE_SEGMENTS):
     return _reviewer()._clamp_proposed_bounds(
-        marker, start, end, 728.8, 939.9, 60, 'show', 'ep1',
-        segments=HOLE_SEGMENTS, hard_barriers=barriers)
+        marker, start, end, *original, 60, 'show', 'ep1',
+        segments=segments, hard_barriers=barriers)
 
 
-def test_eight_second_rule_floors_a_trim_past_the_dai_core_start(monkeypatch):
+def test_gap_rule_floors_a_trim_past_the_dai_core_start():
     assert _clamp(_dai_marker(), 752.55, 939.9) == (728.8, 939.9)
-    # Without the rule the edge is transcript-supported and crosses the unmeasured region.
-    monkeypatch.setattr(ad_reviewer, 'UNREVIEWABLE_GAP_SECONDS', 1000.0)
-    assert _clamp(_dai_marker(), 752.55, 939.9) == (752.55, 939.9)
 
 
 def test_gap_and_dai_clamp_log_one_consistent_line(caplog):
     marker = _dai_marker()
     with caplog.at_level('INFO', logger='ad_reviewer'):
-        assert _clamp(marker, 752.55, 937.8) == (728.8, 937.8)
+        assert _clamp(marker, 752.55, 939.9) == (728.8, 939.9)
     lines = [r.getMessage() for r in caplog.records if 'Reviewer trim' in r.getMessage()]
     assert len(lines) == 1
-    assert '752.5-937.8 -> 728.8-937.8' in lines[0]
-    assert 'start floored by untranscribed audio' in lines[0]
+    assert 'stopped at untranscribed audio: 752.5-939.9 -> 728.8-939.9' in lines[0]
 
 
 BARRIER_SEGMENTS = [
@@ -165,6 +161,39 @@ def test_end_cannot_be_trimmed_into_an_untranscribed_tail():
         dict(_marker(), start=900.0, end=1000.0), 900.0, 990.0, 900.0, 1000.0, 60,
         'show', 'ep1', segments=segments)
     assert got == (900.0, 1000.0)
+
+
+@pytest.mark.parametrize('words, original, proposal', [
+    # A 4.74 s wordless tail, under the 8 s rule, still holds the end at the file end.
+    ((3733.5, 3789.52), (3733.5, 3794.26), (3733.5, 3789.52)),
+    # A 4 s wordless head holds the start at 0.
+    ((4.0, 30.0), (0.0, 30.0), (4.0, 30.0)),
+])
+def test_short_wordless_head_or_tail_still_stops_the_trim(words, original, proposal):
+    segments = [_worded(*words, 'Try Acme free at acme.example today.')]
+    marker = dict(_marker(), start=original[0], end=original[1])
+    assert _clamp(marker, *proposal, original=original, segments=segments) == original
+
+
+PREROLL_SEGMENTS = [
+    _worded(0.0, 57.68, 'Try Acme free at acme.example today and save big.'),
+    _worded(62.40, 120.0, 'Welcome back to the show everybody.'),
+]
+
+
+def _preroll_clamp(marker):
+    return _clamp(marker, 0.0, 57.7, original=(0.0, 60.38), segments=PREROLL_SEGMENTS)
+
+
+def test_short_gap_at_a_measured_core_edge_stops_the_end_trim():
+    marker = _dai_marker(start=0.0, end=60.38, dai_core_spans=[{'start': 0.0, 'end': 60.38}])
+    marker[DAI_PROBE_SPANS] = [{'start': 0.5, 'end': 4.5}]
+    assert _preroll_clamp(marker) == (0.0, 60.38)
+
+
+def test_short_gap_at_an_unmeasured_edge_still_trims():
+    got = _preroll_clamp(dict(_marker(), start=0.0, end=60.38))
+    assert got == (0.0, 57.7)
 
 
 def test_word_gap_inside_one_segment_is_shown_in_the_prompt():
