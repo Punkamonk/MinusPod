@@ -515,6 +515,8 @@ export interface EpisodeProcessingRun {
   errorMessage: string | null;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   llmCost: number;
   // True when this run stored a pipeline log the run-log endpoint can serve.
   hasLog?: boolean;
@@ -673,6 +675,7 @@ export interface SettingValueNumberOrNull {
 export interface ModelPricingOverride {
   inputCostPerMtok: number;
   outputCostPerMtok: number;
+  cacheReadCostPerMtok?: number | null;
 }
 
 export type ModelPricingOverrides = Record<string, ModelPricingOverride>;
@@ -1411,6 +1414,7 @@ export interface ClaudeModel {
   name: string;
   inputCostPerMtok?: number;
   outputCostPerMtok?: number;
+  cacheReadCostPerMtok?: number | null;
   pricingSource?: string;
 }
 
@@ -1768,13 +1772,15 @@ export interface ModelUsageStat {
   distinctEpisodes: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   knownCostUsd: string;
   unknownCostCount: number;
 }
 
 export type ModelUsageSortField =
   | 'provider' | 'model' | 'calls' | 'distinctEpisodes'
-  | 'inputTokens' | 'outputTokens' | 'knownCostUsd' | 'unknownCostCount';
+  | 'inputTokens' | 'outputTokens' | 'knownCostUsd' | 'unknownCostCount' | 'cacheHitRate';
 
 export interface ModelUsageResponse {
   items: ModelUsageStat[];
@@ -1912,6 +1918,8 @@ export interface SpendAttempt {
   status: 'success' | 'failure' | 'inconclusive';
   inputTokens: number | null;
   outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
   costUsd: string | null;
   costSource: string | null;
   createdAt: string;

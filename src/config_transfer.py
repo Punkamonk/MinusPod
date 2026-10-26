@@ -16,6 +16,7 @@ import email_service
 import webhook_service
 from community_sync import DEFAULT_CRON as COMMUNITY_SYNC_DEFAULT_CRON
 from config import (
+    PRICING_OVERRIDE_OPTIONAL, PRICING_OVERRIDE_REQUIRED,
     PODCAST_SEARCH_PROVIDERS, STAGE_TUNABLE_PAYLOAD_KEYS,
     SYSTEMONE_TUNABLE_DEFAULTS, SYSTEMONE_TUNABLE_PROFILE_KEYS,
     PROCESSING_MODE_CUE_ONLY, cue_only_missing_roles_for_feed,
@@ -598,9 +599,12 @@ def _validate_setting_value(key, value):
                 continue
             if not isinstance(rates, dict):
                 raise ConfigTransferError('model_pricing_overrides contains an invalid model')
-            if set(rates) != {'inputCostPerMtok', 'outputCostPerMtok'}:
+            if not PRICING_OVERRIDE_REQUIRED <= set(rates) <= (
+                    PRICING_OVERRIDE_REQUIRED | PRICING_OVERRIDE_OPTIONAL):
                 raise ConfigTransferError('model_pricing_overrides contains invalid rate fields')
-            for rate in rates.values():
+            for field, rate in rates.items():
+                if field in PRICING_OVERRIDE_OPTIONAL and rate is None:
+                    continue
                 if (isinstance(rate, bool) or not isinstance(rate, (int, float))
                         or not math.isfinite(rate) or rate < 0):
                     raise ConfigTransferError('model_pricing_overrides rates must be finite and non-negative')

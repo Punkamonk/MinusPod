@@ -10,6 +10,7 @@ from typing import Any
 from collections.abc import Callable
 
 from config import (
+    PRICING_OVERRIDE_OPTIONAL, PRICING_OVERRIDE_REQUIRED,
     AUTO_PROCESS_MAX_AGE_HOURS_BOUNDS, AUTO_PROCESS_MAX_AGE_HOURS_DEFAULT,
     normalize_model_key, ENV_BACKED_SETTINGS, resolve_env_backed_default,
     coerce_bool_setting, get_env_backed_int,
@@ -56,6 +57,17 @@ from secrets_crypto import (
 from utils.time import is_valid_timezone
 
 logger = logging.getLogger(__name__)
+
+
+def _rate_or_none(value) -> float | None:
+    """Float for a finite non-negative number, else None (bools rejected)."""
+    if isinstance(value, bool):
+        return None
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return None
+    return rate if math.isfinite(rate) and rate >= 0 else None
 
 
 def _valid_notification_timezone(tz: str) -> bool:
@@ -1191,7 +1203,7 @@ class SettingsMixin:
             }
         return settings
 
-    def get_model_pricing_overrides(self) -> dict[str, dict[str, float]]:
+    def get_model_pricing_overrides(self) -> dict[str, dict[str, float | None]]:
         """Return valid operator pricing overrides keyed by model ID."""
         raw = self.get_setting('model_pricing_overrides')
         if not raw:
@@ -1210,28 +1222,20 @@ class SettingsMixin:
             if not isinstance(model_id, str) or not model_id.strip() \
                     or not isinstance(rates, dict):
                 continue
-            input_rate = rates.get('inputCostPerMtok')
-            output_rate = rates.get('outputCostPerMtok')
-            if isinstance(input_rate, bool) or isinstance(output_rate, bool):
+            entry = {f: _rate_or_none(rates.get(f)) for f in PRICING_OVERRIDE_REQUIRED}
+            if None in entry.values():
                 continue
-            try:
-                input_rate = float(input_rate)
-                output_rate = float(output_rate)
-            except (TypeError, ValueError):
-                continue
-            if (not math.isfinite(input_rate) or not math.isfinite(output_rate)
-                    or input_rate < 0 or output_rate < 0):
-                continue
-            overrides[model_id] = {
-                'inputCostPerMtok': input_rate,
-                'outputCostPerMtok': output_rate,
-            }
+            for field in PRICING_OVERRIDE_OPTIONAL:
+                rate = _rate_or_none(rates.get(field))
+                if rate is not None:
+                    entry[field] = rate
+            overrides[model_id] = entry
         return overrides
 
     def get_model_pricing_override(
             self, model_id: str,
-            overrides: dict[str, dict[str, float]] | None = None,
-    ) -> dict[str, float] | None:
+            overrides: dict[str, dict[str, float | None]] | None = None,
+    ) -> dict[str, float | None] | None:
         """Resolve an exact or normalized operator override for a model."""
         if overrides is None:
             overrides = self.get_model_pricing_overrides()
@@ -1516,7 +1520,7 @@ class SettingsMixin:
             cursor = conn.execute(
                 """SELECT match_key, raw_model_id, display_name,
                           input_cost_per_mtok, output_cost_per_mtok,
-                          source, updated_at
+                          cache_read_cost_per_mtok, source, updated_at
                    FROM model_pricing WHERE source = ?
                    ORDER BY display_name""",
                 (source,)
@@ -1525,7 +1529,7 @@ class SettingsMixin:
             cursor = conn.execute(
                 """SELECT match_key, raw_model_id, display_name,
                           input_cost_per_mtok, output_cost_per_mtok,
-                          source, updated_at
+                          cache_read_cost_per_mtok, source, updated_at
                    FROM model_pricing ORDER BY display_name"""
             )
         return [
@@ -1535,6 +1539,7 @@ class SettingsMixin:
                 'displayName': row['display_name'],
                 'inputCostPerMtok': row['input_cost_per_mtok'],
                 'outputCostPerMtok': row['output_cost_per_mtok'],
+                'cacheReadCostPerMtok': row['cache_read_cost_per_mtok'],
                 'source': row['source'],
                 'updatedAt': row['updated_at'],
             }
@@ -1594,16 +1599,19 @@ class SettingsMixin:
             conn.execute(
                 """INSERT INTO model_pricing
                        (model_id, match_key, raw_model_id, display_name,
-                        input_cost_per_mtok, output_cost_per_mtok, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                        input_cost_per_mtok, output_cost_per_mtok,
+                        cache_read_cost_per_mtok, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(match_key) DO UPDATE SET
                      raw_model_id = excluded.raw_model_id,
                      display_name = excluded.display_name,
                      input_cost_per_mtok = excluded.input_cost_per_mtok,
                      output_cost_per_mtok = excluded.output_cost_per_mtok,
+                     cache_read_cost_per_mtok = excluded.cache_read_cost_per_mtok,
                      source = excluded.source,
                      updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')""",
                 (m['raw_model_id'], m['match_key'], m['raw_model_id'], m['display_name'],
-                 m['input_cost_per_mtok'], m['output_cost_per_mtok'], row_source)
+                 m['input_cost_per_mtok'], m['output_cost_per_mtok'],
+                 m.get('cache_read_cost_per_mtok'), row_source)
             )
         conn.commit()

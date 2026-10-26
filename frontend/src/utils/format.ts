@@ -98,6 +98,28 @@ export function formatPercent(value: number): string {
   return `${Math.round(pct)}%`;
 }
 
+export function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`;
+  return String(tokens);
+}
+
+// Reads over input; null when there is nothing to show (no input, or no cache traffic).
+function cacheHitRate(read: number, write: number, input: number): number | null {
+  if (!input || (!read && !write)) return null;
+  return Math.min(read / input, 1);
+}
+
+// text is '' when there is no rate to show.
+export function cacheHit(read: number, write: number, input: number): { text: string; title?: string } {
+  const rate = cacheHitRate(read, write, input);
+  if (rate == null) return { text: '' };
+  return {
+    text: formatPercent(rate),
+    title: `${formatTokenCount(read)} read, ${formatTokenCount(write)} write of ${formatTokenCount(input)} input`,
+  };
+}
+
 // Elapsed or summed duration, rounded to whole seconds; zero trailing units are dropped: '45s', '2m 5s', '1h 2m'.
 export function formatElapsed(seconds: number): string {
   const total = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;

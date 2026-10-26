@@ -11,8 +11,19 @@ release notes.
 
 ## [Unreleased]
 
+## [2.100.23] - 2026-10-26
+
 ### Added
-- Introduces `utils/segments.py` containing helper functions for normalizing, splitting and merging text segments.
+- `utils/segments.py` helpers for validating, normalizing and joining word-timed segments.
+- Stats: cache read and write tokens on model usage, per-run totals and
+  contributing calls. A cache hit rate (reads over input) shows on the model
+  usage table, the contributing calls panel, the per-run phase breakdown and
+  the LLM token tile (#897).
+- Pricing: `model_pricing` stores a cache read rate from the OpenRouter API or
+  LiteLLM, filled in from a later source when the primary one lacks it.
+  Operator overrides accept `cacheReadCostPerMtok`, and the Settings pricing
+  form has an optional cached input field. Estimated costs on OpenAI-compatible
+  and OpenRouter rows bill cached input at that rate (#897).
 
 ### Changed
 - README rewritten as a short overview: one-line feature bullets that link
@@ -22,10 +33,6 @@ release notes.
   docs link to it instead of restating it, and upgrade history narration is
   rewritten as current behavior. Stale glossary entries, the podcast search
   default, old button labels and a dead anchor are fixed.
-- Transcribers normalize raw transcript segments immediately after creation,
-  primarily to guarantee ordering and eliminate word-pairs ASAP.
-- Use `segments.join_word_segments()` to convert raw word lists into text,
-  preventing misrendering of space-prefixed words.
 
 - openapi.yaml carries a fixed placeholder version. The served spec already
   substitutes the running version from version.py, so the file no longer needs
@@ -34,6 +41,9 @@ release notes.
 ### Fixed
 - Ollama: a call whose prompt Ollama silently truncated to fit num_ctx now fails instead of returning an answer written without the instructions. The native client compares `prompt_eval_count` with num_ctx/2 and the prompt's own size estimate. The error names num_ctx, a lost detection window is counted under the new `context_overflow` loss class, and a chapter run degraded by it says so in its degradation reason. (#893)
 - Docs: the Ollama context window advice now recommends 32768 or higher. Chapter prompts with the default 2700 s windows run 18k to 23k tokens, so the old "8192 or higher" advice left every chapter call truncated. (#893)
+- Transcript text built from word timings no longer renders split Whisper tokens as
+  "AT &T .com"; words are normalized (merged, space-prefixed, sorted) as soon as a
+  backend returns them (#899).
 - OpenAPI: the per-episode cost runs endpoint and the processing-admission
   pause endpoint are documented, and descriptions drop dash asides, version
   history and two stale README pointers.
