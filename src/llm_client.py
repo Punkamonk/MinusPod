@@ -106,6 +106,7 @@ _JSON_SCHEMA_SETTING_KEY = 'llm_json_schema_supported'
 # verify uses force_new clients, so without this memo an always-inconclusive
 # endpoint would be probed again on every verification (~5 min cadence).
 _SCHEMA_PROBE_ATTEMPTED: set[tuple[str, str]] = set()
+_schema_probe_lock = threading.Lock()
 
 # Both probe results are a JSON {model: bool} map, keyed by model rather than
 # endpoint (#693): one URL can serve models that differ, and one model's 400
@@ -391,9 +392,9 @@ def _omit_temperature_override() -> bool:
     return coerce_bool_setting(_get_cached_setting('omit_temperature'))
 
 
-def supports_json_schema_for_calls(model: str | None = None) -> bool:
-    """Return the configured schema-probe result for the active OpenAI endpoint."""
-    if get_effective_provider() != PROVIDER_OPENAI_COMPATIBLE:
+def supports_json_schema_for_calls(model: str | None = None, provider: str | None = None) -> bool:
+    """Schema-probe result for the routed (else global) OpenAI-compatible provider."""
+    if (provider or get_effective_provider()) != PROVIDER_OPENAI_COMPATIBLE:
         return False
     if not coerce_bool_setting(_get_cached_setting('llm_json_schema_enabled')):
         return False
@@ -1903,10 +1904,12 @@ class OpenAICompatibleClient(LLMClient):
             if self._get_json_schema_supported(model) is not None:
                 continue
             key = (self.base_url, model)
-            if key in _SCHEMA_PROBE_ATTEMPTED:
-                continue
-            _SCHEMA_PROBE_ATTEMPTED.add(key)
-            self.probe_json_schema_support(model=model)
+            # Both slots may verify at once; one probe per endpoint and model.
+            with _schema_probe_lock:
+                first = key not in _SCHEMA_PROBE_ATTEMPTED
+                _SCHEMA_PROBE_ATTEMPTED.add(key)
+            if first:
+                self.probe_json_schema_support(model=model)
 
     @staticmethod
     def _configured_models(fallback_model: str) -> list[str]:
@@ -2216,6 +2219,17 @@ def _normalize_base_url_for_provider(provider: str, base_url: str) -> str:
     return base_url
 
 
+def _slot_base_url(base_url: str | None, credential_slot: str) -> str:
+    """Raw endpoint for a non-Anthropic slot: an explicit URL, else the slot's own setting."""
+    if base_url:
+        return base_url
+    if credential_slot == 'secondary':
+        return _get_cached_setting('secondary_provider_base_url') or DEFAULT_OPENAI_BASE_URL
+    if credential_slot == 'failover':
+        return _get_cached_setting('failover_llm_base_url') or DEFAULT_OPENAI_BASE_URL
+    return get_effective_base_url()
+
+
 def _resolve_cache_key(provider_key: str, base_url: str | None = None,
                        credential_slot: str = 'primary') -> tuple[str, str | None, str]:
     """Client cache key for a provider: (provider_key, normalized_base, credential_slot).
@@ -2243,7 +2257,7 @@ def _resolve_cache_key(provider_key: str, base_url: str | None = None,
                    or os.getenv('SYSTEMONE_BASE_URL') or '')
         return (provider_key, raw.rstrip('/'), credential_slot)
     if provider_key in PROVIDERS_NON_ANTHROPIC:
-        raw = base_url or get_effective_base_url()
+        raw = _slot_base_url(base_url, credential_slot)
         return (provider_key, _normalize_base_url_for_provider(provider_key, raw), credential_slot)
     return (provider_key, base_url, credential_slot)
 
@@ -2451,7 +2465,7 @@ def _build_client(provider: str, base_url: str | None = None,
             }
         )
     elif provider in PROVIDERS_NON_ANTHROPIC:
-        raw_base_url = base_url or get_effective_base_url()
+        raw_base_url = _slot_base_url(base_url, credential_slot)
         normalized_base_url = _normalize_base_url_for_provider(provider, raw_base_url)
         if provider == PROVIDER_OLLAMA:
             if normalized_base_url != raw_base_url:
@@ -2538,7 +2552,34 @@ def _verify_endpoint(label: str) -> bool:
         return False
 
 
+def _probe_secondary_provider_formats() -> None:
+    """Probe response_format support on the secondary slot's endpoint."""
+    try:
+        provider = _get_cached_setting('secondary_provider')
+        if provider not in (PROVIDER_OPENAI_COMPATIBLE, PROVIDER_OLLAMA):
+            return
+        client = get_client_for_provider(provider, credential_slot='secondary')
+        if hasattr(client, 'verify_connection'):
+            client.verify_connection(timeout=HTTP_TIMEOUT_API)
+    except Exception as e:
+        logger.warning(f"Secondary provider probe skipped: {e}")
+
+
+def probe_secondary_provider_formats() -> None:
+    """Probe an enabled secondary slot on a daemon thread so boot and saves never wait on it."""
+    if not coerce_bool_setting(_get_cached_setting('secondary_provider_enabled')):
+        return
+    threading.Thread(target=_probe_secondary_provider_formats, daemon=True).start()
+
+
 def verify_llm_connection() -> bool:
+    """Verify the primary endpoint at startup, then probe the secondary slot."""
+    ok = _verify_primary_connection()
+    probe_secondary_provider_formats()
+    return ok
+
+
+def _verify_primary_connection() -> bool:
     """Verify the LLM endpoint is reachable at startup.
 
     For OpenRouter and openai-compatible providers (including Ollama),

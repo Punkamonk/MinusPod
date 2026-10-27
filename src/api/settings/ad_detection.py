@@ -44,7 +44,7 @@ from database.settings import (
 from user_agent import invalidate_cache as invalidate_user_agent_cache
 from rate_limit_hold import clear_holds_for_provider_change
 from llm_client import (
-    get_effective_provider, get_llm_client,
+    get_effective_provider,
 )
 from llm_route import (
     VALID_SLOTS, SAME_AS_PASS,
@@ -810,8 +810,7 @@ def _apply_processing_flags(db, data):
     if 'llmJsonSchemaEnabled' in data:
         value = 'true' if data['llmJsonSchemaEnabled'] else 'false'
         db.set_setting('llm_json_schema_enabled', value, is_default=False)
-        # Re-probe on the next endpoint verification now that the opt-in
-        # changed.
+        # The opt-in changed, so both slots need fresh probe answers.
         provider_phases._clear_format_probes(db)
         logger.info(f"Updated llm_json_schema_enabled to: {value}")
     return None
@@ -1799,12 +1798,8 @@ def reset_ad_detection_settings():
 
     for key in AD_RESET_SETTING_KEYS:
         db.reset_setting(key)
-    provider_phases._clear_format_probes(db)
 
-    # Recreate LLM client with reset settings
-    client = get_llm_client(force_new=True)
-    if hasattr(client, 'probe_json_format_support'):
-        client.probe_json_format_support()
+    provider_phases._forget_endpoint_state(db)
 
     provider_phases._mark_whisper_for_reload()
 

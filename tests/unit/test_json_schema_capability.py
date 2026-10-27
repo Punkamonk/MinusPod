@@ -17,7 +17,7 @@ from llm_client import (
     _JSON_FORMAT_SETTING_KEY as JSON_FORMAT_KEY,
     _JSON_SCHEMA_SETTING_KEY as JSON_SCHEMA_KEY,
 )
-from utils.llm_call import call_llm_for_window
+from utils.llm_call import call_llm_for_window, schema_format_for
 
 
 def _db():
@@ -225,6 +225,19 @@ class TestSupportsJsonSchemaForCalls:
     def test_true_for_openai_compatible_when_opted_and_probed(self):
         self._configure('openai-compatible', enabled=True, probed=True)
         assert supports_json_schema_for_calls('m') is True
+
+    def test_routed_openai_compatible_behind_other_global_provider(self):
+        self._configure('typesafe', enabled=True, probed=True)
+        assert supports_json_schema_for_calls('m', 'openai-compatible') is True
+
+    def test_routed_other_provider_behind_openai_compatible_global(self):
+        self._configure('openai-compatible', enabled=True, probed=True)
+        assert supports_json_schema_for_calls('m', 'openrouter') is False
+
+    def test_schema_format_for_passes_route_provider(self):
+        self._configure('typesafe', enabled=True, probed=True)
+        fmt = schema_format_for('m', 'n', {'type': 'object'}, provider='openai-compatible')
+        assert fmt['type'] == 'json_schema'
 
     def test_false_when_not_opted_in(self):
         self._configure('openai-compatible', enabled=False, probed=True)
