@@ -297,7 +297,12 @@ class TestTrimRecoverySchema:
         props = TRIM_RECOVERY_JSON_SCHEMA['properties']
         assert props['ad_start']['type'] == ['number', 'null']
         assert props['ad_end']['type'] == ['number', 'null']
-        assert 'required' not in TRIM_RECOVERY_JSON_SCHEMA
+        assert TRIM_RECOVERY_JSON_SCHEMA['required'] == ['ad_start', 'ad_end']
+
+    def test_review_items_require_only_the_verdict_and_reason(self):
+        from ad_reviewer import AD_REVIEW_JSON_SCHEMA
+        items = AD_REVIEW_JSON_SCHEMA['properties']['ads']['items']
+        assert items['required'] == ['is_ad', 'reason']
 
     def test_prompt_asks_for_the_object_form_not_bare_null(self):
         from ad_reviewer import _TRIM_RECOVERY_SYSTEM_PROMPT
@@ -387,7 +392,7 @@ class TestModeDetectionSchema:
         required = self._items('timestamps')['required']
         assert required[:2] == ['start', 'end']
         assert 'start_id' not in required
-        assert {'end_text', 'category', 'confidence', 'reason'} <= set(required)
+        assert {'start_text', 'end_text', 'category', 'confidence', 'reason'} <= set(required)
 
     def test_segment_ids_mode_requires_ids_not_timestamps(self):
         required = self._items('segment_ids')['required']

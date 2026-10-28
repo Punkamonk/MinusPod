@@ -11,7 +11,26 @@ release notes.
 
 ## [Unreleased]
 
+## [2.100.26] - 2026-10-28
+
+### Added
+
+- The local upload size limit is now a setting (Settings > Audio > Max upload
+  size, or `localUploadMaxMb` in the API; default 1 GB, range 1 to 4096 MB).
+  The server's own 413 response names the limit, and the docs explain the
+  Cloudflare and nginx body-size caps that can sit in front of it (#920).
+
 ### Fixed
+
+- A known ad always cuts. A marker backed by a fingerprint match, a sponsor
+  text pattern, a defined pattern, a sponsor with an active pattern, a
+  confirmation or a reviewer verdict now owns any audio it shares with a
+  keep-category marker. Kept audio never carves it, and a verification catch
+  naming a known sponsor is no longer dropped for lying inside a kept span.
+  Before, an outro pattern whose end was only an average-length estimate could
+  swallow the start of a fingerprinted sponsor read, and every later stage
+  deferred to that estimate. The operator's per-category keep still applies to
+  markers of that category.
 - Ollama: the JSON schema response format toggle now applies to Ollama, which
   sends the detection schema as the native `/api/chat` `format` (no probe).
   In plain JSON mode a model cannot return the ad list the prompt asks for:
@@ -21,6 +40,24 @@ release notes.
   that requires the fields the prompt requires and caps free text, since an
   enforcing decoder otherwise skips category and end_text and can loop inside
   a string until max_tokens.
+- JSON schema responses require what the prompt requires. The per-mode
+  detection schema now also requires `start_text`, the reviewer schema
+  requires `is_ad` and `reason` on every item, and the trim-recovery schema
+  requires both nullable edges, so an enforcing decoder cannot drop the
+  verdict or an edge quote.
+
+### Changed
+
+- Docs: Parakeet is now the recommended local transcription backend. The
+  `WHISPER_BACKEND` default is unchanged.
+
+- CI runs pytest on all runner cores with pytest-xdist. Two run-log tests
+  that log a lone surrogate now route it to the recorder without the root
+  logger, since xdist cannot send that text back from a worker, and a
+  prefetch test waits for the lookahead before changing the chunk size.
+  Tests share one database, so a fixture now reverts any setting a test
+  leaves behind and the missing-stack transcriber tests reset the model
+  singleton; the suite passes under every xdist distribution mode.
 
 ## [2.100.24] - 2026-10-27
 

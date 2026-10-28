@@ -160,6 +160,32 @@ def normalize_segment_category(value: Any) -> str:
     return value if value in SEGMENT_CATEGORIES else 'sponsor'
 
 
+AD_CATEGORIES = ('sponsor', 'cross_promo', 'self_promo', 'interaction')
+_KNOWN_AD_VALIDATION_KEYS = ('confirmed_span', 'user_confirmed', 'sponsor_confirmed')
+
+
+def _has_fingerprint_evidence(marker: dict) -> bool:
+    """A merged-in fingerprint member counts; lazy import, utils imports this module."""
+    from utils.markers import recorded_member_spans
+    return any(span.get('stage') == 'fingerprint' for span in recorded_member_spans(marker))
+
+
+def is_known_ad(marker: dict) -> bool:
+    """An ad-category marker with evidence beyond an LLM guess; it always cuts."""
+    if normalize_segment_category(marker.get('category')) not in AD_CATEGORIES:
+        return False
+    validation = marker.get('validation') or {}
+    return bool(
+        marker.get('pattern_defined')
+        or (marker.get('pattern_id') is not None and marker.get('sponsor'))
+        or marker.get('sponsor_known')
+        or marker.get('fingerprint_match_start') is not None
+        or marker.get('_confirmed_correction') is not None
+        or marker.get('reviewer_verdict') == 'confirmed'
+        or any(validation.get(key) for key in _KNOWN_AD_VALIDATION_KEYS)
+        or _has_fingerprint_evidence(marker))
+
+
 # Per-category community-sync acceptance (issue #565): which categories this
 # install pulls from community sync. Defaults to every category, so an
 # upgrade with an unset setting syncs exactly as it did before this feature.
@@ -2579,6 +2605,9 @@ MAX_ARTWORK_BYTES_MIN = 64 * 1024
 MAX_ARTWORK_BYTES_MAX = 50 * 1024 * 1024
 MAX_RSS_BYTES_MIN = 1024 * 1024
 MAX_AUDIO_DOWNLOAD_MB_MIN = 1
+LOCAL_UPLOAD_MAX_MB_MIN = 1
+LOCAL_UPLOAD_MAX_MB_MAX = 4096
+LOCAL_UPLOAD_MAX_MB_DEFAULT = 1024
 # Advisory threshold only -- the download cap is the disk-fill guard, so
 # values past 10 GB log a warning but are honored (no hard ceiling; a
 # clamp would regress deployments that deliberately run above it).
