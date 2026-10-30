@@ -11,6 +11,154 @@ release notes.
 
 ## [Unreleased]
 
+## [2.101.6] - 2026-10-30
+
+### Added
+
+- Settings > YouTube has a Reset to defaults action for its tunables, daily update toggle, proxy and extra arguments. The feature switch, Data API key and cookies file are kept.
+
+### Changed
+
+- Settings > YouTube lists the proxy and extra-argument fields first and keeps the yt-dlp version, daily update toggle and Update now button together below them.
+
+## [2.101.5] - 2026-10-30
+
+### Fixed
+
+- The metadata backfill gives up on a video after three failed lookups
+  instead of retrying forever.
+- The placeholder cleanup also removes placeholders whose processing attempt
+  failed.
+- Deleting a feed also removes its pending rows from the processing queue, so
+  a removed feed cannot be picked up for processing again.
+
+## [2.101.4] - 2026-10-30
+
+### Added
+
+- An Extra yt-dlp arguments setting under Settings > YouTube adds options
+  such as a rate limit to every yt-dlp call. Options that run programs, move
+  files, read local files, change the JSON output or update the binary are
+  rejected.
+- A Proxy URL setting under Settings > YouTube routes yt-dlp and YouTube Data
+  API requests through an HTTP or SOCKS proxy.
+- A YouTube feed can hold a single video: paste a watch, youtu.be, live or
+  shorts URL on Add feed and the feed serves that one episode. The preview
+  card shows the source kind as Video.
+
+### Fixed
+
+- Private and deleted playlist entries no longer appear as episodes titled
+  with a bare video id.
+- A one-shot cleanup removes the placeholder episodes those
+  entries already created.
+- Processing stats record the chapters stage when publisher chapters are
+  preserved, and show a SponsorBlock lookup stage on YouTube runs.
+
+### Changed
+
+- The YouTube playlist listing sends the cookies file and hides private and
+  deleted episodes by default. A global "Hide private and deleted episodes"
+  setting with a per-feed override lists them instead, titled "Private episode"
+  until the real title is known.
+- SponsorBlock-only runs skip audio analysis, since marks are cut as given
+  and nothing reads the signals. The stats table shows the stage as skipped.
+
+## [2.101.3] - 2026-10-30
+
+### Changed
+
+- A YouTube feed lists every discovered episode with its upload date, up to
+  the feed's episode cap. The first play of an unprocessed episode starts
+  processing, as on subscribed and local feeds. Turn on "Only expose
+  processed episodes" for the feed to list finished episodes only.
+
+### Fixed
+
+- Processed YouTube episodes appear in the combined Recents feed and the
+  Recents list, like subscribed and local episodes.
+- YouTube publish times stored as midnight are upgraded to the video's
+  exact time by the metadata backfill, which also reads release timestamps.
+
+## [2.101.2] - 2026-10-30
+
+### Fixed
+
+- YouTube episode descriptions and exact publish times are filled for
+  episodes that were only discovered, not downloaded. A background pass reads
+  the metadata of up to 10 episodes per refresh cycle without downloading
+  audio, so a feed added without an API key fills in over the first hour.
+- A reprocess that reuses the retained original audio of a YouTube episode
+  fetches the captions again instead of losing them, and a saved transcript is
+  never wiped when the run cannot regenerate it.
+- The known-sponsor hint no longer fails with a missing database when the
+  reviewer is its first caller.
+- The feed page action row keeps Delete on screen while Refresh is pending at
+  phone widths.
+
+### Changed
+
+- YouTube episodes with SponsorBlock marks also run the learned ad
+  patterns (audio fingerprints and text patterns) with the LLM off, and the
+  marks themselves are learned as patterns after the cut. A pattern hit that
+  overlaps a mark gives way to the mark. The LLM runs only without marks or
+  with Pass 1 detection on.
+- On a YouTube feed, Full reprocess and Re-detect ads force pass 1 LLM
+  detection for that episode even when marks exist. The episode and dashboard
+  menus say which mode runs marks, patterns and the LLM pass.
+
+## [2.101.1] - 2026-10-30
+
+### Fixed
+
+- SponsorBlock-only runs no longer invoke the LLM reviewer, so community
+  timestamps are cut as given instead of being nudged.
+- YouTube episode descriptions and exact publish times are filled from the
+  video metadata at download when the listing had none (feeds listed with
+  yt-dlp carry no descriptions until then).
+- YouTube caption transcripts drop speaker-change markers and bracketed
+  sound cues.
+- The feed URL copy button shares the action row with Reprocess, Refresh
+  and Delete at phone widths.
+- The YouTube feed panel keeps the same spacing as its neighbours.
+
+### Added
+
+- Transcribe when captions are missing: an optional transcription fallback
+  for YouTube feeds (global toggle with a per-feed override, off by
+  default). With it off, a video without captions is cut from SponsorBlock
+  marks only, and once SponsorBlock gives up with no marks it is served
+  unmodified.
+- YouTube feeds take their author from the source and let you edit author,
+  explicit and categories, so the served channel carries the iTunes tags.
+
+## [2.101.0] - 2026-10-29
+
+### Added
+
+- YouTube feeds (#898). Add a playlist or channel from the Add feed page and
+  MinusPod turns it into a podcast feed. SponsorBlock community marks are the
+  cut source by default, with a configurable processing delay, probe loop and
+  watch window before the LLM pipeline takes over (or instead of it, per feed).
+  Video captions become the transcript when present, creator chapters are
+  kept, and every knob lives in Settings > YouTube with per-feed overrides.
+  Each processed video's thumbnail is cached for per-episode artwork, and feed
+  artwork can be uploaded or refreshed from the source. Off by default.
+- yt-dlp 2026.10.26 ships in both images (baked floor) and self-updates daily
+  on the data volume, with an Update now button and an optional global
+  cookies file for yt-dlp.
+
+### Changed
+
+- Dockerfiles install Deno, the JavaScript runtime yt-dlp needs for YouTube.
+
+### Security
+
+- Dependency bumps folded in: lucide-react 1.61.0, react-router 8.5.0,
+  wavesurfer.js 8.0.3, vite 8.3.5, @testing-library/user-event 14.6.8,
+  soupsieve 3.0.4, actions/setup-python 7.1.0, docker/login-action 4.7.0
+  (#902, #903, #905, #906, #907, #908, #909, #910).
+
 ## [2.100.26] - 2026-10-28
 
 ### Added

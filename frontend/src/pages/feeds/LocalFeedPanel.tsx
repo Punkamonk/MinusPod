@@ -13,13 +13,15 @@ import { ApiError, getErrorMessage } from '../../api/client';
 import { formatStorage } from '../settings/settingsUtils';
 import { getSettings } from '../../api/settings';
 import {
-  updateFeed, uploadFeedArtwork, uploadLocalEpisode,
+  updateFeed, uploadLocalEpisode,
   importUpload, importScan, importCommit, importStatus, clearImportStaging,
 } from '../../api/feeds';
 import type { UpdateFeedPayload, ImportPlan, ImportSource, ImportRejectedFile } from '../../api/feeds';
 import type { Feed } from '../../api/types';
 import { btnBase, btnGhost, btnLg, btnPrimary, btnSecondary, btnOutline } from '../../components/buttonStyles';
 import { fileInputBase, inputBase, labelBase, selectBase, textareaBase } from '../../components/fieldStyles';
+import FeedArtworkUpload from './FeedArtworkUpload';
+import { FeedMetadataFields, parseCategories } from './FeedMetadataForm';
 import { useSyncFromQuery } from '../../hooks/useSyncFromQuery';
 import { fromDatetimeLocalInput } from '../../utils/format';
 
@@ -324,16 +326,9 @@ function LocalFeedPanel({ feed, slug }: Props) {
     },
   });
 
-  const artworkMutation = useMutation({
-    mutationFn: (file: File) => uploadFeedArtwork(slug, file),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['feed', slug] });
-    },
-  });
-
   const handleSaveMetadata = (e: React.FormEvent) => {
     e.preventDefault();
-    const categories = categoriesInput.split(',').map((c) => c.trim()).filter(Boolean);
+    const categories = parseCategories(categoriesInput);
 
     // Clean every tag's rows and check each def's client-side requirements
     // (presence, shape, row count) before this ever reaches the API --
@@ -605,55 +600,19 @@ function LocalFeedPanel({ feed, slug }: Props) {
         <form onSubmit={handleSaveMetadata} className="space-y-4 mb-6">
           <fieldset disabled={metaMutation.isPending} className="space-y-4">
           <h3 className={subHeading}>Feed metadata</h3>
-          <div>
-            <label htmlFor={`local-title-${slug}`} className={labelBase}>Title</label>
-            <input
-              id={`local-title-${slug}`}
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              required
-              className={`w-full ${inputBase}`}
-            />
-          </div>
-          <div>
-            <label htmlFor={`local-description-${slug}`} className={labelBase}>Description</label>
-            <textarea
-              id={`local-description-${slug}`}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={6}
-              className={`w-full ${textareaBase}`}
-            />
-          </div>
-          <div>
-            <label htmlFor={`local-author-${slug}`} className={labelBase}>Author</label>
-            <input
-              id={`local-author-${slug}`}
-              type="text"
-              value={author}
-              onChange={(e) => setAuthor(e.target.value)}
-              className={`w-full ${inputBase}`}
-            />
-          </div>
-          <Checkbox
-            checked={explicit}
-            onChange={setExplicit}
-            label="Explicit content"
+          <FeedMetadataFields
+            slug={slug}
+            idPrefix="local"
+            fields={['title', 'description', 'author', 'explicit', 'categories']}
+            values={{ title, description, author, explicit, categoriesInput }}
+            onChange={(patch) => {
+              if (patch.title !== undefined) setTitle(patch.title);
+              if (patch.description !== undefined) setDescription(patch.description);
+              if (patch.author !== undefined) setAuthor(patch.author);
+              if (patch.explicit !== undefined) setExplicit(patch.explicit);
+              if (patch.categoriesInput !== undefined) setCategoriesInput(patch.categoriesInput);
+            }}
           />
-          <div>
-            <label htmlFor={`local-categories-${slug}`} className={labelBase}>Categories</label>
-            <input
-              id={`local-categories-${slug}`}
-              type="text"
-              value={categoriesInput}
-              onChange={(e) => setCategoriesInput(e.target.value)}
-              placeholder="Technology, Business"
-              className={`w-full ${inputBase}`}
-              aria-describedby={`local-categories-${slug}` + '-help'}
-            />
-            <p id={`local-categories-${slug}` + '-help'} className="mt-1 text-sm text-muted-foreground">Comma-separated, e.g. Technology, Business</p>
-          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label htmlFor={`local-medium-${slug}`} className={labelBase}>Medium</label>
@@ -690,25 +649,7 @@ function LocalFeedPanel({ feed, slug }: Props) {
               />
             </div>
           </div>
-          <div>
-            <label htmlFor={`local-artwork-${slug}`} className={labelBase}>Artwork</label>
-            <input
-              id={`local-artwork-${slug}`}
-              type="file"
-              accept="image/jpeg,image/png"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                e.target.value = '';
-                if (file) artworkMutation.mutate(file);
-              }}
-              className={fileInputBase}
-            />
-            {artworkMutation.isPending && <p className="mt-1 text-sm text-muted-foreground">Uploading...</p>}
-            {artworkMutation.isSuccess && <p className="mt-1 text-sm text-success">Artwork updated.</p>}
-            {artworkMutation.isError && (
-              <p className="mt-1 text-sm text-destructive">{getErrorMessage(artworkMutation.error, 'Could not upload artwork.')}</p>
-            )}
-          </div>
+          <FeedArtworkUpload slug={slug} />
 
           <CollapsibleSection
             title="Podcasting 2.0 tags"

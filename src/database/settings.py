@@ -56,6 +56,7 @@ from secrets_crypto import (
     SECRET_SETTING_KEYS,
 )
 from utils.time import is_valid_timezone
+from youtube import settings as yt_settings
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,7 @@ class SettingSpec:
                     deliberately not resettable; do not flip these to True
                     without checking the original exclusion rationale.
     in_ad_reset:    member of the bulk POST /settings/ad-detection/reset list.
+    in_youtube_reset: member of the POST /settings/youtube/reset list.
     payload_key:    camelCase name in the GET /settings 'defaults' block
                     (None = absent from that block).
     payload_kind:   coercion for the defaults block: str|bool|int|float.
@@ -258,6 +260,7 @@ class SettingSpec:
     seeded: bool = False
     resettable: bool = True
     in_ad_reset: bool = False
+    in_youtube_reset: bool = False
     payload_key: str | None = None
     payload_kind: str = 'str'
     payload_factory: Callable[[], Any] | None = None
@@ -840,6 +843,25 @@ SETTINGS_REGISTRY: dict[str, SettingSpec] = {
         default=str(LOCAL_UPLOAD_MAX_MB_DEFAULT), seeded=True,
         validator=_int_in_range((LOCAL_UPLOAD_MAX_MB_MIN, LOCAL_UPLOAD_MAX_MB_MAX)),
         payload_key='localUploadMaxMb', payload_kind='int'),
+    # YouTube feeds (#898)
+    **{db_key: SettingSpec(default=str(yt_settings.DEFAULTS[db_key]), seeded=True, in_youtube_reset=True,
+                           validator=_int_in_range(yt_settings.BOUNDS[camel]))
+       for camel, db_key in yt_settings.INT_KEYS.items()},
+    **{db_key: SettingSpec(default=str(default).lower(), seeded=True, validator=_one_of('true', 'false'),
+                           in_youtube_reset=db_key != 'youtube_enabled',
+                           **({'payload_key': 'youtubeEnabled', 'payload_kind': 'bool'}
+                              if db_key == 'youtube_enabled' else {}))
+       for db_key, default in yt_settings.DEFAULTS.items() if isinstance(default, bool)},
+    'youtube_ytdlp_extra_args': SettingSpec(
+        default=yt_settings.DEFAULTS['youtube_ytdlp_extra_args'], seeded=True, in_youtube_reset=True,
+        validator=yt_settings.extra_args_valid),
+    'youtube_proxy_url': SettingSpec(
+        default=yt_settings.DEFAULTS['youtube_proxy_url'], seeded=True, in_youtube_reset=True,
+        validator=yt_settings.proxy_url_valid),
+    'youtube_ytdlp_version': SettingSpec(resettable=False),
+    'youtube_ytdlp_last_update_at': SettingSpec(resettable=False),
+    'youtube_ytdlp_last_check_at': SettingSpec(resettable=False),
+    'youtube_ytdlp_last_error': SettingSpec(resettable=False),
     # Manual per-provider request-rate limits (#747); 0 = unlimited.
     'provider_requests_per_min': SettingSpec(
         env_backed=True, payload_key='providerRequestsPerMin', payload_kind='int'),
@@ -1002,6 +1024,10 @@ del _slot, _provider, _defaults
 # Ordered key list for POST /settings/ad-detection/reset.
 AD_RESET_SETTING_KEYS = tuple(
     key for key, spec in SETTINGS_REGISTRY.items() if spec.in_ad_reset)
+
+# Ordered key list for POST /settings/youtube/reset.
+YOUTUBE_RESET_SETTING_KEYS = tuple(
+    key for key, spec in SETTINGS_REGISTRY.items() if spec.in_youtube_reset)
 
 
 def _validate_registry():

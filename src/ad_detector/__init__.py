@@ -757,6 +757,7 @@ def _pattern_match_evidence(match, kind: str) -> str:
 
 
 _SPONSOR_MATCH_STAGES = ('fingerprint', 'text_pattern')
+LEARNABLE_STAGES = frozenset({'claude', 'sponsorblock'})
 
 
 def _known_sponsor_matchers(ads: list[dict],
@@ -1200,6 +1201,7 @@ class AdDetector:
         Never includes spans or timestamps (pass 1 stays blind to stage 2)."""
         if not podcast_slug:
             return ""
+        self._ensure_deps()
         try:
             patterns = self.db.get_ad_patterns(podcast_id=podcast_slug)
             sponsor_categories = self.db.get_sponsor_segment_categories()
@@ -2590,7 +2592,8 @@ class AdDetector:
         _check_cancel(cancel_event, slug, episode_id)
 
         # Stage 3: Claude API for remaining content
-        logger.info(f"[{slug}:{episode_id}] Stage 3: Claude API detection")
+        logger.info(f"[{slug}:{episode_id}] Stage 3: "
+                    f"{'LLM detection skipped' if skip_llm else 'Claude API detection'}")
 
         # Keep-content (whitelist) mode -- opt-in per feed. Label the show
         # content and remove the complement. If the content pass produces
@@ -2888,7 +2891,7 @@ class AdDetector:
         """Apply basic eligibility filters before sponsor resolution.
 
         Returns True if the ad should proceed to sponsor extraction.
-        Filters: was_cut, detection_stage == 'claude', confidence floor,
+        Filters: was_cut, detection_stage in LEARNABLE_STAGES, confidence floor,
         and stricter confidence for long (>90s) detections.
         """
         # Learn from removed ads, or a keep/mark-action marker: it still
@@ -2901,8 +2904,7 @@ class AdDetector:
         if ad.get('_skip_pattern_learning'):
             return False
 
-        # Only learn from Claude detections (not fingerprint/text pattern)
-        if ad.get('detection_stage') != 'claude':
+        if ad.get('detection_stage') not in LEARNABLE_STAGES:
             return False
 
         # Require high confidence
@@ -2936,9 +2938,9 @@ class AdDetector:
 
     @staticmethod
     def _learning_candidates(ad: dict, min_piece_s: float) -> list[dict]:
-        """The marker itself when claude found it, else the stretches of its claude members no pattern explains."""
+        """The marker itself when a learnable stage found it, else the stretches of its claude members no pattern explains."""
         stage = ad.get('detection_stage')
-        if stage == 'claude':
+        if stage in LEARNABLE_STAGES:
             return [ad]
         members = recorded_member_spans(ad)
         if not members:
@@ -3039,12 +3041,15 @@ class AdDetector:
         return canonical_sponsor(sponsor)
 
     def _sponsor_blocked_by_gates(
-        self, sponsor: str, active_pattern_sponsors: set
+        self, sponsor: str, active_pattern_sponsors: set, ad: dict | None = None
     ) -> bool:
         """Apply Gate A (prefix-of-known) and Gate B (unknown short single word).
 
         Returns True if the sponsor should be rejected.
         """
+        if (ad or {}).get('label_sponsor'):
+            return False
+
         # Gate A: reject sponsors that are strict prefixes of known sponsors
         if self.sponsor_service:
             sponsor_lower = sponsor.lower()
@@ -3174,7 +3179,7 @@ class AdDetector:
             if not sponsor:
                 continue
 
-            if self._sponsor_blocked_by_gates(sponsor, active_pattern_sponsors):
+            if self._sponsor_blocked_by_gates(sponsor, active_pattern_sponsors, candidate):
                 continue
 
             if candidate.get('_member_of'):

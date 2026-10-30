@@ -1,4 +1,5 @@
 import { pageTitle } from '../components/pageStyles';
+import { reprocessMenuCopy } from '../utils/reprocessMenu';
 import { useState, useRef, useMemo } from 'react';
 import { ChevronDown, Pencil, Plus } from 'lucide-react';
 import { useParams, Link } from 'react-router';
@@ -19,6 +20,8 @@ import { SkeletonPageHeader, SkeletonRows } from '../components/Skeleton';
 import Artwork from '../components/Artwork';
 import { episodeArtworkSrc } from '../utils/artworkUrl';
 import { isFailedStatus } from '../utils/episodeStatus';
+import { sponsorBlockLabel } from '../utils/sponsorBlock';
+import { getYouTubeSettings } from '../api/youtube';
 import StatusBadge from '../components/StatusBadge';
 import CloseButton from '../components/CloseButton';
 import { DETECTION_STAGE_META } from '../utils/detectionStage';
@@ -407,6 +410,11 @@ function EpisodeDetail() {
     queryKey: ['feed', slug],
     queryFn: () => getFeed(slug!),
     enabled: !!slug,
+  });
+  const { data: ytSettings } = useQuery({
+    queryKey: ['youtubeSettings'],
+    queryFn: getYouTubeSettings,
+    enabled: feed?.feedType === 'youtube',
   });
   const { data: settings, isPending: chapterSettingsPending, error: chapterSettingsError, refetch: reloadChapterSettings } = useQuery({
     queryKey: ['settings'],
@@ -884,6 +892,10 @@ function EpisodeDetail() {
     </div>
   );
 
+  const sbLabel = sponsorBlockLabel(
+    episode.sponsorBlock,
+    ytSettings ? (feed?.ytProbeAttemptsOverride ?? ytSettings.sbProbeAttempts) : undefined,
+  );
   const failureReason =
     isFailedStatus(episode.status) && episode.error ? episode.error : undefined;
 
@@ -904,9 +916,10 @@ function EpisodeDetail() {
   const redetectDisabled = REDETECT_DISABLED_MODES.has(feed?.processingMode);
   const chaptersRegenerating = regenerateChaptersMutation.isPending
     || !!episode.chaptersRegenerating;
+  const menuCopy = reprocessMenuCopy(feed?.feedType);
   const redetectTooltip = feed?.processingMode && redetectDisabled
     ? `Ad detection is off because this feed runs in ${REDETECT_DISABLED_MODE_LABELS[feed.processingMode]} mode`
-    : 'Re-run ad detection and re-cut using the existing transcript (skips re-transcription)';
+    : menuCopy.redetect.tooltip;
 
   // "Process" vs "Reprocess" is keyed on hasBeenProcessed (processedAt as a
   // pre-field fallback), not status: status cycles back to pending/processing
@@ -1032,6 +1045,7 @@ function EpisodeDetail() {
                 className={failureReason ? 'cursor-help' : undefined}
                 title={failureReason}
               />
+              {sbLabel && <span className="text-xs text-muted-foreground">{sbLabel}</span>}
               {episode.passthroughEnabled && (
                 <span
                   className={`${badgeBase} ${tint.neutral} cursor-help`}
@@ -1130,18 +1144,18 @@ function EpisodeDetail() {
                 disabled={reprocessBlocked}
                 title={reprocessTriggerTooltip}
                 items={[
-                  { title: reprocessLabel, subtitle: 'Use patterns + AI',
-                    tooltip: 'Use learned patterns + AI analysis',
+                  { title: reprocessLabel, subtitle: menuCopy.reprocess.subtitle,
+                    tooltip: menuCopy.reprocess.tooltip,
                     onClick: () => handleReprocess('reprocess') },
-                  { title: 'Full reprocess', subtitle: 'Skip patterns, AI only',
-                    tooltip: 'Skip pattern DB, AI analyzes everything fresh',
+                  { title: 'Full reprocess', subtitle: menuCopy.full.subtitle,
+                    tooltip: menuCopy.full.tooltip,
                     onClick: () => handleReprocess('full') },
                   ...(episode.hasOriginalAudio ? [{
                     title: 'Recut audio', subtitle: 'Apply edits, no AI',
                     tooltip: 'Re-cut the original audio from your current ad edits (no transcription or AI)',
                     onClick: () => handleReprocess('recut') }] : []),
                   ...(episode.transcriptAvailable ? [{
-                    title: 'Re-detect ads', subtitle: 'Keep transcript, re-cut',
+                    title: 'Re-detect ads', subtitle: menuCopy.redetect.subtitle,
                     disabled: redetectDisabled,
                     tooltip: redetectTooltip,
                     onClick: () => handleReprocess('llm') }] : []),

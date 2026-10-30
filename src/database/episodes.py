@@ -7,6 +7,7 @@ from email.utils import parsedate_to_datetime
 from typing import ClassVar
 
 from database.maintenance import _chunked
+from database.podcasts import RECENTS_MEMBER_FEED_TYPES
 # Shared with the stats mixin so both agree on what counts as processed.
 from database.stats import _PROCESSED_EPISODE_EXISTS_SQL
 from utils.constants import EpisodeStatus
@@ -387,7 +388,7 @@ class EpisodeMixin:
                                'low_yield_rerun_at', 'reprocess_source',
                                'season_number', 'p20_item_json',
                                'pending_recut_at', 'chapters_regen_error',
-                               'processed_size_bytes'):
+                               'processed_size_bytes', 'yt_metadata_at'):
                         fields.append(f"{key} = ?")
                         values.append(value)
                     elif key == 'tags':
@@ -1173,12 +1174,11 @@ class EpisodeMixin:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    # Membership of the recents feed (#721): processed episodes across
-    # subscribed and local feeds published on or after the cutoff. Publish
-    # date only: a backlog episode processed later keeps its old date.
+    # Recents feed membership (#721): processed episodes of member feed types published on or after
+    # the cutoff. Publish date only; type list is constants, not user input.
     _RECENTS_WHERE = ("FROM episodes e JOIN podcasts p ON p.id = e.podcast_id "
                       "WHERE e.status = 'processed' AND e.processed_file IS NOT NULL "
-                      "AND p.feed_type IN ('subscribed', 'local') "
+                      "AND p.feed_type IN (" + ", ".join(f"'{t}'" for t in RECENTS_MEMBER_FEED_TYPES) + ") "
                       "AND e.published_at IS NOT NULL AND e.published_at >= ?")
     _RECENTS_SOURCE_COLS = ("p.slug AS source_slug, "
                             "COALESCE(NULLIF(p.title_override, ''), NULLIF(p.title, ''), p.slug) AS source_title, "
@@ -1655,8 +1655,8 @@ class EpisodeMixin:
                    (podcast_id, episode_id, original_url, title, description,
                     artwork_url, episode_number, published_at, rss_duration,
                     upstream_chapters_url, upstream_transcript_url,
-                    upstream_transcript_type, tags, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered')
+                    upstream_transcript_type, tags, youtube_video_id, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered')
                    ON CONFLICT(podcast_id, episode_id) DO UPDATE SET
                     episode_number = COALESCE(excluded.episode_number, episodes.episode_number),
                     published_at = COALESCE(excluded.published_at, episodes.published_at),
@@ -1669,7 +1669,8 @@ class EpisodeMixin:
                     title = CASE WHEN COALESCE(episodes.title, '') = '' THEN excluded.title ELSE episodes.title END,
                     description = CASE WHEN COALESCE(episodes.description, '') = '' THEN excluded.description ELSE episodes.description END,
                     artwork_url = COALESCE(episodes.artwork_url, excluded.artwork_url),
-                    tags = CASE WHEN COALESCE(episodes.tags, '[]') = '[]' THEN excluded.tags ELSE episodes.tags END
+                    tags = CASE WHEN COALESCE(episodes.tags, '[]') = '[]' THEN excluded.tags ELSE episodes.tags END,
+                    youtube_video_id = COALESCE(episodes.youtube_video_id, excluded.youtube_video_id)
                    WHERE episodes.episode_number IS NOT COALESCE(episodes.episode_number, excluded.episode_number)
                       OR episodes.published_at IS NOT COALESCE(episodes.published_at, excluded.published_at)
                       OR episodes.rss_duration IS NOT COALESCE(episodes.rss_duration, excluded.rss_duration)
@@ -1681,7 +1682,8 @@ class EpisodeMixin:
                       OR episodes.title IS NOT CASE WHEN COALESCE(episodes.title, '') = '' THEN excluded.title ELSE episodes.title END
                       OR episodes.description IS NOT CASE WHEN COALESCE(episodes.description, '') = '' THEN excluded.description ELSE episodes.description END
                       OR episodes.artwork_url IS NOT COALESCE(episodes.artwork_url, excluded.artwork_url)
-                      OR episodes.tags IS NOT CASE WHEN COALESCE(episodes.tags, '[]') = '[]' THEN excluded.tags ELSE episodes.tags END""",
+                      OR episodes.tags IS NOT CASE WHEN COALESCE(episodes.tags, '[]') = '[]' THEN excluded.tags ELSE episodes.tags END
+                      OR episodes.youtube_video_id IS NOT COALESCE(episodes.youtube_video_id, excluded.youtube_video_id)""",
                 (
                     podcast_id,
                     ep['id'],
@@ -1696,6 +1698,7 @@ class EpisodeMixin:
                     ep.get('upstream_transcript_url'),
                     ep.get('upstream_transcript_type'),
                     tags_json,
+                    ep.get('video_id'),
                 )
             )
             if ep['id'] not in existing_by_id:
