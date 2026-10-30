@@ -13,6 +13,7 @@ from database.stats import _PROCESSED_EPISODE_EXISTS_SQL
 from utils.constants import EpisodeStatus
 from utils.text import is_timezone_drift, normalize_title_for_match
 from utils.time import ISO_FORMAT, parse_iso_utc, utc_now, utc_now_iso
+from utils.youtube_fields import MIDNIGHT_ONLY, PLACEHOLDER_TITLES
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,10 @@ def _remove_from_fuzzy_index(fuzzy_index: dict, row: dict | None) -> None:
             break
     if not bucket:
         fuzzy_index.pop(key, None)
+
+
+class PodcastNotFoundError(ValueError):
+    """Raised when a write targets a podcast that no longer exists."""
 
 
 class EpisodeMixin:
@@ -355,7 +360,7 @@ class EpisodeMixin:
         # Get podcast ID
         podcast = self.get_podcast_by_slug(slug)
         if not podcast:
-            raise ValueError(f"Podcast not found: {slug}")
+            raise PodcastNotFoundError(f"Podcast not found: {slug}")
 
         podcast_id = podcast['id']
 
@@ -1457,6 +1462,7 @@ class EpisodeMixin:
         podcast_id = podcast['id']
         inserted = 0
         skipped = 0
+        stamp_now = utc_now_iso() if podcast.get('feed_type') == 'youtube' else None
 
         normalized = []
         for episode in episodes:
@@ -1495,7 +1501,7 @@ class EpisodeMixin:
                 newly_inserted_pairs = []
                 for ep in chunk:
                     row_inserted, row_skipped = self._upsert_one_discovered_episode(
-                        conn, podcast_id, slug, ep, existing_by_id, title_date_map, fuzzy_index)
+                        conn, podcast_id, slug, ep, existing_by_id, title_date_map, fuzzy_index, stamp_now)
                     inserted += row_inserted
                     skipped += row_skipped
                     if row_inserted:
@@ -1594,7 +1600,7 @@ class EpisodeMixin:
         return best
 
     def _upsert_one_discovered_episode(
-            self, conn, podcast_id, slug, ep, existing_by_id, title_date_map, fuzzy_index):
+            self, conn, podcast_id, slug, ep, existing_by_id, title_date_map, fuzzy_index, stamp_now=None):
         """Upsert one discovered episode. Returns an (inserted, skipped) delta.
 
         Lock errors propagate so the whole batch fails and the caller retries the
@@ -1655,8 +1661,8 @@ class EpisodeMixin:
                    (podcast_id, episode_id, original_url, title, description,
                     artwork_url, episode_number, published_at, rss_duration,
                     upstream_chapters_url, upstream_transcript_url,
-                    upstream_transcript_type, tags, youtube_video_id, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered')
+                    upstream_transcript_type, tags, youtube_video_id, yt_metadata_at, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered')
                    ON CONFLICT(podcast_id, episode_id) DO UPDATE SET
                     episode_number = COALESCE(excluded.episode_number, episodes.episode_number),
                     published_at = COALESCE(excluded.published_at, episodes.published_at),
@@ -1699,6 +1705,9 @@ class EpisodeMixin:
                     ep.get('upstream_transcript_type'),
                     tags_json,
                     ep.get('video_id'),
+                    stamp_now if stamp_now and ep.get('description') and iso_published
+                    and not MIDNIGHT_ONLY.match(iso_published)
+                    and ep.get('title') not in PLACEHOLDER_TITLES.values() else None,
                 )
             )
             if ep['id'] not in existing_by_id:

@@ -465,3 +465,4 @@ def test_api_error_message_never_carries_the_proxy():
         with pytest.raises(discovery.DiscoveryError) as err:
             discovery._api_get('videos', {}, 'KEY', proxy='http://u:SECRET@p:1')
     assert 'SECRET' not in str(err.value)
+

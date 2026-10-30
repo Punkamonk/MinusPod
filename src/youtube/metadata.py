@@ -1,14 +1,15 @@
 """Backfill descriptions and exact publish times that flat yt-dlp listings lack."""
 import json
 import logging
-import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
+from database.episodes import PodcastNotFoundError
 from utils.time import epoch_to_iso, utc_now, utc_now_iso
-from youtube import discovery, download, ytdlp
+from utils.youtube_fields import MIDNIGHT_ONLY, PLACEHOLDER_TITLES
+from youtube import download, ytdlp
 from youtube import settings as yt_settings
 from youtube.urls import watch_url
 
@@ -17,7 +18,6 @@ logger = logging.getLogger(__name__)
 METADATA_TIMEOUT_S = 180
 BATCH = 10
 IDLE_INTERVAL = timedelta(minutes=10)
-_DATE_ONLY = re.compile(r'^\d{4}-\d{2}-\d{2}(T00:00:00(Z|\+00:00)?)?$')
 _next_run = None
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='yt-metadata')
 _future = None
@@ -37,13 +37,13 @@ def fill_fields(episode_row, info) -> dict:
     if description and not (episode_row or {}).get('description'):
         fields['description'] = description
     info = info or {}
-    if info.get('title') and (episode_row or {}).get('title') in discovery.PLACEHOLDER_TITLES.values():
+    if info.get('title') and (episode_row or {}).get('title') in PLACEHOLDER_TITLES.values():
         fields['title'] = info['title']
     timestamp = info.get('timestamp')
     if not isinstance(timestamp, (int, float)):
         timestamp = info.get('release_timestamp')
     published = (episode_row or {}).get('published_at')
-    if isinstance(timestamp, (int, float)) and (not published or _DATE_ONLY.match(str(published))):
+    if isinstance(timestamp, (int, float)) and (not published or MIDNIGHT_ONLY.match(str(published))):
         fields['published_at'] = epoch_to_iso(timestamp)
     return fields
 
@@ -97,7 +97,7 @@ def _run_batch(db):
                     ytdlp.update_after_failure(db, logger)
                 for row, vid in wanted:
                     if vid and _give_up(vid):
-                        db.upsert_episode(row['slug'], row['episode_id'], yt_metadata_at=utc_now_iso())
+                        _stamp(db, row)
         if ok:
             filled = 0
             for row, vid in wanted:
@@ -106,7 +106,7 @@ def _run_batch(db):
                 fields = fill_fields(row, infos.get(vid, {}))
                 if fields.get('description'):
                     filled += 1
-                db.upsert_episode(row['slug'], row['episode_id'], yt_metadata_at=utc_now_iso(), **fields)
+                _stamp(db, row, **fields)
             logger.info(f"YouTube metadata backfill: filled {filled} of {len(rows)} episode(s)")
     except Exception:
         ok = False
@@ -114,6 +114,13 @@ def _run_batch(db):
     finally:
         db.clear_leaked_transaction(logger, 'youtube metadata backfill')
     _next_run = None if ok else utc_now() + IDLE_INTERVAL
+
+
+def _stamp(db, row, **fields):
+    try:
+        db.upsert_episode(row['slug'], row['episode_id'], yt_metadata_at=utc_now_iso(), **fields)
+    except PodcastNotFoundError:
+        logger.debug(f"YouTube metadata backfill: skipping {row['slug']}/{row['episode_id']}, feed removed during backfill")
 
 
 def _give_up(vid) -> bool:

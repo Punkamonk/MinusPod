@@ -2904,6 +2904,10 @@ class AdDetector:
         if ad.get('_skip_pattern_learning'):
             return False
 
+        # A category label names no sponsor, so a text pattern from it is always rejected.
+        if ad.get('label_sponsor'):
+            return False
+
         if ad.get('detection_stage') not in LEARNABLE_STAGES:
             return False
 
@@ -3041,15 +3045,12 @@ class AdDetector:
         return canonical_sponsor(sponsor)
 
     def _sponsor_blocked_by_gates(
-        self, sponsor: str, active_pattern_sponsors: set, ad: dict | None = None
+        self, sponsor: str, active_pattern_sponsors: set
     ) -> bool:
         """Apply Gate A (prefix-of-known) and Gate B (unknown short single word).
 
         Returns True if the sponsor should be rejected.
         """
-        if (ad or {}).get('label_sponsor'):
-            return False
-
         # Gate A: reject sponsors that are strict prefixes of known sponsors
         if self.sponsor_service:
             sponsor_lower = sponsor.lower()
@@ -3179,7 +3180,7 @@ class AdDetector:
             if not sponsor:
                 continue
 
-            if self._sponsor_blocked_by_gates(sponsor, active_pattern_sponsors, candidate):
+            if self._sponsor_blocked_by_gates(sponsor, active_pattern_sponsors):
                 continue
 
             if candidate.get('_member_of'):

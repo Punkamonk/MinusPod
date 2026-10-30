@@ -11,6 +11,20 @@ release notes.
 
 ## [Unreleased]
 
+## [2.101.7] - 2026-10-30
+
+### Fixed
+
+- The YouTube metadata backfill skips a row whose feed was deleted mid-batch
+  instead of logging an error for the whole batch.
+- SponsorBlock marks named only by a category label no longer reach text-pattern
+  creation, which rejected them with warnings.
+
+### Changed
+
+- Listed videos that already carry a description and an exact publish time are
+  not revisited by the metadata backfill.
+
 ## [2.101.6] - 2026-10-30
 
 ### Added
